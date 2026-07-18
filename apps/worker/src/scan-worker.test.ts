@@ -222,6 +222,8 @@ describe("scan worker orchestration", () => {
       "detector:trading-control-selector-patterns:0",
       "detector:fee-exclusion-selector-patterns:0",
       "detector:source-code-risk-patterns:0",
+      "detector:ownership-roles-abi:0",
+      "detector:live-trading-state:0",
       "stage:ANALYZING_CONTRACT:SUCCEEDED",
       "state:DISCOVERING_MARKETS",
       "stage:DISCOVERING_MARKETS:RUNNING",

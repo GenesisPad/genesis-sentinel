@@ -22,6 +22,8 @@ import {
   createUnsupportedHolderAnalysis,
   createUnsupportedLiquidityDiscovery,
   createUnsupportedTradeSimulations,
+  liveTradingStateDetector,
+  ownershipRolesAbiDetector,
   runFoundationDetectors,
   scoreFindings,
   sourceCodeRiskDetector
@@ -50,6 +52,29 @@ async function readOwnerAddress(
   } catch {
     return null;
   }
+}
+
+/**
+ * Tries each candidate no-argument view function name in order and returns the first one that
+ * successfully decodes as a bool, or null if none of them exist/succeed. Used for live
+ * pause()/trading-toggle state reads where the exact function name varies between contracts
+ * and there is no ABI-guaranteed single name to call.
+ */
+async function readBoolCandidate(
+  adapter: ChainAdapter,
+  address: `0x${string}`,
+  candidateNames: string[],
+  blockNumber: bigint
+): Promise<boolean | null> {
+  for (const name of candidateNames) {
+    try {
+      const abi = parseAbi([`function ${name}() view returns (bool)`]);
+      return await adapter.readContract<boolean>({ address, abi, functionName: name, blockNumber });
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 function createHolderConcentrationDetectorResult(input: {
@@ -662,14 +687,32 @@ export async function processScanJob(
           address: target.address,
           sourceFiles: []
         } satisfies ContractSourceDetectorInput);
-    const sourceDetectorResult = await sourceCodeRiskDetector.run(sourceProfile, {
+    const detectorRunContext = {
       scanId: target.scanId,
       chainId: target.chainId,
       address: target.address,
       scannerVersion,
       blockNumber
-    });
-    detectorResults.push(sourceDetectorResult);
+    };
+    const sourceDetectorResult = await sourceCodeRiskDetector.run(sourceProfile, detectorRunContext);
+    const ownershipRolesResult = await ownershipRolesAbiDetector.run(
+      sourceProfile,
+      detectorRunContext
+    );
+    const liveTradingStateResult = await liveTradingStateDetector.run(
+      {
+        readPausedState: () => readBoolCandidate(adapter, target.address, ["paused"], blockNumber),
+        readTradingOpenState: () =>
+          readBoolCandidate(
+            adapter,
+            target.address,
+            ["tradingOpen", "tradingEnabled", "tradingActive"],
+            blockNumber
+          )
+      },
+      detectorRunContext
+    );
+    detectorResults.push(sourceDetectorResult, ownershipRolesResult, liveTradingStateResult);
     const detectorCompletedAt = now();
     for (const result of detectorResults) {
       await dependencies.scans.recordDetectorResult({

@@ -859,6 +859,36 @@ const sourceRiskRules: SourceRiskRule[] = [
       /\b(?:setTax|setTaxes|setFees|setBuyFee|setSellFee|buyTax|sellTax|taxFee|marketingFee|liquidityFee)\b/i,
       /\b(?:maxWallet|maxTx|maxTransaction|setMaxWallet|setMaxTx|excludeFromFees|isExcludedFromFee|whitelist)\b/i
     ]
+  },
+  {
+    code: "SOURCE_ROUTER_OR_PAIR_REPLACEMENT",
+    title: "Source code allows replacing the trading router or pair",
+    severity: "HIGH",
+    category: "TRADING_SAFETY",
+    confidence: "MEDIUM",
+    description:
+      "Verified source code contains functions that let a privileged role change which DEX router or trading pair the contract treats as canonical.",
+    technicalExplanation:
+      "The detector matched router- or pair-setter function names in verified source code.",
+    recommendation:
+      "Review who can call these setters and whether trade simulations against the currently configured router/pair remain valid after a change.",
+    patterns: [
+      /\bfunction\s+\w*(?:setRouter|setPair|updateRouter|updatePair|setUniswapRouter|setDexRouter)\w*\s*\(/i
+    ]
+  },
+  {
+    code: "SOURCE_ARBITRARY_EXTERNAL_CALL",
+    title: "Source code contains low-level arbitrary external calls",
+    severity: "HIGH",
+    category: "CONTRACT_CONTROL",
+    confidence: "MEDIUM",
+    description:
+      "Verified source code contains low-level .call/.delegatecall invocations with externally influenced targets or calldata, which can allow arbitrary code execution or fund movement outside normal ERC-20 semantics.",
+    technicalExplanation:
+      "The detector matched .call(, .delegatecall(, or .staticcall( low-level call syntax in verified source code, outside of standard OpenZeppelin library internals.",
+    recommendation:
+      "Inspect whether the call target and calldata are attacker- or admin-controlled, and whether the call is reachable by a privileged role or by any user.",
+    patterns: [/\.\s*(?:delegatecall|call)\s*(?:\{[^}]*\})?\s*\(/]
   }
 ];
 
@@ -931,6 +961,226 @@ export const sourceCodeRiskDetector: SecurityDetector<ContractSourceDetectorInpu
     return {
       detector: this.metadata,
       checks,
+      findings
+    };
+  }
+};
+
+function abiFunctionNames(abi: unknown): Set<string> {
+  if (!Array.isArray(abi)) {
+    return new Set();
+  }
+
+  const names = new Set<string>();
+  for (const entry of abi) {
+    if (
+      typeof entry === "object" &&
+      entry !== null &&
+      (entry as Record<string, unknown>).type === "function" &&
+      typeof (entry as Record<string, unknown>).name === "string"
+    ) {
+      names.add((entry as Record<string, unknown>).name as string);
+    }
+  }
+  return names;
+}
+
+/**
+ * Reads verified ABI function names directly (when source verification succeeded) instead of
+ * matching text patterns or bytecode selectors, to identify two-step ownership transfer and
+ * OpenZeppelin-style AccessControl roles. ABI presence is a stronger evidence class than a
+ * source-text regex match because it reflects the compiler's own recorded function signatures,
+ * but it still does not prove a role is currently held by anyone or that a function is
+ * reachable — see the finding's technicalExplanation.
+ */
+export const ownershipRolesAbiDetector: SecurityDetector<ContractSourceDetectorInput> = {
+  metadata: {
+    id: "ownership-roles-abi",
+    version: detectorVersion,
+    name: "Ownership and role ABI inspection",
+    description:
+      "Inspects verified contract ABI for two-step ownership transfer and AccessControl role functions."
+  },
+
+  async run(input, context) {
+    await Promise.resolve();
+    const evidence: FindingEvidence = {
+      type: "EXTERNAL_SOURCE",
+      summary: "Verified ABI function-name inspection",
+      address: context.address,
+      data: { abiAvailable: input.status === "VERIFIED" && Array.isArray(input.abi) }
+    };
+    if (context.blockNumber !== undefined) {
+      evidence.blockNumber = context.blockNumber;
+    }
+
+    if (input.status !== "VERIFIED" || !Array.isArray(input.abi)) {
+      return {
+        detector: this.metadata,
+        checks: [
+          {
+            code: "ABI_UNAVAILABLE",
+            outcome: "DATA_UNAVAILABLE",
+            confidence: "LOW",
+            evidence: [evidence]
+          }
+        ],
+        findings: []
+      };
+    }
+
+    const functionNames = abiFunctionNames(input.abi);
+    const hasTwoStepOwnership =
+      functionNames.has("pendingOwner") && functionNames.has("acceptOwnership");
+    const hasAccessControl =
+      (functionNames.has("hasRole") && functionNames.has("grantRole")) ||
+      functionNames.has("DEFAULT_ADMIN_ROLE");
+
+    const findings: SecurityFinding[] = [];
+    if (hasTwoStepOwnership) {
+      findings.push(
+        createFinding({
+          code: "TWO_STEP_OWNERSHIP_PATTERN",
+          detector: this.metadata,
+          title: "Contract uses a two-step ownership transfer pattern",
+          severity: "INFO",
+          category: "CONTRACT_CONTROL",
+          confidence: "HIGH",
+          description:
+            "The verified ABI exposes pendingOwner() and acceptOwnership(), indicating ownership transfers require a pending step before taking effect.",
+          technicalExplanation:
+            "Both function names were read directly from the verified contract ABI, not inferred from source text or bytecode selectors.",
+          evidence: [evidence],
+          recommendation:
+            "A simple owner()-equals-burn-address check may not reflect a pending transfer in progress; review pendingOwner() alongside owner()."
+        })
+      );
+    }
+    if (hasAccessControl) {
+      findings.push(
+        createFinding({
+          code: "ACCESS_CONTROL_ROLE_SURFACE",
+          detector: this.metadata,
+          title: "Contract exposes AccessControl-style privileged roles",
+          severity: "MEDIUM",
+          category: "CONTRACT_CONTROL",
+          confidence: "HIGH",
+          description:
+            "The verified ABI exposes role-based access control functions, indicating privileged capabilities may exist outside of a single owner() address.",
+          technicalExplanation:
+            "hasRole/grantRole or DEFAULT_ADMIN_ROLE were read directly from the verified contract ABI, not inferred from source text or bytecode selectors.",
+          evidence: [evidence],
+          recommendation:
+            "Review current role holders; a renounced owner() does not imply no privileged roles remain active."
+        })
+      );
+    }
+
+    return {
+      detector: this.metadata,
+      checks: [
+        {
+          code: findings.length > 0 ? "OWNERSHIP_ROLE_ABI_SURFACE_DETECTED" : "OWNERSHIP_ROLE_ABI_ABSENT",
+          outcome: findings.length > 0 ? "DETECTED" : "PASSED",
+          confidence: "HIGH",
+          evidence: [evidence]
+        }
+      ],
+      findings
+    };
+  }
+};
+
+export interface LiveTradingStateDetectorInput {
+  readPausedState(): Promise<boolean | null>;
+  readTradingOpenState(): Promise<boolean | null>;
+}
+
+/**
+ * Calls pause()/trading-toggle-style view functions live on-chain at the scan block, rather
+ * than only reporting that the capability exists (see pause-selector-patterns and
+ * trading-control-selector-patterns). A null result means the function could not be read
+ * (absent, reverted, or not a bool) and is reported as unavailable, never as a passing state.
+ */
+export const liveTradingStateDetector: SecurityDetector<LiveTradingStateDetectorInput> = {
+  metadata: {
+    id: "live-trading-state",
+    version: detectorVersion,
+    name: "Live trading state",
+    description: "Reads current pause and trading-enabled status directly on-chain."
+  },
+
+  async run(input, context) {
+    const [paused, tradingOpen] = await Promise.all([
+      input.readPausedState(),
+      input.readTradingOpenState()
+    ]);
+    const evidence: FindingEvidence = {
+      type: "FUNCTION",
+      summary: "Live pause()/trading-toggle state read at scan block",
+      address: context.address,
+      data: { paused, tradingOpen }
+    };
+    if (context.blockNumber !== undefined) {
+      evidence.blockNumber = context.blockNumber;
+    }
+
+    const findings: SecurityFinding[] = [];
+    if (paused === true) {
+      findings.push(
+        createFinding({
+          code: "TRADING_CURRENTLY_PAUSED",
+          detector: this.metadata,
+          title: "Contract is currently paused",
+          severity: "HIGH",
+          category: "TRADING_SAFETY",
+          confidence: "HIGH",
+          description:
+            "A live on-chain read at the scan block shows the contract's pause state is currently true.",
+          technicalExplanation:
+            "paused() was called directly on-chain at the scan block and returned true.",
+          evidence: [evidence],
+          recommendation:
+            "Do not assume trading is currently possible. Wait for a confirmed unpause before trusting buy/sell simulation results."
+        })
+      );
+    }
+    if (tradingOpen === false) {
+      findings.push(
+        createFinding({
+          code: "TRADING_CURRENTLY_DISABLED",
+          detector: this.metadata,
+          title: "Trading is currently disabled",
+          severity: "HIGH",
+          category: "TRADING_SAFETY",
+          confidence: "HIGH",
+          description:
+            "A live on-chain read at the scan block shows the contract's trading-enabled flag is currently false.",
+          technicalExplanation:
+            "A trading-toggle view function (tradingOpen/tradingEnabled/tradingActive) was called directly on-chain at the scan block and returned false.",
+          evidence: [evidence],
+          recommendation:
+            "Treat buy/sell simulations as inconclusive until trading is confirmed open; a contract can selectively allow admin wallets to transact while trading is closed for everyone else."
+        })
+      );
+    }
+
+    const dataAvailable = paused !== null || tradingOpen !== null;
+    return {
+      detector: this.metadata,
+      checks: [
+        {
+          code:
+            findings.length > 0
+              ? "LIVE_TRADING_STATE_RESTRICTED"
+              : dataAvailable
+                ? "LIVE_TRADING_STATE_OPEN"
+                : "LIVE_TRADING_STATE_UNAVAILABLE",
+          outcome: findings.length > 0 ? "DETECTED" : dataAvailable ? "PASSED" : "DATA_UNAVAILABLE",
+          confidence: dataAvailable ? "HIGH" : "LOW",
+          evidence: [evidence]
+        }
+      ],
       findings
     };
   }

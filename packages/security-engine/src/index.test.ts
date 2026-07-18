@@ -8,6 +8,8 @@ import {
   createEmptyDetectorResult,
   dangerousOpcodeDetector,
   eip1967ProxyDetector,
+  liveTradingStateDetector,
+  ownershipRolesAbiDetector,
   ownershipStatusDetector,
   runFoundationDetectors,
   scoreFindings,
@@ -380,6 +382,158 @@ describe("source-code risk detector", () => {
     ).toMatchObject({
       severity: "CRITICAL"
     });
+  });
+
+  it("detects router/pair replacement and arbitrary low-level external calls", async () => {
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [
+          {
+            filename: "Sketchy.sol",
+            sourceCode: `
+              contract Sketchy {
+                function setRouter(address newRouter) external onlyOwner { router = newRouter; }
+                function sweep(address target, bytes calldata data) external onlyOwner {
+                  (bool ok, ) = target.call(data);
+                  require(ok);
+                }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    expect(result.findings.map((finding) => finding.code)).toEqual(
+      expect.arrayContaining(["SOURCE_ROUTER_OR_PAIR_REPLACEMENT", "SOURCE_ARBITRARY_EXTERNAL_CALL"])
+    );
+  });
+});
+
+describe("ownership/roles ABI detector", () => {
+  it("reports data unavailable without a verified ABI", async () => {
+    const result = await ownershipRolesAbiDetector.run(
+      { status: "UNAVAILABLE", address: context.address, sourceFiles: [] },
+      context
+    );
+
+    expect(result.findings).toEqual([]);
+    expect(result.checks[0]).toMatchObject({ code: "ABI_UNAVAILABLE", outcome: "DATA_UNAVAILABLE" });
+  });
+
+  it("detects two-step ownership from real ABI function names", async () => {
+    const result = await ownershipRolesAbiDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [],
+        abi: [
+          { type: "function", name: "pendingOwner" },
+          { type: "function", name: "acceptOwnership" }
+        ]
+      },
+      context
+    );
+
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({
+      code: "TWO_STEP_OWNERSHIP_PATTERN",
+      severity: "INFO"
+    });
+  });
+
+  it("detects AccessControl roles from real ABI function names", async () => {
+    const result = await ownershipRolesAbiDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [],
+        abi: [
+          { type: "function", name: "hasRole" },
+          { type: "function", name: "grantRole" }
+        ]
+      },
+      context
+    );
+
+    expect(result.findings[0]).toMatchObject({
+      code: "ACCESS_CONTROL_ROLE_SURFACE",
+      severity: "MEDIUM",
+      confidence: "HIGH"
+    });
+  });
+
+  it("passes when neither pattern is present in the ABI", async () => {
+    const result = await ownershipRolesAbiDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [],
+        abi: [{ type: "function", name: "transfer" }]
+      },
+      context
+    );
+
+    expect(result.findings).toEqual([]);
+    expect(result.checks[0]).toMatchObject({ code: "OWNERSHIP_ROLE_ABI_ABSENT", outcome: "PASSED" });
+  });
+});
+
+describe("live trading state detector", () => {
+  it("reports unavailable when neither state function can be read", async () => {
+    const result = await liveTradingStateDetector.run(
+      {
+        readPausedState: () => Promise.resolve(null),
+        readTradingOpenState: () => Promise.resolve(null)
+      },
+      context
+    );
+
+    expect(result.findings).toEqual([]);
+    expect(result.checks[0]).toMatchObject({
+      code: "LIVE_TRADING_STATE_UNAVAILABLE",
+      outcome: "DATA_UNAVAILABLE"
+    });
+  });
+
+  it("flags a currently-paused contract from a live read, not just selector presence", async () => {
+    const result = await liveTradingStateDetector.run(
+      {
+        readPausedState: () => Promise.resolve(true),
+        readTradingOpenState: () => Promise.resolve(null)
+      },
+      context
+    );
+
+    expect(result.findings[0]).toMatchObject({ code: "TRADING_CURRENTLY_PAUSED", severity: "HIGH" });
+  });
+
+  it("flags trading currently disabled from a live read", async () => {
+    const result = await liveTradingStateDetector.run(
+      {
+        readPausedState: () => Promise.resolve(false),
+        readTradingOpenState: () => Promise.resolve(false)
+      },
+      context
+    );
+
+    expect(result.findings[0]).toMatchObject({ code: "TRADING_CURRENTLY_DISABLED", severity: "HIGH" });
+  });
+
+  it("passes when both live reads succeed and show trading is open", async () => {
+    const result = await liveTradingStateDetector.run(
+      {
+        readPausedState: () => Promise.resolve(false),
+        readTradingOpenState: () => Promise.resolve(true)
+      },
+      context
+    );
+
+    expect(result.findings).toEqual([]);
+    expect(result.checks[0]).toMatchObject({ code: "LIVE_TRADING_STATE_OPEN", outcome: "PASSED" });
   });
 });
 
