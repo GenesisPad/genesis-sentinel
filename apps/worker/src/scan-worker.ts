@@ -1112,37 +1112,28 @@ export async function processScanJob(
       startedAt: now()
     });
     const allDetectorResults = [...detectorResults, ...holderDetectorResults];
-    const riskAssessment = scoreFindings(
-      allDetectorResults.flatMap((result) => result.findings),
-      scannerVersion
-    );
-    if (riskAssessment) {
-      await dependencies.scans.recordRiskAssessment({
-        scanId: target.scanId,
-        assessment: riskAssessment
-      });
-      await dependencies.scans.recordStage({
-        scanId: target.scanId,
-        name: "SCORING",
-        status: "SUCCEEDED",
-        completedAt: now(),
-        metadata: {
-          score: riskAssessment.score,
-          level: riskAssessment.level,
-          scoringVersion: riskAssessment.scoringVersion
-        }
-      });
-    } else {
-      await dependencies.scans.recordStage({
-        scanId: target.scanId,
-        name: "SCORING",
-        status: "SKIPPED",
-        completedAt: now(),
-        metadata: {
-          reason: "No detector findings were available to score."
-        }
-      });
-    }
+    const riskAssessment = scoreFindings(allDetectorResults, scannerVersion);
+    await dependencies.scans.recordRiskAssessment({
+      scanId: target.scanId,
+      assessment: riskAssessment
+    });
+    await dependencies.scans.recordStage({
+      scanId: target.scanId,
+      name: "SCORING",
+      status: riskAssessment.score === null ? "SKIPPED" : "SUCCEEDED",
+      completedAt: now(),
+      metadata:
+        riskAssessment.score === null
+          ? {
+              reason: "No detector findings were available to score.",
+              unableToAssessReasons: riskAssessment.unableToAssessReasons
+            }
+          : {
+              score: riskAssessment.score,
+              level: riskAssessment.level,
+              scoringVersion: riskAssessment.scoringVersion
+            }
+    });
 
     await dependencies.scans.updateScanState({
       scanId: target.scanId,

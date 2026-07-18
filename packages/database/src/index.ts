@@ -14,6 +14,7 @@ import {
   type CheckOutcome,
   type DeployerHistoryView,
   type DetectorCheckView,
+  type FindingContribution,
   type FindingEvidenceView,
   type FindingSeverity,
   type HolderSnapshotView,
@@ -734,6 +735,7 @@ export function createScanRepository(db: PrismaDatabase): ScanRepository {
         }
       });
 
+      const contributions = toJsonValue(input.assessment.findingContributions);
       const data: Prisma.RiskAssessmentUncheckedCreateInput = {
         scanId: input.scanId,
         score: input.assessment.score,
@@ -741,7 +743,9 @@ export function createScanRepository(db: PrismaDatabase): ScanRepository {
         confidence: input.assessment.confidence,
         scannerVersion: input.assessment.scannerVersion,
         scoringVersion: input.assessment.scoringVersion,
-        explanation: input.assessment.explanation
+        explanation: input.assessment.explanation,
+        contributions,
+        unableToAssessReasons: input.assessment.unableToAssessReasons
       };
       const update: Prisma.RiskAssessmentUncheckedUpdateInput = {
         score: input.assessment.score,
@@ -749,7 +753,9 @@ export function createScanRepository(db: PrismaDatabase): ScanRepository {
         confidence: input.assessment.confidence,
         scannerVersion: input.assessment.scannerVersion,
         scoringVersion: input.assessment.scoringVersion,
-        explanation: input.assessment.explanation
+        explanation: input.assessment.explanation,
+        contributions,
+        unableToAssessReasons: input.assessment.unableToAssessReasons
       };
 
       const riskAssessment = existing
@@ -773,7 +779,8 @@ export function createScanRepository(db: PrismaDatabase): ScanRepository {
           riskAssessmentId: riskAssessment.id,
           category: categoryScore.category,
           score: categoryScore.score,
-          confidence: categoryScore.confidence
+          confidence: categoryScore.confidence,
+          explanation: categoryScore.explanation ?? null
         }))
       });
     },
@@ -1447,11 +1454,12 @@ function toRiskSnapshot(scan: ScanResultRecord): RiskSnapshot {
   const findingCounts = createFindingCounts(scan.findings.map((finding) => finding.severity));
 
   if (scan.riskAssessment) {
+    const unableToAssessReasons = scan.riskAssessment.unableToAssessReasons;
     return {
       chainId: scan.chainId,
       address: scan.targetAddress as `0x${string}`,
       scannerVersion: scan.riskAssessment.scannerVersion,
-      status: "AVAILABLE",
+      status: scan.riskAssessment.score === null ? "UNABLE_TO_ASSESS" : "AVAILABLE",
       level:
         scan.riskAssessment.level === "UNABLE_TO_VERIFY"
           ? "UNABLE_TO_ASSESS"
@@ -1461,10 +1469,18 @@ function toRiskSnapshot(scan: ScanResultRecord): RiskSnapshot {
       categoryScores: scan.riskAssessment.categoryScores.map((categoryScore) => ({
         category: categoryScore.category,
         score: categoryScore.score,
-        confidence: categoryScore.confidence
+        confidence: categoryScore.confidence,
+        ...(categoryScore.explanation ? { explanation: categoryScore.explanation } : {})
       })),
+      findingContributions: toFindingContributions(scan.riskAssessment.contributions),
+      unableToAssessReasons,
       findingCounts,
-      message: "Persisted risk assessment is available for this scan."
+      message:
+        scan.riskAssessment.score === null
+          ? unableToAssessReasons.length > 0
+            ? `Overall risk scoring is not available yet: ${unableToAssessReasons.join("; ")}`
+            : "Overall risk scoring is not available yet. Review persisted findings and evidence instead."
+          : "Persisted risk assessment is available for this scan."
     };
   }
 
@@ -1477,6 +1493,8 @@ function toRiskSnapshot(scan: ScanResultRecord): RiskSnapshot {
     score: null,
     confidence: "LOW",
     categoryScores: [],
+    findingContributions: [],
+    unableToAssessReasons: ["No risk assessment has been recorded for this scan yet."],
     findingCounts,
     message:
       "Overall risk scoring is not available yet. Review persisted findings and evidence instead."
@@ -1640,6 +1658,38 @@ function withOptionalEvidenceFields(
   return view;
 }
 
+function toFindingContributions(value: Prisma.JsonValue): FindingContribution[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry): FindingContribution[] => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return [];
+    }
+    const record = entry as Record<string, unknown>;
+    if (
+      typeof record.code !== "string" ||
+      typeof record.category !== "string" ||
+      typeof record.severity !== "string" ||
+      typeof record.confidence !== "string" ||
+      typeof record.weight !== "number"
+    ) {
+      return [];
+    }
+
+    return [
+      {
+        code: record.code,
+        category: record.category as FindingContribution["category"],
+        severity: record.severity as FindingContribution["severity"],
+        confidence: record.confidence as FindingContribution["confidence"],
+        weight: record.weight
+      }
+    ];
+  });
+}
+
 function toRecord(value: Prisma.JsonValue): Record<string, unknown> {
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
     return value;
@@ -1662,7 +1712,7 @@ function isEvidenceType(value: unknown): value is FindingEvidenceView["type"] {
   );
 }
 
-function toJsonValue(value: Record<string, unknown>): Prisma.InputJsonValue {
+function toJsonValue(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(
     JSON.stringify(value, (_key, nestedValue: unknown) =>
       typeof nestedValue === "bigint" ? nestedValue.toString() : nestedValue

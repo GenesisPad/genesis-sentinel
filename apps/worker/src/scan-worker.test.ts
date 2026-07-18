@@ -254,6 +254,7 @@ describe("scan worker orchestration", () => {
       "stage:SIMULATING_TRADES:SKIPPED",
       "state:SCORING",
       "stage:SCORING:RUNNING",
+      "risk:UNABLE_TO_ASSESS:null",
       "stage:SCORING:SKIPPED",
       "state:PARTIALLY_COMPLETED"
     ]);

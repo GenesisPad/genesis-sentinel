@@ -85,14 +85,33 @@ export interface CategoryScore {
   category: RiskCategory;
   score: number;
   confidence: FindingConfidence;
+  explanation?: string;
+}
+
+/**
+ * A single finding's contribution to its category score, persisted so the overall score is
+ * reconstructible and auditable after the fact, not just the aggregate number.
+ */
+export interface FindingContribution {
+  code: string;
+  category: RiskCategory;
+  severity: FindingSeverity;
+  confidence: FindingConfidence;
+  weight: number;
 }
 
 export interface RiskAssessment {
-  score: number;
+  /** Null only when `level` is `UNABLE_TO_ASSESS` — never a stand-in for a low-risk score. */
+  score: number | null;
   level: RiskLevel;
   confidence: FindingConfidence;
   categoryScores: CategoryScore[];
   scannerVersion: string;
+  findingContributions: FindingContribution[];
+  /** Evidence gaps (unsupported/unavailable/inconclusive/failed checks) that were not treated
+   * as low risk. Non-empty even when a numeric score was produced, whenever some category's
+   * evidence was incomplete. */
+  unableToAssessReasons: string[];
 }
 
 export const riskScoreRange = {
@@ -285,6 +304,8 @@ export interface RiskSnapshot {
   score: number | null;
   confidence: FindingConfidence;
   categoryScores: CategoryScore[];
+  findingContributions: FindingContribution[];
+  unableToAssessReasons: string[];
   findingCounts: Record<FindingSeverity, number>;
   message: string;
 }

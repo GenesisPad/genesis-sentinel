@@ -16,6 +16,8 @@ describe("api foundation", () => {
     score: null,
     confidence: "LOW",
     categoryScores: [],
+    findingContributions: [],
+    unableToAssessReasons: ["No detector findings were produced for this scan."],
     findingCounts: {
       INFO: 0,
       LOW: 0,

@@ -285,6 +285,8 @@ describe("database readiness", () => {
         scannerVersion: "0.1.0-foundation",
         scoringVersion: "0.1.0-finding-weighted",
         explanation: "Detector-based score.",
+        contributions: [],
+        unableToAssessReasons: [],
         createdAt: new Date("2026-07-11T00:00:00.000Z"),
         categoryScores: [
           {

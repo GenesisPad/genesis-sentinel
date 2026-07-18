@@ -5,6 +5,7 @@ import type {
   CheckOutcome,
   DeployerHistoryView,
   FindingConfidence,
+  FindingContribution,
   FindingEvidence,
   FindingSeverity,
   RelatedWalletEdge,
@@ -132,7 +133,7 @@ interface SelectorRule {
 }
 
 const detectorVersion = "0.1.0";
-export const scoringVersion = "0.1.0-finding-weighted";
+export const scoringVersion = "0.2.0-category-weighted-with-gap-reasons";
 export const simulationFoundationVersion = "0.1.0-unsupported";
 export const liquidityDiscoveryFoundationVersion = "0.1.0-unsupported";
 export const holderAnalysisFoundationVersion = "0.1.0-unsupported";
@@ -1544,13 +1545,53 @@ export async function runFoundationDetectors(
   ];
 }
 
+/**
+ * Deterministic, versioned risk scoring (Milestone 7). Always returns an assessment — an empty
+ * finding set produces an explicit `UNABLE_TO_ASSESS`/`score: null` result rather than no
+ * assessment at all, so "no evidence yet" is never silently indistinguishable from "no risk
+ * found." Evidence gaps (unsupported/unavailable/inconclusive/failed checks) are surfaced as
+ * `unableToAssessReasons` alongside any numeric score, since a token can have real findings in
+ * one category and missing evidence in another at the same time.
+ *
+ * Per-finding weight and per-category aggregation are unchanged in spirit from the prior
+ * version: severity/confidence weighted, capped at 100 per category, overall score is the
+ * maximum category score (not a cross-category sum) — see docs/architecture/risk-model.md for
+ * why this avoids pushing every token toward 100 and for worked examples of why one category's
+ * good news (e.g. renounced ownership, locked liquidity, a successful sell simulation) does not
+ * erase a different category's finding.
+ */
 export function scoreFindings(
-  findings: SecurityFinding[],
+  detectorResults: DetectorResult[],
   scannerVersion: string
-): ScoredRiskAssessment | null {
+): ScoredRiskAssessment {
+  const findings = detectorResults.flatMap((result) => result.findings);
+  const unableToAssessReasons = collectUnableToAssessReasons(detectorResults);
+
   if (findings.length === 0) {
-    return null;
+    return {
+      score: null,
+      level: "UNABLE_TO_ASSESS",
+      confidence: "LOW",
+      categoryScores: [],
+      findingContributions: [],
+      unableToAssessReasons:
+        unableToAssessReasons.length > 0
+          ? unableToAssessReasons
+          : ["No detector findings were produced for this scan."],
+      scannerVersion,
+      scoringVersion,
+      explanation:
+        "No detector findings were available to score. This reflects missing or inconclusive evidence, not confirmed safety."
+    };
   }
+
+  const findingContributions: FindingContribution[] = findings.map((finding) => ({
+    code: finding.code,
+    category: finding.category,
+    severity: finding.severity,
+    confidence: finding.confidence,
+    weight: findingWeight(finding)
+  }));
 
   const categoryScores = uniqueCategories(findings).map((category) => {
     const categoryFindings = findings.filter((finding) => finding.category === category);
@@ -1558,11 +1599,19 @@ export function scoreFindings(
       100,
       categoryFindings.reduce((total, finding) => total + findingWeight(finding), 0)
     );
+    const topFinding = [...categoryFindings].sort(
+      (a, b) => findingWeight(b) - findingWeight(a)
+    )[0];
 
     return {
       category,
       score,
-      confidence: strongestConfidence(categoryFindings.map((finding) => finding.confidence))
+      confidence: strongestConfidence(categoryFindings.map((finding) => finding.confidence)),
+      ...(topFinding
+        ? {
+            explanation: `${categoryFindings.length} finding(s) in this category; highest-weighted is ${topFinding.code} (${topFinding.severity} severity, ${topFinding.confidence} confidence).`
+          }
+        : {})
     };
   });
   const score = Math.min(
@@ -1575,11 +1624,32 @@ export function scoreFindings(
     level: riskLevelForScore(score),
     confidence: strongestConfidence(findings.map((finding) => finding.confidence)),
     categoryScores,
+    findingContributions,
+    unableToAssessReasons,
     scannerVersion,
     scoringVersion,
     explanation:
-      "Risk Score is derived only from persisted detector findings. Unimplemented simulations, liquidity analysis, holder analysis, and source verification are not treated as low risk."
+      "Risk Score is derived only from persisted detector findings, weighted by severity and confidence within each category. The overall score is the highest category score, not a sum across categories, so one severe finding cannot be diluted by many minor ones nor can unrelated categories compound into an inflated total. Unable-to-assess reasons list evidence gaps that were not treated as low risk."
   };
+}
+
+function collectUnableToAssessReasons(detectorResults: DetectorResult[]): string[] {
+  const reasons: string[] = [];
+  for (const result of detectorResults) {
+    for (const check of result.checks) {
+      if (
+        check.outcome === "UNSUPPORTED" ||
+        check.outcome === "DATA_UNAVAILABLE" ||
+        check.outcome === "INCONCLUSIVE" ||
+        check.outcome === "FAILED"
+      ) {
+        reasons.push(
+          `${result.detector.id}/${check.code}: ${check.outcome}${check.errorMessage ? ` — ${check.errorMessage}` : ""}`
+        );
+      }
+    }
+  }
+  return reasons;
 }
 
 export function createUnsupportedTradeSimulations(input: {

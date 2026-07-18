@@ -758,10 +758,32 @@ describe("deployer history detector", () => {
 });
 
 describe("risk scoring", () => {
-  it("returns no numeric assessment when no detector findings are present", () => {
+  it("returns an explicit UNABLE_TO_ASSESS assessment when no detector findings are present", () => {
     const assessment = scoreFindings([], "0.1.0-foundation");
 
-    expect(assessment).toBeNull();
+    expect(assessment).toMatchObject({
+      score: null,
+      level: "UNABLE_TO_ASSESS",
+      categoryScores: [],
+      findingContributions: []
+    });
+    expect(assessment.unableToAssessReasons.length).toBeGreaterThan(0);
+  });
+
+  it("surfaces unable-to-assess reasons from unsupported/unavailable/inconclusive/failed checks", () => {
+    const detectorResults = [
+      {
+        detector: { id: "sim-foundation", version: "0.1.0", name: "n", description: "d" },
+        checks: [
+          { code: "SELL_SIMULATION", outcome: "UNSUPPORTED" as const, confidence: "LOW" as const, evidence: [] }
+        ],
+        findings: []
+      }
+    ];
+    const assessment = scoreFindings(detectorResults, "0.1.0-foundation");
+
+    expect(assessment.score).toBeNull();
+    expect(assessment.unableToAssessReasons).toEqual(["sim-foundation/SELL_SIMULATION: UNSUPPORTED"]);
   });
 
   it("scores detected findings without claiming broad safety", async () => {
@@ -769,19 +791,175 @@ describe("risk scoring", () => {
       (detector) => detector.metadata.id === "mint-selector-patterns"
     );
     const result = await mintDetector!.run({ bytecode: "0x6340c10f196000" }, context);
-    const assessment = scoreFindings(result.findings, "0.1.0-foundation");
+    const assessment = scoreFindings([result], "0.1.0-foundation");
 
     expect(assessment).toMatchObject({
       score: 60,
       level: "HIGH",
       confidence: "MEDIUM",
-      scoringVersion: "0.1.0-finding-weighted"
+      scoringVersion: "0.2.0-category-weighted-with-gap-reasons"
     });
-    expect(assessment?.categoryScores[0]).toMatchObject({
+    expect(assessment.categoryScores[0]).toMatchObject({
       category: "CONTRACT_CONTROL",
       score: 60
     });
-    expect(assessment?.explanation.toLowerCase()).not.toContain("safe");
+    expect(assessment.findingContributions).toHaveLength(1);
+    expect(assessment.findingContributions[0]).toMatchObject({
+      category: "CONTRACT_CONTROL",
+      severity: "HIGH"
+    });
+    expect(assessment.unableToAssessReasons).toEqual([]);
+    expect(assessment.explanation.toLowerCase()).not.toContain("safe");
+  });
+
+  it("does not let a renounced-ownership pass erase a separate proxy-admin finding (golden profile)", () => {
+    const detectorResults = [
+      {
+        detector: { id: "ownership-status", version: "0.1.0", name: "n", description: "d" },
+        checks: [
+          { code: "OWNERSHIP_RENOUNCED", outcome: "PASSED" as const, confidence: "HIGH" as const, evidence: [] }
+        ],
+        findings: []
+      },
+      {
+        detector: { id: "eip1967-proxy-storage", version: "0.1.0", name: "n", description: "d" },
+        checks: [
+          { code: "PROXY_ADMIN_SLOT_SET", outcome: "DETECTED" as const, confidence: "HIGH" as const, evidence: [] }
+        ],
+        findings: [
+          {
+            code: "PROXY_ADMIN_CONTROLLED",
+            detectorId: "eip1967-proxy-storage",
+            detectorVersion: "0.1.0",
+            title: "Proxy admin slot is set",
+            severity: "HIGH" as const,
+            category: "CONTRACT_CONTROL" as const,
+            confidence: "HIGH" as const,
+            description: "d",
+            technicalExplanation: "t",
+            evidence: []
+          }
+        ]
+      }
+    ];
+
+    const assessment = scoreFindings(detectorResults, "0.1.0-foundation");
+
+    expect(assessment.level).toBe("HIGH");
+    expect(assessment.score).toBeGreaterThanOrEqual(60);
+  });
+
+  it("does not let locked liquidity erase a separate trading-safety (tax) finding (golden profile)", () => {
+    const detectorResults = [
+      {
+        detector: { id: "liquidity-lock", version: "0.1.0", name: "n", description: "d" },
+        checks: [
+          { code: "LIQUIDITY_LOCKED", outcome: "PASSED" as const, confidence: "HIGH" as const, evidence: [] }
+        ],
+        findings: []
+      },
+      {
+        detector: { id: "live-trading-state", version: "0.1.0", name: "n", description: "d" },
+        checks: [
+          { code: "SELL_TAX_MEASURED", outcome: "DETECTED" as const, confidence: "HIGH" as const, evidence: [] }
+        ],
+        findings: [
+          {
+            code: "HIGH_SELL_TAX",
+            detectorId: "live-trading-state",
+            detectorVersion: "0.1.0",
+            title: "High sell tax observed",
+            severity: "HIGH" as const,
+            category: "TRADING_SAFETY" as const,
+            confidence: "HIGH" as const,
+            description: "d",
+            technicalExplanation: "t",
+            evidence: []
+          }
+        ]
+      }
+    ];
+
+    const assessment = scoreFindings(detectorResults, "0.1.0-foundation");
+
+    expect(assessment.categoryScores.some((c) => c.category === "LIQUIDITY_SAFETY")).toBe(false);
+    expect(assessment.categoryScores.find((c) => c.category === "TRADING_SAFETY")?.score).toBeGreaterThan(0);
+    expect(assessment.level).toBe("HIGH");
+  });
+
+  it("does not let a passed sell simulation erase a separate blacklist finding (golden profile)", () => {
+    const detectorResults = [
+      {
+        detector: { id: "trade-simulation", version: "0.1.0", name: "n", description: "d" },
+        checks: [
+          { code: "SELL_SIMULATION", outcome: "PASSED" as const, confidence: "HIGH" as const, evidence: [] }
+        ],
+        findings: []
+      },
+      {
+        detector: { id: "blacklist-selector-patterns", version: "0.1.0", name: "n", description: "d" },
+        checks: [
+          { code: "BLACKLIST_SELECTOR_FOUND", outcome: "DETECTED" as const, confidence: "MEDIUM" as const, evidence: [] }
+        ],
+        findings: [
+          {
+            code: "BLACKLIST_FUNCTION_PRESENT",
+            detectorId: "blacklist-selector-patterns",
+            detectorVersion: "0.1.0",
+            title: "Blacklist-style function present",
+            severity: "HIGH" as const,
+            category: "TRADING_SAFETY" as const,
+            confidence: "MEDIUM" as const,
+            description: "d",
+            technicalExplanation: "t",
+            evidence: []
+          }
+        ]
+      }
+    ];
+
+    const assessment = scoreFindings(detectorResults, "0.1.0-foundation");
+
+    expect(assessment.score).toBeGreaterThan(0);
+    expect(assessment.unableToAssessReasons).toEqual([]);
+  });
+
+  it("does not treat a missing simulation as safety when other real findings exist (golden profile)", () => {
+    const detectorResults = [
+      {
+        detector: { id: "trade-simulation", version: "0.1.0", name: "n", description: "d" },
+        checks: [
+          { code: "SELL_SIMULATION", outcome: "UNSUPPORTED" as const, confidence: "LOW" as const, evidence: [] }
+        ],
+        findings: []
+      },
+      {
+        detector: { id: "ownership-status", version: "0.1.0", name: "n", description: "d" },
+        checks: [
+          { code: "OWNERSHIP_ACTIVE", outcome: "DETECTED" as const, confidence: "HIGH" as const, evidence: [] }
+        ],
+        findings: [
+          {
+            code: "OWNERSHIP_NOT_RENOUNCED",
+            detectorId: "ownership-status",
+            detectorVersion: "0.1.0",
+            title: "Contract ownership is not renounced",
+            severity: "MEDIUM" as const,
+            category: "CONTRACT_CONTROL" as const,
+            confidence: "HIGH" as const,
+            description: "d",
+            technicalExplanation: "t",
+            evidence: []
+          }
+        ]
+      }
+    ];
+
+    const assessment = scoreFindings(detectorResults, "0.1.0-foundation");
+
+    expect(assessment.score).not.toBeNull();
+    expect(assessment.score).toBeGreaterThan(0);
+    expect(assessment.unableToAssessReasons).toEqual(["trade-simulation/SELL_SIMULATION: UNSUPPORTED"]);
   });
 });
 

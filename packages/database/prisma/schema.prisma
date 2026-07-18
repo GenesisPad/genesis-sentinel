@@ -286,15 +286,21 @@ model FindingEvidence {
 }
 
 model RiskAssessment {
-  id             String            @id @default(cuid())
-  scanId         String            @unique
-  score          Int
-  level          RiskLevel
-  confidence     FindingConfidence
-  scannerVersion String
-  scoringVersion String
-  explanation    String?
-  createdAt      DateTime          @default(now())
+  id                     String            @id @default(cuid())
+  scanId                 String            @unique
+  /// Null only when level is UNABLE_TO_ASSESS — never a stand-in for a low-risk score.
+  score                  Int?
+  level                  RiskLevel
+  confidence             FindingConfidence
+  scannerVersion         String
+  scoringVersion         String
+  explanation            String?
+  /// Per-finding weight contributions (code/category/severity/confidence/weight), so the score
+  /// is reconstructible after the fact, not just the aggregate number.
+  contributions          Json              @default("[]")
+  /// Evidence gaps (unsupported/unavailable/inconclusive/failed checks) not treated as low risk.
+  unableToAssessReasons  String[]          @default([])
+  createdAt              DateTime          @default(now())
 
   scan           Scan            @relation(fields: [scanId], references: [id], onDelete: Cascade)
   categoryScores CategoryScore[]

@@ -43,6 +43,8 @@ function baseView(overrides: Partial<ScanResultView> = {}): ScanResultView {
       score: 12,
       confidence: "HIGH",
       categoryScores: [],
+      findingContributions: [],
+      unableToAssessReasons: [],
       findingCounts: { INFO: 0, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 },
       message: "No findings detected."
     },
@@ -69,6 +71,8 @@ describe("mapResultToReport", () => {
           score: null,
           confidence: "LOW",
           categoryScores: [],
+          findingContributions: [],
+          unableToAssessReasons: ["No detector findings were produced for this scan."],
           findingCounts: { INFO: 0, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 },
           message: "Not enough evidence yet."
         }
