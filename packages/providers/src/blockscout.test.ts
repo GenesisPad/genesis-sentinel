@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createBlockscoutContractSourceProvider } from "./blockscout.js";
+import { createBlockscoutContractSourceProvider, createBlockscoutHolderProvider } from "./blockscout.js";
 
 const config = {
   chainId: 4663,
@@ -137,5 +137,75 @@ describe("createBlockscoutContractSourceProvider", () => {
     });
 
     expect(result).toBeNull();
+  });
+});
+
+describe("createBlockscoutHolderProvider", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const holderAddress = "0x0000000000000000000000000000000000000001" as const;
+  const lockerAddress = `0x${"0".repeat(38)}ad` as const;
+  const otherHolderAddress = `0x${"0".repeat(38)}02` as const;
+
+  it("labels a known locker address and excludes it from adjusted concentration but includes it in raw", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({
+        items: [
+          {
+            address: { hash: lockerAddress, is_contract: true },
+            value: "600"
+          },
+          {
+            address: { hash: otherHolderAddress, is_contract: false },
+            value: "400"
+          }
+        ]
+      })
+    );
+
+    const provider = createBlockscoutHolderProvider(config, {
+      knownLockerAddresses: [lockerAddress]
+    });
+    const result = await provider.getHolderSnapshot({
+      chainId: 4663,
+      address: holderAddress,
+      totalSupply: "1000"
+    });
+
+    const lockerRow = result?.topHolders.find(
+      (holder) => holder.address.toLowerCase() === lockerAddress.toLowerCase()
+    );
+    expect(lockerRow?.labels).toContain("LOCKER");
+    // Adjusted top1 excludes the locker (a contract), leaving only the 400 EOA balance = 40%.
+    expect(result?.concentration.top1Pct).toBe(40);
+    // Raw top1 includes the locker's larger 600 balance = 60%.
+    expect(result?.concentration.rawConcentration.top1Pct).toBe(60);
+    expect(result?.concentration.lockerPct).toBe(60);
+  });
+
+  it("computes top20Pct alongside the existing top1/5/10 figures", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({
+        items: Array.from({ length: 25 }, (_, index) => ({
+          address: {
+            hash: `0x${"0".repeat(37)}${(index + 1).toString().padStart(3, "0")}`,
+            is_contract: false
+          },
+          value: "40"
+        }))
+      })
+    );
+
+    const provider = createBlockscoutHolderProvider(config);
+    const result = await provider.getHolderSnapshot({
+      chainId: 4663,
+      address: holderAddress,
+      totalSupply: "1000"
+    });
+
+    expect(result?.concentration.top20Pct).toBeCloseTo(80, 5);
+    expect(result?.concentration.rawConcentration.top20Pct).toBeCloseTo(80, 5);
   });
 });

@@ -76,7 +76,9 @@ export function createProviderRegistry(): { getProviderSet(chainId: number): Pro
       chainId: robinhoodChainId,
       networkSlug: "robinhood"
     }),
-    holder: createBlockscoutHolderProvider(robinhoodBlockscoutConfig),
+    holder: createBlockscoutHolderProvider(robinhoodBlockscoutConfig, {
+      knownLockerAddresses: [robinhoodGenesisLockerAddress]
+    }),
     liquidity: createRobinhoodLiquidityProvider(
       (address) => robinhoodExplorer.getTokenPriceUsd({ chainId: robinhoodChainId, address }),
       robinhoodLocker

@@ -141,17 +141,33 @@ export interface EnrichedHolder {
   totalSupplyPct: number;
 }
 
+export interface RawHolderConcentration {
+  top1Pct: number;
+  top5Pct: number;
+  top10Pct: number;
+  top20Pct: number;
+}
+
 export interface HolderConcentration extends Record<string, unknown> {
   top1Pct: number;
   top5Pct: number;
   top10Pct: number;
+  top20Pct: number;
   top1Address: `0x${string}` | null;
   deployerPct: number | null;
   ownerPct: number | null;
   liquidityPoolPct: number;
   burnedPct: number;
+  lockerPct: number;
   excludedContractPct: number;
   suspiciousFlags: string[];
+  /**
+   * Same top-N percentages computed WITHOUT excluding burn/pool/contract addresses — i.e. what
+   * a naive "top holders" list would show. The fields above already exclude that
+   * infrastructure so they reflect wallet-only distribution; this raw view is kept alongside
+   * it, never merged, so callers can show both per Milestone 4's "raw vs adjusted" requirement.
+   */
+  rawConcentration: RawHolderConcentration;
 }
 
 export interface HolderSnapshotResult {

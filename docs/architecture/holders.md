@@ -15,6 +15,30 @@ Holder retrieval now lives behind the `HolderProvider` interface in
 `@genesis-sentinel/providers` (`packages/providers/src/blockscout.ts`) rather than in
 `apps/worker/src/scan-worker.ts` directly — see `docs/architecture/providers.md`.
 
+## Milestone 4: raw vs. adjusted concentration, top20, locker classification
+
+`HolderConcentration` now reports **both** views, never merged:
+
+- `top1Pct`/`top5Pct`/`top10Pct`/`top20Pct` — "adjusted" concentration, excluding known burn,
+  liquidity-pool, and any-contract addresses, so it reflects wallet-only distribution.
+- `rawConcentration.{top1Pct,top5Pct,top10Pct,top20Pct}` — the same top-N math over every
+  returned holder row, infrastructure included — what a naive "top holders" list would show.
+
+Known non-user holder classification (the `labels` array on each `EnrichedHolder`) now
+includes `LOCKER` in addition to the existing `DEPLOYER`/`OWNER`/`BURN`/`LIQUIDITY_POOL`/
+`CONTRACT`/`EOA`. Robinhood Chain's registry (`packages/providers/src/registry.ts`) passes the
+real, verified Genesis Locker contract address
+(`0x0372a1AE860CDc9357ac6bc8e9F97856b37B80Ed`) to
+`createBlockscoutHolderProvider`'s `knownLockerAddresses` option — a large balance sitting in
+Genesis Locker is real, checkable evidence of a vesting/team lock, not an unexplained large
+wallet, and `lockerPct` reports it as its own bucket (distinct from `burnedPct`).
+
+Still not implemented (deferred, tracked, not silently dropped): vesting-contract, bridge,
+centralized-exchange, treasury, router, and staking-contract classification (no verified
+address lists exist in this codebase for any of these categories — fabricating one would be
+worse than leaving holders unlabeled); fresh-wallet concentration; related-wallet
+clustering/edges with confidence and evidence (see Milestone 6, deployer/wallet intelligence).
+
 ## Future Sources
 
 Holder snapshots should come from one of these bounded sources:

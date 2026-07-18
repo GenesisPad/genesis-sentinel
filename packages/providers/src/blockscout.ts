@@ -211,12 +211,23 @@ export function createBlockscoutExplorerProvider(config: BlockscoutChainConfig):
   };
 }
 
+export interface BlockscoutHolderProviderOptions {
+  /** Known third-party locker contract addresses (e.g. Genesis Locker) labeled LOCKER instead
+   * of showing up as an unlabeled top holder — a locked balance is materially different from
+   * an unexplained large wallet. */
+  knownLockerAddresses?: `0x${string}`[];
+}
+
 /**
  * Uses Blockscout's token holders endpoint to rank real balances — no fabricated
- * distribution. Contract-owned balances (pools, lockers) are excluded so the percentages
- * reflect wallet concentration, matching "excluding pools" in the UI.
+ * distribution. Contract-owned balances (pools, lockers) are excluded from the "adjusted"
+ * concentration figures so they reflect wallet concentration; the raw (unadjusted) figures are
+ * also returned alongside, per Milestone 4's "raw vs adjusted" requirement.
  */
-export function createBlockscoutHolderProvider(config: BlockscoutChainConfig): HolderProvider {
+export function createBlockscoutHolderProvider(
+  config: BlockscoutChainConfig,
+  options: BlockscoutHolderProviderOptions = {}
+): HolderProvider {
   return {
     id: "blockscout-holder",
     supportsChain: (chainId) => chainId === config.chainId,
@@ -224,7 +235,13 @@ export function createBlockscoutHolderProvider(config: BlockscoutChainConfig): H
       if (chainId !== config.chainId) {
         return null;
       }
-      return discoverBlockscoutHolderConcentration(config, address, totalSupply, context ?? {});
+      return discoverBlockscoutHolderConcentration(
+        config,
+        address,
+        totalSupply,
+        context ?? {},
+        options.knownLockerAddresses ?? []
+      );
     }
   };
 }
@@ -233,7 +250,8 @@ async function discoverBlockscoutHolderConcentration(
   config: BlockscoutChainConfig,
   address: `0x${string}`,
   totalSupply: string | null,
-  context: HolderProviderContext
+  context: HolderProviderContext,
+  knownLockerAddresses: `0x${string}`[]
 ): Promise<HolderSnapshotResult | null> {
   if (!totalSupply || totalSupply === "0") {
     return null;
@@ -271,6 +289,7 @@ async function discoverBlockscoutHolderConcentration(
 
   const normalizedBurnAddresses = knownBurnAddresses.map((burnAddress) => burnAddress.toLowerCase());
   const normalizedPools = (context.liquidityPoolAddresses ?? []).map((pool) => pool.toLowerCase());
+  const normalizedLockers = knownLockerAddresses.map((lockerAddress) => lockerAddress.toLowerCase());
   const normalizedDeployer = context.deployerAddress?.toLowerCase();
   const normalizedOwner = context.ownerAddress?.toLowerCase();
   const pctOfBalance = (balanceRaw: string): number => {
@@ -291,6 +310,7 @@ async function discoverBlockscoutHolderConcentration(
     if (normalized === normalizedOwner) labels.push("OWNER");
     if (normalizedBurnAddresses.includes(normalized)) labels.push("BURN");
     if (normalizedPools.includes(normalized)) labels.push("LIQUIDITY_POOL");
+    if (normalizedLockers.includes(normalized)) labels.push("LOCKER");
     labels.push(row.isContract ? "CONTRACT" : "EOA");
 
     return {
@@ -306,6 +326,13 @@ async function discoverBlockscoutHolderConcentration(
     const sum = distributionRows.slice(0, n).reduce((acc, row) => acc + BigInt(row.balanceRaw), 0n);
     return Number((sum * 10_000n) / total) / 100;
   };
+  // Raw = same top-N math but over every returned holder row, infrastructure included — what
+  // a naive "top holders" list would show, kept alongside (never merged into) the adjusted
+  // figures above.
+  const pctOfTopNRaw = (n: number): number => {
+    const sum = enrichedRows.slice(0, n).reduce((acc, row) => acc + BigInt(row.balanceRaw), 0n);
+    return Number((sum * 10_000n) / total) / 100;
+  };
   const deployerPct = normalizedDeployer
     ? (enrichedRows.find((row) => row.address.toLowerCase() === normalizedDeployer)
         ?.totalSupplyPct ?? 0)
@@ -316,10 +343,12 @@ async function discoverBlockscoutHolderConcentration(
     : null;
   const liquidityPoolPct = pctOfRows(enrichedRows.filter((row) => row.labels.includes("LIQUIDITY_POOL")));
   const burnedPct = pctOfRows(enrichedRows.filter((row) => row.labels.includes("BURN")));
+  const lockerPct = pctOfRows(enrichedRows.filter((row) => row.labels.includes("LOCKER")));
   const excludedContractPct = pctOfRows(enrichedRows.filter((row) => row.isContract));
   const top1Pct = pctOfTopN(1);
   const top5Pct = pctOfTopN(5);
   const top10Pct = pctOfTopN(10);
+  const top20Pct = pctOfTopN(20);
   const suspiciousFlags = [
     ...(top1Pct >= 20 ? ["TOP_1_WALLET_HIGH"] : []),
     ...(top10Pct >= 60 ? ["TOP_10_WALLETS_CRITICAL"] : []),
@@ -332,12 +361,20 @@ async function discoverBlockscoutHolderConcentration(
     top1Pct,
     top5Pct,
     top10Pct,
+    top20Pct,
     top1Address: distributionRows[0]?.address ?? null,
     deployerPct,
     ownerPct,
     liquidityPoolPct,
     burnedPct,
+    lockerPct,
     excludedContractPct,
+    rawConcentration: {
+      top1Pct: pctOfTopNRaw(1),
+      top5Pct: pctOfTopNRaw(5),
+      top10Pct: pctOfTopNRaw(10),
+      top20Pct: pctOfTopNRaw(20)
+    },
     suspiciousFlags
   };
 
