@@ -1,5 +1,6 @@
 import { decodeEventLog, parseAbi, parseAbiItem, toEventSelector, type Hex } from "viem";
 import type { ChainAdapter } from "@genesis-sentinel/chain-adapters";
+import type { LockerProvider, LockStatusResult } from "./locker.js";
 import type { DiscoveredPool, LiquidityProvider, LiquidityProviderCoverage } from "./types.js";
 
 export const robinhoodChainId = 4663;
@@ -81,7 +82,8 @@ export type QuoteTokenPriceLookup = (address: `0x${string}`) => Promise<number |
  * not fabricated, if the lookup fails.
  */
 export function createRobinhoodLiquidityProvider(
-  getQuoteTokenPriceUsd: QuoteTokenPriceLookup
+  getQuoteTokenPriceUsd: QuoteTokenPriceLookup,
+  locker: LockerProvider
 ): LiquidityProvider {
   return {
     id: "robinhood-uniswap-liquidity",
@@ -101,7 +103,9 @@ export function createRobinhoodLiquidityProvider(
       const [v3Pools, v4Pools, v2Pools] = await Promise.all([
         discoverUniswapV3Liquidity(adapter, tokenAddress, getQuoteTokenPriceUsd).catch(() => []),
         discoverUniswapV4Liquidity(adapter, tokenAddress, blockNumber).catch(() => []),
-        discoverUniswapV2Liquidity(adapter, tokenAddress, getQuoteTokenPriceUsd).catch(() => [])
+        discoverUniswapV2Liquidity(adapter, chainId, tokenAddress, getQuoteTokenPriceUsd, locker).catch(
+          () => []
+        )
       ]);
 
       return [...v3Pools, ...v4Pools, ...v2Pools];
@@ -111,15 +115,17 @@ export function createRobinhoodLiquidityProvider(
 
 async function discoverUniswapV2Liquidity(
   adapter: ChainAdapter,
+  chainId: number,
   tokenAddress: `0x${string}`,
-  getQuoteTokenPriceUsd: QuoteTokenPriceLookup
+  getQuoteTokenPriceUsd: QuoteTokenPriceLookup,
+  locker: LockerProvider
 ): Promise<DiscoveredPool[]> {
   return compact(
     await Promise.all(
       robinhoodQuoteTokens
         .filter((quote) => quote.address.toLowerCase() !== tokenAddress.toLowerCase())
         .map((quote) =>
-          discoverUniswapV2Pool(adapter, tokenAddress, quote, getQuoteTokenPriceUsd).catch(
+          discoverUniswapV2Pool(adapter, chainId, tokenAddress, quote, getQuoteTokenPriceUsd, locker).catch(
             () => null
           )
         )
@@ -129,9 +135,11 @@ async function discoverUniswapV2Liquidity(
 
 async function discoverUniswapV2Pool(
   adapter: ChainAdapter,
+  chainId: number,
   tokenAddress: `0x${string}`,
   quote: (typeof robinhoodQuoteTokens)[number],
-  getQuoteTokenPriceUsd: QuoteTokenPriceLookup
+  getQuoteTokenPriceUsd: QuoteTokenPriceLookup,
+  locker: LockerProvider
 ): Promise<DiscoveredPool | null> {
   const pairAddress = await adapter
     .readContract<`0x${string}`>({
@@ -188,6 +196,14 @@ async function discoverUniswapV2Pool(
     quotePriceUsd !== null
       ? (Number(reserveQuote) / 10 ** quote.decimals) * 2 * quotePriceUsd
       : null;
+  const lockStatus = await locker
+    .getLockStatus({ chainId, lpTokenAddress: pairAddress })
+    .catch(
+      (): LockStatusResult => ({
+        status: "UNSUPPORTED",
+        reason: "Locker lookup failed."
+      })
+    );
 
   return {
     poolAddress: pairAddress,
@@ -204,7 +220,12 @@ async function discoverUniswapV2Pool(
       lpTotalSupplyRaw: lpTotalSupply.toString(),
       lpBurnedOrLockedRaw: burnedTotal.toString(),
       lpBurnedOrLockedPct: lpBurnedPct,
-      totalLiquidityUsd
+      totalLiquidityUsd,
+      // Only lpBurnedOrLockedPct above is a verified on-chain burn-balance measurement.
+      // lockStatus reflects a separate, distinct claim (a real third-party locker contract
+      // record) and is UNSUPPORTED until a locker provider is wired for this chain — never
+      // inferred from the burn percentage.
+      lockStatus
     }
   };
 }

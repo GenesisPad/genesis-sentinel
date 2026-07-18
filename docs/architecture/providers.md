@@ -10,6 +10,9 @@ a scan needs beyond raw RPC access:
   liquidity) from a DEX aggregator.
 - `HolderProvider` — top-holder snapshot and concentration analysis.
 - `LiquidityProvider` — on-chain pool discovery across DEX protocols.
+- `LockerProvider` — LP-lock verification against a specific third-party locker contract (see
+  `docs/architecture/liquidity.md`; distinct from burn-address detection, and `UNSUPPORTED` for
+  every chain until a real locker is wired).
 
 Each interface exposes `supportsChain(chainId)` so callers never branch on vendor name or
 adapter identity. `apps/worker/src/scan-worker.ts` looks up one `ProviderSet` per scan via

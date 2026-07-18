@@ -30,6 +30,32 @@ not have standalone pool contract addresses, so the database stores a determinis
 identifier derived from the pool id and persists the real `poolId` plus `poolManagerAddress` inside
 `liquidityData`.
 
+## LP ownership classification (Milestone 3)
+
+Uniswap V2 pool discovery (`discoverUniswapV2Pool` in
+`packages/providers/src/robinhood-liquidity.ts`) reports two distinct, separately-sourced
+signals in `liquidityData` — they are never merged into one claim:
+
+- `lpBurnedOrLockedPct` — verified by summing LP-token balances at known burn/dead addresses
+  directly on-chain. This is real, checkable evidence.
+- `lockStatus` — the result of a provider-neutral `LockerProvider.getLockStatus()` call (see
+  `packages/providers/src/locker.ts`). No concrete locker is wired for any chain today (Genesis
+  Locker's contract addresses/lock-record ABI are not yet available/verified in this codebase),
+  so this always reports `{ status: "UNSUPPORTED", reason: "..." }`. It is never inferred from
+  the burn percentage or from an explorer/website label — per the project rule "do not trust a
+  website label saying 'locked.'" When Genesis Locker's contracts are available, implement
+  `LockerProvider` against them and register it in `packages/providers/src/registry.ts`; no
+  other code changes are needed.
+
+V3 liquidity positions are NFT-based (Uniswap's `NonfungiblePositionManager`), and per-position
+ownership/tick-range/in-range status is **not implemented**. Robinhood Chain's
+`NonfungiblePositionManager` address has not been verified in this codebase, and the project
+rule against fabricating unverified contract addresses applies here the same as for V4:
+implementing V3 position-level ownership against a guessed address would be worse than not
+implementing it. Current V3 discovery only reports pool-level liquidity (see
+`discoverUniswapV3Pool`), not position ownership; treat any future work here as a distinct,
+explicitly-scoped addition once the position manager address is verified.
+
 Future liquidity discovery should:
 
 - Prefer bounded on-chain factory/event scanners for known DEX factories on the target chain.

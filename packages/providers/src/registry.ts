@@ -7,6 +7,7 @@ import {
 import { createCachedContractSourceProvider } from "./cache.js";
 import { createContractSourceChain } from "./contract-source-chain.js";
 import { createDexScreenerMarketDataProvider } from "./dexscreener.js";
+import { createUnsupportedLockerProvider } from "./locker.js";
 import { createRobinhoodLiquidityProvider, robinhoodChainId } from "./robinhood-liquidity.js";
 import { createSourcifyContractSourceProvider } from "./sourcify.js";
 import type { ProviderSet } from "./types.js";
@@ -60,9 +61,11 @@ export function createProviderRegistry(): { getProviderSet(chainId: number): Pro
       networkSlug: "robinhood"
     }),
     holder: createBlockscoutHolderProvider(robinhoodBlockscoutConfig),
-    liquidity: createRobinhoodLiquidityProvider((address) =>
-      robinhoodExplorer.getTokenPriceUsd({ chainId: robinhoodChainId, address })
-    )
+    liquidity: createRobinhoodLiquidityProvider(
+      (address) => robinhoodExplorer.getTokenPriceUsd({ chainId: robinhoodChainId, address }),
+      createUnsupportedLockerProvider()
+    ),
+    locker: createUnsupportedLockerProvider()
   });
 
   return {

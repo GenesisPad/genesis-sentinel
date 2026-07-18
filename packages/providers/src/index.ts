@@ -5,5 +5,6 @@ export * from "./sourcify.js";
 export * from "./contract-source-chain.js";
 export * from "./cache.js";
 export * from "./dexscreener.js";
+export * from "./locker.js";
 export * from "./robinhood-liquidity.js";
 export * from "./registry.js";

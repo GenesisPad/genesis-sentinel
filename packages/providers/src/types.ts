@@ -1,5 +1,6 @@
 import type { ChainAdapter } from "@genesis-sentinel/chain-adapters";
 import type { ContractSourceDetectorInput } from "@genesis-sentinel/security-engine";
+import type { LockerProvider } from "./locker.js";
 
 /**
  * Provider-neutral domain contracts for the evidence lookups a scan needs beyond raw RPC
@@ -209,4 +210,5 @@ export interface ProviderSet {
   market: MarketDataProvider;
   holder: HolderProvider;
   liquidity: LiquidityProvider;
+  locker: LockerProvider;
 }
