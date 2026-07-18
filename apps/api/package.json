@@ -1,0 +1,33 @@
+{
+  "name": "@genesis-sentinel/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/server.ts",
+    "start": "node dist/server.js",
+    "test": "vitest run --config ../../vitest.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@fastify/cors": "11.3.0",
+    "@fastify/rate-limit": "11.1.0",
+    "@fastify/swagger": "9.8.0",
+    "@fastify/swagger-ui": "6.1.0",
+    "@genesis-sentinel/config": "workspace:*",
+    "@genesis-sentinel/database": "workspace:*",
+    "@genesis-sentinel/observability": "workspace:*",
+    "@genesis-sentinel/queue": "workspace:*",
+    "@genesis-sentinel/shared": "workspace:*",
+    "fastify": "5.10.0",
+    "grammy": "1.44.0",
+    "pino": "10.3.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "tsx": "4.23.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}

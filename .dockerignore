@@ -1,0 +1,10 @@
+**/.next/cache
+**/.turbo
+**/dist
+**/node_modules
+**/tsconfig.tsbuildinfo
+.env
+.env.*
+!.env.example
+coverage
+tmp

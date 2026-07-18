@@ -1,0 +1,434 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ScanState {
+  QUEUED
+  RESOLVING_CHAIN
+  FETCHING_CONTRACT
+  ANALYZING_CONTRACT
+  DISCOVERING_MARKETS
+  ANALYZING_HOLDERS
+  SIMULATING_TRADES
+  SCORING
+  COMPLETED
+  PARTIALLY_COMPLETED
+  FAILED
+}
+
+enum ScanStageStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
+enum CheckOutcome {
+  DETECTED
+  PASSED
+  UNSUPPORTED
+  FAILED
+  INCONCLUSIVE
+  DATA_UNAVAILABLE
+}
+
+enum FindingSeverity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum FindingConfidence {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum RiskCategory {
+  CONTRACT_CONTROL
+  TRADING_SAFETY
+  LIQUIDITY_SAFETY
+  DISTRIBUTION_RISK
+  REPUTATION_RISK
+}
+
+enum RiskLevel {
+  LOW
+  MODERATE
+  HIGH
+  CRITICAL
+  UNABLE_TO_VERIFY
+}
+
+enum OwnershipStatus {
+  RENOUNCED
+  ACTIVE
+  UNKNOWN
+}
+
+enum EvidenceType {
+  FUNCTION
+  EVENT
+  STORAGE
+  BYTECODE
+  TRANSACTION_TRACE
+  SIMULATION
+  HOLDER_DATA
+  LIQUIDITY_DATA
+  EXTERNAL_SOURCE
+}
+
+model Chain {
+  id        String   @id @default(cuid())
+  chainId   Int      @unique
+  name      String
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tokens    Token[]
+  contracts Contract[]
+  scans     Scan[]
+}
+
+model Token {
+  id                String    @id @default(cuid())
+  chainId           Int
+  address           String
+  symbol            String?
+  name              String?
+  decimals          Int?
+  totalSupply       String?
+  holderCount       Int?
+  sourceVerified    Boolean?
+  deployerAddress   String?
+  contractCreatedAt DateTime?
+  creationTxHash    String?
+  tokenType         String?
+  iconUrl           String?
+  reputation        String?
+  priceUsd          String?
+  marketCapUsd      String?
+  volume24hUsd      String?
+  metadataBlock     BigInt?
+  metadataUpdatedAt DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  chain Chain  @relation(fields: [chainId], references: [chainId], onDelete: Restrict)
+  scans Scan[]
+
+  @@unique([chainId, address])
+  @@index([address])
+}
+
+model Contract {
+  id                    String   @id @default(cuid())
+  chainId               Int
+  address               String
+  firstObservedBlock    BigInt?
+  lastBytecodeBlock     BigInt?
+  bytecodeHash          String?
+  sourceVerified        Boolean?
+  sourceVerificationUrl String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  chain Chain @relation(fields: [chainId], references: [chainId], onDelete: Restrict)
+
+  @@unique([chainId, address])
+  @@index([address])
+}
+
+model Scan {
+  id                 String    @id
+  chainId            Int
+  tokenId            String?
+  targetAddress      String
+  state              ScanState @default(QUEUED)
+  scannerVersion     String
+  idempotencyKeyHash String
+  requestedBy        String?
+  scanBlockNumber    BigInt?
+  scanBlockTimestamp DateTime?
+  queuedAt           DateTime  @default(now())
+  startedAt          DateTime?
+  completedAt        DateTime?
+  failureSummary     String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  chain           Chain            @relation(fields: [chainId], references: [chainId], onDelete: Restrict)
+  token           Token?           @relation(fields: [tokenId], references: [id], onDelete: SetNull)
+  stages          ScanStage[]
+  detectorResults DetectorResult[]
+  findings        Finding[]
+  riskAssessment  RiskAssessment?
+  simulationRuns  SimulationRun[]
+
+  @@unique([chainId, targetAddress, idempotencyKeyHash])
+  @@index([chainId, targetAddress])
+  @@index([state])
+}
+
+model ScanStage {
+  id           String          @id @default(cuid())
+  scanId       String
+  name         ScanState
+  status       ScanStageStatus @default(PENDING)
+  startedAt    DateTime?
+  completedAt  DateTime?
+  errorCode    String?
+  errorMessage String?
+  metadata     Json?
+
+  scan Scan @relation(fields: [scanId], references: [id], onDelete: Cascade)
+
+  @@unique([scanId, name])
+}
+
+model Detector {
+  id          String   @id
+  name        String
+  description String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  results DetectorResult[]
+}
+
+model DetectorResult {
+  id              String        @id @default(cuid())
+  scanId          String
+  detectorId      String
+  detectorVersion String
+  startedAt       DateTime?
+  completedAt     DateTime?
+  outcome         CheckOutcome?
+  errorMessage    String?
+  metadata        Json?
+
+  scan     Scan            @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  detector Detector        @relation(fields: [detectorId], references: [id], onDelete: Restrict)
+  checks   DetectorCheck[]
+  findings Finding[]
+
+  @@index([scanId])
+  @@index([detectorId, detectorVersion])
+}
+
+model DetectorCheck {
+  id               String            @id @default(cuid())
+  detectorResultId String
+  code             String
+  outcome          CheckOutcome
+  confidence       FindingConfidence
+  evidence         Json
+  errorMessage     String?
+  createdAt        DateTime          @default(now())
+
+  detectorResult DetectorResult @relation(fields: [detectorResultId], references: [id], onDelete: Cascade)
+
+  @@index([detectorResultId])
+  @@index([code])
+}
+
+model Finding {
+  id                   String            @id @default(cuid())
+  scanId               String
+  detectorResultId     String?
+  code                 String
+  detectorId           String
+  detectorVersion      String
+  title                String
+  severity             FindingSeverity
+  category             RiskCategory
+  confidence           FindingConfidence
+  description          String
+  technicalExplanation String
+  recommendation       String?
+  createdAt            DateTime          @default(now())
+
+  scan           Scan              @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  detectorResult DetectorResult?   @relation(fields: [detectorResultId], references: [id], onDelete: SetNull)
+  evidence       FindingEvidence[]
+
+  @@index([scanId, severity])
+  @@index([code])
+}
+
+model FindingEvidence {
+  id              String       @id @default(cuid())
+  findingId       String
+  type            EvidenceType
+  summary         String
+  data            Json
+  blockNumber     BigInt?
+  transactionHash String?
+  address         String?
+  createdAt       DateTime     @default(now())
+
+  finding Finding @relation(fields: [findingId], references: [id], onDelete: Cascade)
+
+  @@index([findingId])
+  @@index([blockNumber])
+}
+
+model RiskAssessment {
+  id             String            @id @default(cuid())
+  scanId         String            @unique
+  score          Int
+  level          RiskLevel
+  confidence     FindingConfidence
+  scannerVersion String
+  scoringVersion String
+  explanation    String?
+  createdAt      DateTime          @default(now())
+
+  scan           Scan            @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  categoryScores CategoryScore[]
+}
+
+model CategoryScore {
+  id               String            @id @default(cuid())
+  riskAssessmentId String
+  category         RiskCategory
+  score            Int
+  confidence       FindingConfidence
+  explanation      String?
+
+  riskAssessment RiskAssessment @relation(fields: [riskAssessmentId], references: [id], onDelete: Cascade)
+
+  @@unique([riskAssessmentId, category])
+}
+
+model LiquidityPool {
+  id                 String   @id @default(cuid())
+  chainId            Int
+  tokenAddress       String
+  poolAddress        String
+  dex                String?
+  quoteTokenAddress  String?
+  firstObservedBlock BigInt?
+  lastObservedBlock  BigInt?
+  liquidityData      Json?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([chainId, poolAddress])
+  @@index([chainId, tokenAddress])
+}
+
+model HolderSnapshot {
+  id            String   @id @default(cuid())
+  chainId       Int
+  tokenAddress  String
+  blockNumber   BigInt
+  holderCount   Int?
+  topHolders    Json
+  concentration Json?
+  createdAt     DateTime @default(now())
+
+  @@unique([chainId, tokenAddress, blockNumber])
+}
+
+model SimulationRun {
+  id             String       @id @default(cuid())
+  scanId         String
+  kind           String
+  outcome        CheckOutcome
+  blockNumber    BigInt?
+  input          Json
+  result         Json?
+  revertReason   String?
+  gasUsed        BigInt?
+  simulationTool String
+  createdAt      DateTime     @default(now())
+
+  scan Scan @relation(fields: [scanId], references: [id], onDelete: Cascade)
+
+  @@index([scanId])
+}
+
+model APIKey {
+  id         String    @id @default(cuid())
+  name       String
+  keyHash    String    @unique
+  prefix     String
+  enabled    Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+
+  usage APIUsage[]
+}
+
+model APIUsage {
+  id        String   @id @default(cuid())
+  apiKeyId  String?
+  route     String
+  method    String
+  status    Int
+  units     Int      @default(1)
+  createdAt DateTime @default(now())
+
+  apiKey APIKey? @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+
+  @@index([apiKeyId, createdAt])
+}
+
+model Watchlist {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items WatchlistItem[]
+}
+
+model WatchlistItem {
+  id          String   @id @default(cuid())
+  watchlistId String
+  chainId     Int
+  address     String
+  createdAt   DateTime @default(now())
+
+  watchlist Watchlist @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
+
+  @@unique([watchlistId, chainId, address])
+}
+
+model SecurityEvent {
+  id        String   @id @default(cuid())
+  type      String
+  severity  String
+  subject   String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([type, createdAt])
+}
+
+model TelegramUser {
+  id             String   @id @default(cuid())
+  telegramUserId BigInt   @unique
+  username       String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model TelegramChat {
+  id             String   @id @default(cuid())
+  telegramChatId BigInt   @unique
+  type           String
+  title          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}

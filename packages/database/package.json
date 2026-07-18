@@ -1,0 +1,32 @@
+{
+  "name": "@genesis-sentinel/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "pnpm prisma:generate && tsc -p tsconfig.json",
+    "prisma:generate": "prisma generate --schema prisma/schema.prisma",
+    "prisma:validate": "prisma validate --schema prisma/schema.prisma",
+    "test": "vitest run --config ../../vitest.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@genesis-sentinel/security-engine": "workspace:*",
+    "@genesis-sentinel/shared": "workspace:*",
+    "@prisma/adapter-pg": "7.8.0",
+    "@prisma/client": "7.8.0",
+    "pg": "8.22.0"
+  },
+  "devDependencies": {
+    "@types/pg": "8.15.6",
+    "prisma": "7.8.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "incremental": true,
+    "jsx": "preserve",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "types": ["node"],
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+    // The imported frontend (src/) wasn't authored against the monorepo's stricter-than-
+    // default base config; relaxing these two here avoids a mechanical rewrite of ~30 UI
+    // component files for a display-only app.
+    "exactOptionalPropertyTypes": false,
+    "noUncheckedIndexedAccess": false
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules", "_legacy-foundation-app"]
+}

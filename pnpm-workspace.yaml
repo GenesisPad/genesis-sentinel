@@ -1,0 +1,15 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+allowBuilds:
+  "@prisma/engines": true
+  bufferutil: true
+  esbuild: true
+  msgpackr-extract: true
+  prisma: true
+  sharp: true
+  unrs-resolver: true
+  utf-8-validate: true
+minimumReleaseAgeExclude:
+  - bullmq@5.80.1
+  - eslint@10.7.0

@@ -1,0 +1,78 @@
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.api
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      API_HOST: 0.0.0.0
+      API_PORT: 4000
+      API_RATE_LIMIT_MAX: ${API_RATE_LIMIT_MAX:-120}
+      API_RATE_LIMIT_TIME_WINDOW: ${API_RATE_LIMIT_TIME_WINDOW:-1 minute}
+      API_CORS_ORIGIN: ${API_CORS_ORIGIN}
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      ROBINHOOD_RPC_URL: ${ROBINHOOD_RPC_URL}
+      ROBINHOOD_FALLBACK_RPC_URLS: ${ROBINHOOD_FALLBACK_RPC_URLS:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      WEB_PUBLIC_API_BASE_URL: ${WEB_PUBLIC_API_BASE_URL}
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'node -e "fetch(''http://127.0.0.1:4000/health'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"'
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.worker
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      ROBINHOOD_RPC_URL: ${ROBINHOOD_RPC_URL}
+      ROBINHOOD_FALLBACK_RPC_URLS: ${ROBINHOOD_FALLBACK_RPC_URLS:-}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      SIMULATION_FORK_ENABLED: ${SIMULATION_FORK_ENABLED:-false}
+      SIMULATION_FORK_TIMEOUT_MS: ${SIMULATION_FORK_TIMEOUT_MS:-30000}
+      SIMULATION_FORK_NATIVE_AMOUNT_WEI: ${SIMULATION_FORK_NATIVE_AMOUNT_WEI:-1000000000000000}
+      WEB_PUBLIC_API_BASE_URL: ${WEB_PUBLIC_API_BASE_URL}
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.web
+      args:
+        WEB_PUBLIC_API_BASE_URL: ${WEB_PUBLIC_API_BASE_URL}
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WEB_PUBLIC_API_BASE_URL: ${WEB_PUBLIC_API_BASE_URL}
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      ROBINHOOD_RPC_URL: ${ROBINHOOD_RPC_URL}
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'node -e "fetch(''http://127.0.0.1:3000/'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"'
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped

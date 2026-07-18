@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+.next
+.turbo
+coverage
+dist
+node_modules
+*.log
+*.tsbuildinfo

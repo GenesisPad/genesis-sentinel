@@ -1,0 +1,72 @@
+# Production Readiness
+
+Stage 11 hardens Genesis Sentinel for a private alpha deployment. It does not make the scanner complete; unsupported liquidity, holder, simulation, and source-verification boundaries remain visible in reports.
+
+## Required Services
+
+- API service from `infrastructure/docker/Dockerfile.api`.
+- Worker service from `infrastructure/docker/Dockerfile.worker`.
+- Web service from `infrastructure/docker/Dockerfile.web`.
+- Managed PostgreSQL.
+- Managed Redis.
+- Production-grade Robinhood Chain RPC URL.
+- HTTPS ingress or reverse proxy in front of API and web.
+
+## Required Environment
+
+Use `.env.example` as the base and set production values:
+
+- `NODE_ENV=production`
+- `DATABASE_URL`
+- `REDIS_URL`
+- `ROBINHOOD_RPC_URL`
+- `WEB_PUBLIC_API_BASE_URL`
+- `API_RATE_LIMIT_MAX`
+- `API_RATE_LIMIT_TIME_WINDOW`
+- `WORKER_CONCURRENCY`
+- `TELEGRAM_BOT_TOKEN`, only if Telegram is enabled
+- `TELEGRAM_WEBHOOK_SECRET`, recommended when Telegram is enabled
+- `TELEGRAM_SCAN_COOLDOWN_SECONDS`
+- `TELEGRAM_SCAN_BURST_LIMIT`
+- `TELEGRAM_SCAN_BURST_WINDOW_SECONDS`
+
+Do not use the public fallback RPC in production. The chain adapter rejects that path when `NODE_ENV=production`.
+
+## Deployment Checks
+
+Before exposing the deployment:
+
+1. Run `pnpm lint`.
+2. Run `pnpm typecheck`.
+3. Run `pnpm test`.
+4. Run `pnpm prisma:validate`.
+5. Run `pnpm build`.
+6. Apply database migrations against the production database.
+7. Start API, worker, and web containers.
+8. Run `SMOKE_API_BASE_URL=https://api.example.com SMOKE_WEB_BASE_URL=https://app.example.com pnpm smoke:production`.
+
+## Runtime Limits
+
+- API requests are rate limited with `API_RATE_LIMIT_MAX` and `API_RATE_LIMIT_TIME_WINDOW`.
+- Request bodies are capped at 16 KB.
+- Worker parallelism is controlled with `WORKER_CONCURRENCY`.
+- Scan jobs use bounded retries with exponential backoff.
+- Readiness fails if PostgreSQL or Redis are unavailable.
+- Telegram scan submission is limited per chat/user before queue enqueueing.
+
+## Monitoring
+
+Production should alert on:
+
+- API `/ready` returning non-200.
+- Web home route returning non-200.
+- Worker process restarts.
+- Queue depth growing unexpectedly.
+- Failed scan-job rate.
+- Telegram webhook 401/404/5xx rates if the bot is enabled.
+- RPC errors or rate-limit responses.
+- PostgreSQL and Redis saturation.
+
+## Release Gate
+
+Private alpha is acceptable when the deployment checks pass and monitoring is configured. Public production still needs at least one live data upgrade, clearer user-facing disclaimers, and a real incident-response path.

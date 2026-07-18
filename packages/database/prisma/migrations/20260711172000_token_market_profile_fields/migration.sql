@@ -1,0 +1,3 @@
+ALTER TABLE "Token" ADD COLUMN "priceUsd" TEXT;
+ALTER TABLE "Token" ADD COLUMN "marketCapUsd" TEXT;
+ALTER TABLE "Token" ADD COLUMN "volume24hUsd" TEXT;
