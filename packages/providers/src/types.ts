@@ -13,6 +13,11 @@ import type { ContractSourceDetectorInput } from "@genesis-sentinel/security-eng
 
 export type ContractSourceResult = ContractSourceDetectorInput;
 
+/**
+ * Aggregate source lookup consumed by worker orchestration/detectors. Built by composing
+ * one or more ContractSourceProvider instances (see below) in a configured fallback order —
+ * see createContractSourceChain in contract-source-chain.ts.
+ */
 export interface SourceProvider {
   readonly id: string;
   supportsChain(chainId: number): boolean;
@@ -20,6 +25,61 @@ export interface SourceProvider {
     chainId: number;
     address: `0x${string}`;
   }): Promise<ContractSourceResult>;
+}
+
+export interface ContractSourceProviderInput {
+  chainId: number;
+  address: `0x${string}`;
+  /** Optional, cache-key-only context; never sent to the vendor. */
+  bytecodeHash?: string;
+}
+
+export interface ContractVerificationResult {
+  status: "VERIFIED" | "UNVERIFIED" | "UNAVAILABLE";
+  provider: string;
+  contractName?: string | null;
+  compilerVersion?: string | null;
+  optimizationEnabled?: boolean | null;
+  optimizationRuns?: number | null;
+  language?: string | null;
+  /** True when the vendor confirmed the verified source recompiles to the observed runtime
+   * bytecode. False when the vendor flags a mismatch. Null when the vendor does not report
+   * this. Never inferred locally — only forwarded from the vendor's own signal. */
+  bytecodeMatches?: boolean | null;
+}
+
+export interface ContractSourceFile {
+  filename: string;
+  sourceCode: string;
+}
+
+export interface VerifiedContractSource {
+  contractName?: string | null;
+  compilerVersion?: string | null;
+  language?: string | null;
+  sourceFiles: ContractSourceFile[];
+}
+
+export interface ProxyImplementationResult {
+  implementationAddress: `0x${string}`;
+  proxyPattern: "EIP1967" | "UNKNOWN";
+}
+
+/**
+ * Granular per-vendor source-verification capability, modeled closely on Milestone 1's
+ * ContractSourceProvider interface. Concrete vendors (Sourcify, Blockscout) implement this;
+ * createContractSourceChain composes an ordered list of these into the single SourceProvider
+ * worker orchestration actually calls, so adding a vendor never touches scan-worker.ts.
+ */
+export interface ContractSourceProvider {
+  readonly id: string;
+  supports(chainId: number): boolean;
+  getVerification(input: ContractSourceProviderInput): Promise<ContractVerificationResult>;
+  getSource(input: ContractSourceProviderInput): Promise<VerifiedContractSource | null>;
+  getAbi(input: ContractSourceProviderInput): Promise<unknown[] | null>;
+  getImplementation?(
+    input: ContractSourceProviderInput
+  ): Promise<ProxyImplementationResult | null>;
 }
 
 export interface ExplorerTokenProfile {

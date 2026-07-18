@@ -10,7 +10,9 @@ import {
   stringValue
 } from "./http.js";
 import type {
+  ContractSourceProvider,
   ContractSourceResult,
+  ContractVerificationResult,
   EnrichedHolder,
   ExplorerProvider,
   ExplorerTokenProfile,
@@ -18,7 +20,8 @@ import type {
   HolderProvider,
   HolderProviderContext,
   HolderSnapshotResult,
-  SourceProvider
+  ProxyImplementationResult,
+  VerifiedContractSource
 } from "./types.js";
 
 const knownBurnAddresses = [
@@ -35,50 +38,107 @@ export interface BlockscoutChainConfig {
 }
 
 /**
- * Creates Blockscout-backed source, explorer, and holder providers scoped to a single chain.
- * Blockscout is the primary/only source provider today; see docs/architecture/providers.md
- * for the planned Sourcify/Etherscan-compatible fallback order.
+ * Blockscout-backed ContractSourceProvider. Uses the legacy Etherscan-compatible
+ * `getsourcecode` endpoint for verification/source/ABI, and the v2 `/smart-contracts`
+ * endpoint for proxy implementation detection. See docs/architecture/provider-strategy.md
+ * for where Blockscout sits in the source-provider fallback order.
  */
-export function createBlockscoutSourceProvider(config: BlockscoutChainConfig): SourceProvider {
+export function createBlockscoutContractSourceProvider(
+  config: BlockscoutChainConfig
+): ContractSourceProvider {
+  const fetchLegacyRecord = (address: `0x${string}`) =>
+    fetchJson(
+      `${config.legacyApiBaseUrl}?module=contract&action=getsourcecode&address=${address}`
+    ).then((response) =>
+      isRecord(response) && Array.isArray(response.result) && isRecord(response.result[0])
+        ? response.result[0]
+        : null
+    );
+
   return {
-    id: "blockscout-source",
-    supportsChain: (chainId) => chainId === config.chainId,
-    async getContractSource({ chainId, address }) {
+    id: "blockscout",
+    supports: (chainId) => chainId === config.chainId,
+
+    async getVerification({ chainId, address }): Promise<ContractVerificationResult> {
       if (chainId !== config.chainId) {
-        return { status: "UNAVAILABLE", address, sourceFiles: [] };
+        return { status: "UNAVAILABLE", provider: "blockscout" };
       }
 
-      const response = await fetchJson(
-        `${config.legacyApiBaseUrl}?module=contract&action=getsourcecode&address=${address}`
-      );
-      if (
-        !isRecord(response) ||
-        !Array.isArray(response.result) ||
-        !isRecord(response.result[0])
-      ) {
-        return { status: "UNAVAILABLE", address, sourceFiles: [] };
+      const record = await fetchLegacyRecord(address).catch(() => null);
+      if (!record) {
+        return { status: "UNAVAILABLE", provider: "blockscout" };
       }
 
-      const record = response.result[0];
+      const sourceFiles = extractSourceFiles(record);
+      return {
+        status: sourceFiles.length > 0 ? "VERIFIED" : "UNVERIFIED",
+        provider: "blockscout",
+        contractName: stringValue(record.ContractName),
+        compilerVersion: stringValue(record.CompilerVersion),
+        optimizationEnabled: booleanValue(record.OptimizationUsed),
+        optimizationRuns: numberValue(record.Runs),
+        language: stringValue(record.Language)
+      };
+    },
+
+    async getSource({ chainId, address }): Promise<VerifiedContractSource | null> {
+      if (chainId !== config.chainId) {
+        return null;
+      }
+
+      const record = await fetchLegacyRecord(address).catch(() => null);
+      if (!record) {
+        return null;
+      }
+
       const sourceFiles = extractSourceFiles(record);
       if (sourceFiles.length === 0) {
-        return {
-          status: "UNAVAILABLE",
-          address,
-          contractName: stringValue(record.ContractName),
-          compilerVersion: stringValue(record.CompilerVersion),
-          sourceFiles: []
-        };
+        return null;
       }
 
       return {
-        status: "VERIFIED",
-        address,
         contractName: stringValue(record.ContractName),
         compilerVersion: stringValue(record.CompilerVersion),
         language: stringValue(record.Language),
-        abi: parseMaybeJson(stringValue(record.ABI)),
         sourceFiles
+      };
+    },
+
+    async getAbi({ chainId, address }): Promise<unknown[] | null> {
+      if (chainId !== config.chainId) {
+        return null;
+      }
+
+      const record = await fetchLegacyRecord(address).catch(() => null);
+      if (!record) {
+        return null;
+      }
+
+      const abi = parseMaybeJson(stringValue(record.ABI));
+      return Array.isArray(abi) ? abi : null;
+    },
+
+    async getImplementation({ chainId, address }): Promise<ProxyImplementationResult | null> {
+      if (chainId !== config.chainId) {
+        return null;
+      }
+
+      const response = await fetchJson(`${config.apiBaseUrl}/smart-contracts/${address}`).catch(
+        () => null
+      );
+      if (!isRecord(response) || !Array.isArray(response.implementations)) {
+        return null;
+      }
+
+      const first = response.implementations.find(isRecord);
+      const implementationAddress = addressValue(first?.address);
+      if (!implementationAddress) {
+        return null;
+      }
+
+      return {
+        implementationAddress,
+        proxyPattern: "UNKNOWN"
       };
     }
   };

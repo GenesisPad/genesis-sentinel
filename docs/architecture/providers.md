@@ -21,8 +21,11 @@ never hardcodes a provider vendor or a chain name string.
 
 Only Robinhood Chain (4663) has a registered `ProviderSet` today, combining:
 
-- `createBlockscoutSourceProvider` / `createBlockscoutExplorerProvider` /
-  `createBlockscoutHolderProvider` — all backed by the Robinhood Chain Blockscout instance.
+- `source` — a `createContractSourceChain([sourcify, blockscout])` composite, cached per
+  provider. See `docs/architecture/provider-strategy.md` for the full Milestone 1 design
+  (the granular `ContractSourceProvider` interface, proxy detection, bytecode-hash caching).
+- `createBlockscoutExplorerProvider` / `createBlockscoutHolderProvider` — backed by the
+  Robinhood Chain Blockscout instance.
 - `createDexScreenerMarketDataProvider` — DexScreener, network slug `robinhood`.
 - `createRobinhoodLiquidityProvider` — on-chain Uniswap V2/V3/V4 discovery against the
   Robinhood Chain factory/PoolManager addresses, using the Blockscout explorer provider's
@@ -30,11 +33,10 @@ Only Robinhood Chain (4663) has a registered `ProviderSet` today, combining:
 
 ## Fallback order
 
-**Source verification.** Blockscout's legacy Etherscan-compatible `getsourcecode` endpoint is
-the only source today. Planned fallback order once broadened (see `docs/adr/0016-provider-
-abstraction-layer.md` and remaining task "Source verification expansion"): Blockscout →
-Sourcify → other Etherscan-compatible explorers, first verified result wins. A chain with none
-of these gets an explicit `UNAVAILABLE` `SourceProvider` result — never fabricated verification.
+**Source verification.** See `docs/architecture/provider-strategy.md` — Sourcify is tried
+first, then Blockscout's legacy Etherscan-compatible `getsourcecode` endpoint, first verified
+result wins. A chain with no provider support gets an explicit `UNAVAILABLE` `SourceProvider`
+result — never fabricated verification.
 
 **Token/market profile.** `collectTokenProfile` in `apps/worker/src/scan-worker.ts` merges
 three sources in this precedence: on-chain ERC-20 metadata (name/symbol/decimals only) →
