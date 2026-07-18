@@ -97,6 +97,7 @@ function createAdapter(
     onReadContract?: (parameters: Parameters<ChainAdapter["readContract"]>[0]) => unknown;
     onGetLogs?: (parameters: Parameters<ChainAdapter["getLogs"]>[0]) => unknown;
     onTraceCall?: (parameters: Parameters<NonNullable<ChainAdapter["traceCall"]>>[0]) => unknown;
+    onGetStorageAt?: (parameters: Parameters<ChainAdapter["getStorageAt"]>[0]) => unknown;
   } = {}
 ): ChainAdapter {
   return {
@@ -160,6 +161,11 @@ function createAdapter(
         symbol: "TOK",
         decimals: 18
       };
+    },
+    async getStorageAt(parameters) {
+      await Promise.resolve();
+      const result = options.onGetStorageAt?.(parameters);
+      return (result as `0x${string}` | undefined) ?? `0x${"0".repeat(64)}`;
     }
   };
 }
@@ -205,6 +211,8 @@ describe("scan worker orchestration", () => {
       "detector:contract-code-existence:0",
       "detector:erc20-metadata:0",
       "detector:ownership-status:0",
+      "detector:eip1967-proxy-storage:0",
+      "detector:dangerous-opcode-surface:0",
       "detector:ownership-selector-patterns:0",
       "detector:proxy-selector-patterns:0",
       "detector:mint-selector-patterns:0",

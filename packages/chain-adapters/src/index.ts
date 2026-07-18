@@ -105,6 +105,7 @@ export interface ChainAdapter {
   getBlockNumber(): Promise<bigint>;
   getBlock(input: { blockNumber: bigint }): Promise<ChainBlock>;
   getBytecode(input: { address: `0x${string}`; blockNumber?: bigint }): Promise<Hex>;
+  getStorageAt(input: { address: `0x${string}`; slot: Hex; blockNumber?: bigint }): Promise<Hex>;
   readContract<T>(input: ContractReadInput): Promise<T>;
   getLogs(input: LogQuery): Promise<ChainLog[]>;
   getTransaction(input: { hash: Hash }): Promise<ChainTransaction | null>;
@@ -228,6 +229,17 @@ export function createViemChainAdapter(
           address: normalizeEvmAddress(input.address),
           blockNumber: input.blockNumber
         })) ?? "0x"
+      );
+    },
+
+    async getStorageAt(input) {
+      assertAddress(input.address);
+      return (
+        (await client.getStorageAt({
+          address: normalizeEvmAddress(input.address),
+          slot: input.slot,
+          blockNumber: input.blockNumber
+        })) ?? `0x${"0".repeat(64)}`
       );
     },
 

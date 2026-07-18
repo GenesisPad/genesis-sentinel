@@ -113,6 +113,27 @@ describe("viem adapter", () => {
     });
   });
 
+  it("reads storage slots and normalizes an empty result to a zero-filled slot", async () => {
+    const calls: unknown[] = [];
+    const adapter = createViemChainAdapter(mockChainConfig, {
+      client: {
+        async getStorageAt(input: unknown) {
+          await Promise.resolve();
+          calls.push(input);
+          return undefined;
+        }
+      } as never
+    });
+
+    await expect(
+      adapter.getStorageAt({
+        address: "0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD",
+        slot: "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bb"
+      })
+    ).resolves.toBe(`0x${"0".repeat(64)}`);
+    expect(calls).toMatchObject([{ address: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd" }]);
+  });
+
   it("runs raw eth_call through traceCall", async () => {
     const calls: unknown[] = [];
     const adapter = createViemChainAdapter(mockChainConfig, {

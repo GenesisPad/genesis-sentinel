@@ -633,6 +633,9 @@ export async function processScanJob(
         },
         async getOwnerAddress(address) {
           return readOwnerAddress(adapter, address);
+        },
+        async getStorageAt(slot) {
+          return adapter.getStorageAt({ address: target.address, slot, blockNumber });
         }
       },
       {

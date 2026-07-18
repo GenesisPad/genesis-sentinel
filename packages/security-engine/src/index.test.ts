@@ -6,6 +6,8 @@ import {
   createUnsupportedLiquidityDiscovery,
   createUnsupportedTradeSimulations,
   createEmptyDetectorResult,
+  dangerousOpcodeDetector,
+  eip1967ProxyDetector,
   ownershipStatusDetector,
   runFoundationDetectors,
   scoreFindings,
@@ -15,6 +17,8 @@ import {
 } from "./index.js";
 
 const noOwner = () => Promise.resolve(null);
+const zeroSlot = `0x${"0".repeat(64)}` as const;
+const noStorage = () => Promise.resolve(zeroSlot);
 
 const context = {
   scanId: "scan-1",
@@ -89,7 +93,8 @@ describe("foundation detectors", () => {
             decimals: 18
           };
         },
-        getOwnerAddress: noOwner
+        getOwnerAddress: noOwner,
+        getStorageAt: noStorage
       },
       context
     );
@@ -111,7 +116,8 @@ describe("foundation detectors", () => {
             decimals: null
           };
         },
-        getOwnerAddress: noOwner
+        getOwnerAddress: noOwner,
+        getStorageAt: noStorage
       },
       context
     );
@@ -157,6 +163,90 @@ describe("ownership status detector", () => {
     expect(result.checks[0]).toMatchObject({
       code: "OWNER_READ_UNAVAILABLE",
       outcome: "DATA_UNAVAILABLE"
+    });
+  });
+});
+
+describe("eip1967 proxy storage detector", () => {
+  it("reports absence when every EIP-1967 slot is zero, not just no selector match", async () => {
+    const result = await eip1967ProxyDetector.run({ getStorageAt: noStorage }, context);
+
+    expect(result.findings).toEqual([]);
+    expect(result.checks[0]).toMatchObject({ code: "EIP1967_PROXY_ABSENT", outcome: "PASSED" });
+  });
+
+  it("detects a proxy from the real implementation storage slot value", async () => {
+    const implementationSlotValue =
+      `0x${"0".repeat(24)}1111111111111111111111111111111111111111` as const;
+    const result = await eip1967ProxyDetector.run(
+      {
+        getStorageAt: (slot) =>
+          Promise.resolve(
+            slot === "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bb"
+              ? implementationSlotValue
+              : zeroSlot
+          )
+      },
+      context
+    );
+
+    expect(result.findings[0]).toMatchObject({
+      code: "EIP1967_PROXY_DETECTED",
+      severity: "HIGH",
+      category: "CONTRACT_CONTROL"
+    });
+    expect(result.findings[0]?.description).toContain("1111111111111111111111111111111111111111");
+  });
+
+  it("detects a beacon proxy when only the beacon slot is set", async () => {
+    const beaconSlotValue =
+      `0x${"0".repeat(24)}2222222222222222222222222222222222222222` as const;
+    const result = await eip1967ProxyDetector.run(
+      {
+        getStorageAt: (slot) =>
+          Promise.resolve(
+            slot === "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"
+              ? beaconSlotValue
+              : zeroSlot
+          )
+      },
+      context
+    );
+
+    expect(result.findings[0]).toMatchObject({ code: "EIP1967_BEACON_PROXY_DETECTED" });
+  });
+});
+
+describe("dangerous opcode detector", () => {
+  it("passes when neither DELEGATECALL nor SELFDESTRUCT appear as real instructions", async () => {
+    const result = await dangerousOpcodeDetector.run({ bytecode: "0x600035" }, context);
+
+    expect(result.findings).toEqual([]);
+    expect(result.checks[0]).toMatchObject({ code: "DANGEROUS_OPCODES_ABSENT", outcome: "PASSED" });
+  });
+
+  it("does not flag a byte that only appears as PUSH immediate data", async () => {
+    // PUSH2 0xf400 pushes the bytes f4 00 as data, not as instructions.
+    const result = await dangerousOpcodeDetector.run({ bytecode: "0x61f40000" }, context);
+
+    expect(result.findings).toEqual([]);
+  });
+
+  it("detects a real DELEGATECALL instruction", async () => {
+    const result = await dangerousOpcodeDetector.run({ bytecode: "0x6000f4" }, context);
+
+    expect(result.findings[0]).toMatchObject({
+      code: "DELEGATECALL_OPCODE_PRESENT",
+      severity: "MEDIUM"
+    });
+  });
+
+  it("detects a real SELFDESTRUCT instruction", async () => {
+    const result = await dangerousOpcodeDetector.run({ bytecode: "0x6000ff" }, context);
+
+    expect(result.findings[0]).toMatchObject({
+      code: "SELFDESTRUCT_OPCODE_PRESENT",
+      severity: "HIGH"
     });
   });
 });

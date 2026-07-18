@@ -440,6 +440,206 @@ export interface OwnerAddressDetectorInput {
   getOwnerAddress(address: `0x${string}`): Promise<`0x${string}` | null>;
 }
 
+export interface StorageReaderDetectorInput {
+  getStorageAt(slot: `0x${string}`): Promise<`0x${string}`>;
+}
+
+// EIP-1967 well-known storage slots: keccak256("eip1967.proxy.<name>") - 1.
+const eip1967ImplementationSlot =
+  "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bb" as const;
+const eip1967AdminSlot = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103" as const;
+const eip1967BeaconSlot =
+  "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50" as const;
+
+function addressFromSlot(slot: `0x${string}`): `0x${string}` | null {
+  const value = slot.slice(2).replace(/^0+/, "");
+  if (value.length === 0) {
+    return null;
+  }
+  return `0x${value.padStart(40, "0")}`.toLowerCase() as `0x${string}`;
+}
+
+/**
+ * Reads the standardized EIP-1967 implementation/admin/beacon storage slots directly on-chain
+ * rather than inferring proxy behavior from function-selector presence. A non-zero
+ * implementation or beacon slot is direct evidence of an active EIP-1967-style proxy; an
+ * all-zero result is direct evidence of absence of this specific standard (it does not rule
+ * out non-standard proxy patterns like minimal/diamond proxies, which selector-pattern
+ * detectors may still flag separately).
+ */
+export const eip1967ProxyDetector: SecurityDetector<StorageReaderDetectorInput> = {
+  metadata: {
+    id: "eip1967-proxy-storage",
+    version: detectorVersion,
+    name: "EIP-1967 proxy storage",
+    description: "Reads the EIP-1967 implementation, admin, and beacon storage slots on-chain."
+  },
+
+  async run(input, context) {
+    const [implementationSlotValue, adminSlotValue, beaconSlotValue] = await Promise.all([
+      input.getStorageAt(eip1967ImplementationSlot),
+      input.getStorageAt(eip1967AdminSlot),
+      input.getStorageAt(eip1967BeaconSlot)
+    ]);
+    const implementationAddress = addressFromSlot(implementationSlotValue);
+    const adminAddress = addressFromSlot(adminSlotValue);
+    const beaconAddress = addressFromSlot(beaconSlotValue);
+
+    const evidence: FindingEvidence = {
+      type: "STORAGE",
+      summary: "EIP-1967 implementation/admin/beacon storage slot read",
+      address: context.address,
+      data: { implementationAddress, adminAddress, beaconAddress }
+    };
+    if (context.blockNumber !== undefined) {
+      evidence.blockNumber = context.blockNumber;
+    }
+
+    if (!implementationAddress && !beaconAddress) {
+      return {
+        detector: this.metadata,
+        checks: [
+          {
+            code: "EIP1967_PROXY_ABSENT",
+            outcome: "PASSED",
+            confidence: "HIGH",
+            evidence: [evidence]
+          }
+        ],
+        findings: []
+      };
+    }
+
+    const isBeacon = !implementationAddress && Boolean(beaconAddress);
+    return {
+      detector: this.metadata,
+      checks: [
+        {
+          code: isBeacon ? "EIP1967_BEACON_PROXY_DETECTED" : "EIP1967_PROXY_DETECTED",
+          outcome: "DETECTED",
+          confidence: "HIGH",
+          evidence: [evidence]
+        }
+      ],
+      findings: [
+        createFinding({
+          code: isBeacon ? "EIP1967_BEACON_PROXY_DETECTED" : "EIP1967_PROXY_DETECTED",
+          detector: this.metadata,
+          title: isBeacon
+            ? "Contract is an EIP-1967 beacon proxy"
+            : "Contract is an EIP-1967 upgradeable proxy",
+          severity: "HIGH",
+          category: "CONTRACT_CONTROL",
+          confidence: "HIGH",
+          description: isBeacon
+            ? `The EIP-1967 beacon storage slot is set to ${beaconAddress}. Calls are forwarded to whatever implementation the beacon currently points to.`
+            : `The EIP-1967 implementation storage slot is set to ${implementationAddress}${adminAddress ? `, with admin ${adminAddress}` : ""}. This contract's logic can be replaced by whoever controls the upgrade authority.`,
+          technicalExplanation:
+            "The implementation/admin/beacon storage slots were read directly on-chain at the scan block, per the EIP-1967 standard slot layout.",
+          evidence: [evidence],
+          recommendation:
+            "Verify who controls the upgrade authority (admin or beacon owner) and whether upgrades are timelocked or renounced before trusting current contract behavior as permanent."
+        })
+      ]
+    };
+  }
+};
+
+// Skips PUSH1-PUSH32 (0x60-0x7f) immediate-data bytes so they are never misread as opcodes.
+function scanOpcodes(bytecode: `0x${string}`): Set<number> {
+  const hex = bytecode.slice(2);
+  const found = new Set<number>();
+  let i = 0;
+  while (i + 2 <= hex.length) {
+    const byte = Number.parseInt(hex.slice(i, i + 2), 16);
+    found.add(byte);
+    i += byte >= 0x60 && byte <= 0x7f ? 2 + (byte - 0x5f) * 2 : 2;
+  }
+  return found;
+}
+
+const delegatecallOpcode = 0xf4;
+const selfdestructOpcode = 0xff;
+
+/**
+ * Scans runtime bytecode for the DELEGATECALL and SELFDESTRUCT opcodes by walking the actual
+ * instruction stream (skipping PUSH immediate data), rather than substring-matching function
+ * selectors. Presence is real bytecode evidence; it does not by itself prove the opcode is
+ * reachable from an externally callable function or under what conditions.
+ */
+export const dangerousOpcodeDetector: SecurityDetector<BytecodeDetectorInput> = {
+  metadata: {
+    id: "dangerous-opcode-surface",
+    version: detectorVersion,
+    name: "Dangerous opcode surface",
+    description: "Scans bytecode instructions for DELEGATECALL and SELFDESTRUCT opcodes."
+  },
+
+  async run(input, context) {
+    await Promise.resolve();
+    const opcodes = scanOpcodes(input.bytecode);
+    const hasDelegatecall = opcodes.has(delegatecallOpcode);
+    const hasSelfdestruct = opcodes.has(selfdestructOpcode);
+    const evidence = bytecodeEvidence(context, input.bytecode, {
+      hasDelegatecall,
+      hasSelfdestruct
+    });
+
+    const findings: SecurityFinding[] = [];
+    if (hasDelegatecall) {
+      findings.push(
+        createFinding({
+          code: "DELEGATECALL_OPCODE_PRESENT",
+          detector: this.metadata,
+          title: "Bytecode contains the DELEGATECALL opcode",
+          severity: "MEDIUM",
+          category: "CONTRACT_CONTROL",
+          confidence: "MEDIUM",
+          description:
+            "The contract's runtime bytecode contains a DELEGATECALL instruction, which executes external code in this contract's own storage context.",
+          technicalExplanation:
+            "DELEGATECALL is required by proxy patterns (see EIP-1967 findings) but can also be used by non-proxy contracts to run arbitrary externally-supplied logic against local storage. Opcode presence alone does not prove reachability or an attacker-controlled target.",
+          evidence: [evidence],
+          recommendation:
+            "Cross-check against proxy findings; if this contract is not a known proxy pattern, review which functions reach DELEGATECALL and who controls the target address."
+        })
+      );
+    }
+    if (hasSelfdestruct) {
+      findings.push(
+        createFinding({
+          code: "SELFDESTRUCT_OPCODE_PRESENT",
+          detector: this.metadata,
+          title: "Bytecode contains the SELFDESTRUCT opcode",
+          severity: "HIGH",
+          category: "CONTRACT_CONTROL",
+          confidence: "MEDIUM",
+          description:
+            "The contract's runtime bytecode contains a SELFDESTRUCT instruction, which can remove contract code or forcibly send its native balance elsewhere.",
+          technicalExplanation:
+            "Opcode presence was detected by walking the instruction stream. It does not by itself prove the instruction is reachable by an external caller or which address controls it.",
+          evidence: [evidence],
+          recommendation:
+            "Review whether SELFDESTRUCT is reachable, by which role, and what happens to holder funds/liquidity if it is triggered."
+        })
+      );
+    }
+
+    return {
+      detector: this.metadata,
+      checks: [
+        {
+          code: findings.length > 0 ? "DANGEROUS_OPCODES_DETECTED" : "DANGEROUS_OPCODES_ABSENT",
+          outcome: findings.length > 0 ? "DETECTED" : "PASSED",
+          confidence: "MEDIUM",
+          evidence: [evidence]
+        }
+      ],
+      findings
+    };
+  }
+};
+
 /**
  * Reads owner() directly on-chain rather than relying on selector presence, so it can
  * distinguish "ownership renounced" from "no Ownable pattern detected" instead of guessing.
@@ -745,14 +945,20 @@ export function createEmptyDetectorResult(metadata: DetectorMetadata): DetectorR
 }
 
 export async function runFoundationDetectors(
-  input: BytecodeDetectorInput & TokenMetadataDetectorInput & OwnerAddressDetectorInput,
+  input: BytecodeDetectorInput &
+    TokenMetadataDetectorInput &
+    OwnerAddressDetectorInput &
+    StorageReaderDetectorInput,
   context: DetectorContext
 ): Promise<DetectorResult[]> {
   const bytecodeInput = { bytecode: input.bytecode };
+  const storageInput = { getStorageAt: (slot: `0x${string}`) => input.getStorageAt(slot) };
   return [
     await contractCodeExistenceDetector.run(bytecodeInput, context),
     await erc20MetadataDetector.run(input, context),
     await ownershipStatusDetector.run(input, context),
+    await eip1967ProxyDetector.run(storageInput, context),
+    await dangerousOpcodeDetector.run(bytecodeInput, context),
     ...(await Promise.all(
       selectorPatternDetectors.map((detector) => detector.run(bytecodeInput, context))
     ))
