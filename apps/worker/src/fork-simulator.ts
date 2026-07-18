@@ -7,7 +7,7 @@ import {
   parseAbi,
   type Chain
 } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type { AppEnv } from "@genesis-sentinel/config";
 import type {
   ForkTradeSimulator,
@@ -26,7 +26,8 @@ const routerAbi = parseAbi([
 ]);
 const erc20Abi = parseAbi([
   "function balanceOf(address account) view returns (uint256)",
-  "function approve(address spender, uint256 value) returns (bool)"
+  "function approve(address spender, uint256 value) returns (bool)",
+  "function transfer(address to, uint256 value) returns (bool)"
 ]);
 const pairAbi = parseAbi([
   "function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
@@ -105,6 +106,7 @@ async function runGanacheForkTradeSimulation(
       args: [account.address]
     });
     const buyReceived = tokenAfterBuy - tokenBeforeBuy;
+    const buyReceipt = await publicClient.getTransactionReceipt({ hash: buyTxHash });
     if (buyReceived <= 0n) {
       return {
         simulationTool: "0.1.0-ganache-fork",
@@ -114,49 +116,42 @@ async function runGanacheForkTradeSimulation(
         buyTaxBps: null,
         sellTaxBps: null,
         buyTxHash,
+        buyGasUsed: buyReceipt.gasUsed.toString(),
         buyTokenReceivedRaw: buyReceived.toString(),
         error: "Forked buy completed but received no tokens."
       };
     }
 
     const buyTaxBps = taxBps(input.expectedBuyTokenOutRaw, buyReceived);
-    const approveTxHash = await walletClient.writeContract({
-      address: input.tokenAddress,
-      abi: erc20Abi,
-      functionName: "approve",
-      args: [robinhoodUniswapV2RouterAddress, buyReceived],
-      gas: 500_000n
-    });
-    await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
 
-    const expectedSellQuoteOut = await expectedSellOutAfterBuy(publicClient, input, buyReceived);
-    const quoteBeforeSell = await publicClient.readContract({
-      address: robinhoodWrappedNativeAddress,
-      abi: erc20Abi,
-      functionName: "balanceOf",
-      args: [account.address]
+    // Small wallet-to-wallet transfer test against a second, freshly generated fork-only
+    // account — measures transfer tax and whether transfers are blocked outright, distinct
+    // from the sell-leg transfer inside the router swap.
+    const transferTestAmount = buyReceived / 10n > 0n ? buyReceived / 10n : buyReceived;
+    const transferTest = await runTransferTest(publicClient, walletClient, {
+      tokenAddress: input.tokenAddress,
+      from: account.address,
+      amount: transferTestAmount
     });
-    const sellTxHash = await walletClient.writeContract({
-      address: robinhoodUniswapV2RouterAddress,
-      abi: routerAbi,
-      functionName: "swapExactTokensForTokensSupportingFeeOnTransferTokens",
-      args: [
-        buyReceived,
-        0n,
-        [input.tokenAddress, robinhoodWrappedNativeAddress],
-        account.address,
-        deadline
-      ],
-      gas: 3_000_000n
+
+    const remainingAfterTransfer = buyReceived - (transferTest.succeeded ? transferTestAmount : 0n);
+    const partialSellAmount =
+      remainingAfterTransfer / 10n > 0n ? remainingAfterTransfer / 10n : remainingAfterTransfer;
+    const partialSellTest = await runSellTest(publicClient, walletClient, input, {
+      tokenAddress: input.tokenAddress,
+      account: account.address,
+      amount: partialSellAmount,
+      deadline
     });
-    await publicClient.waitForTransactionReceipt({ hash: sellTxHash });
-    const quoteAfterSell = await publicClient.readContract({
-      address: robinhoodWrappedNativeAddress,
-      abi: erc20Abi,
-      functionName: "balanceOf",
-      args: [account.address]
+
+    const remainderForFullSell = remainingAfterTransfer - (partialSellTest.succeeded ? partialSellAmount : 0n);
+    const fullSell = await runSellTest(publicClient, walletClient, input, {
+      tokenAddress: input.tokenAddress,
+      account: account.address,
+      amount: remainderForFullSell > 0n ? remainderForFullSell : remainingAfterTransfer,
+      deadline
     });
-    const sellReceived = quoteAfterSell - quoteBeforeSell;
+    const sellReceived = fullSell.received;
 
     return {
       simulationTool: "0.1.0-ganache-fork",
@@ -164,11 +159,18 @@ async function runGanacheForkTradeSimulation(
       canSell: sellReceived > 0n,
       isHoneypot: sellReceived <= 0n,
       buyTaxBps,
-      sellTaxBps: taxBps(expectedSellQuoteOut, sellReceived),
+      sellTaxBps: fullSell.taxBps,
       buyTokenReceivedRaw: buyReceived.toString(),
       sellQuoteReceivedRaw: sellReceived.toString(),
       buyTxHash,
-      sellTxHash,
+      buyGasUsed: buyReceipt.gasUsed.toString(),
+      partialSellSucceeded: partialSellTest.succeeded,
+      partialSellTaxBps: partialSellTest.taxBps,
+      transferSucceeded: transferTest.succeeded,
+      transferTaxBps: transferTest.taxBps,
+      ...(fullSell.txHash ? { sellTxHash: fullSell.txHash } : {}),
+      ...(fullSell.gasUsed ? { sellGasUsed: fullSell.gasUsed } : {}),
+      ...(transferTest.txHash ? { transferTxHash: transferTest.txHash } : {}),
       ...(sellReceived <= 0n ? { error: "Forked sell completed but returned no quote token." } : {})
     };
   } catch (error) {
@@ -183,6 +185,139 @@ async function runGanacheForkTradeSimulation(
     };
   } finally {
     await server.close().catch(() => undefined);
+  }
+}
+
+interface TransferTestResult {
+  succeeded: boolean;
+  taxBps: number | null;
+  txHash?: `0x${string}`;
+}
+
+/**
+ * Wallet-to-wallet transfer test: sends `amount` from the fork buyer to a second, freshly
+ * generated fork-only account (never funded, never used outside this fork) and measures
+ * received vs sent to detect transfer tax or an outright transfer block.
+ */
+async function runTransferTest(
+  publicClient: ReturnType<typeof createPublicClient>,
+  walletClient: ReturnType<typeof createWalletClient>,
+  input: { tokenAddress: `0x${string}`; from: `0x${string}`; amount: bigint }
+): Promise<TransferTestResult> {
+  if (input.amount <= 0n) {
+    return { succeeded: false, taxBps: null };
+  }
+
+  const recipient = privateKeyToAccount(generatePrivateKey());
+  try {
+    const balanceBefore = await publicClient.readContract({
+      address: input.tokenAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [recipient.address]
+    });
+    const txHash = await walletClient.writeContract({
+      address: input.tokenAddress,
+      abi: erc20Abi,
+      functionName: "transfer",
+      args: [recipient.address, input.amount],
+      gas: 200_000n,
+      account: input.from,
+      chain: null
+    });
+    await publicClient.waitForTransactionReceipt({ hash: txHash });
+    const balanceAfter = await publicClient.readContract({
+      address: input.tokenAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [recipient.address]
+    });
+    const received = balanceAfter - balanceBefore;
+
+    return {
+      succeeded: received > 0n,
+      taxBps: taxBps(input.amount, received),
+      txHash
+    };
+  } catch {
+    return { succeeded: false, taxBps: null };
+  }
+}
+
+interface SellTestResult {
+  succeeded: boolean;
+  taxBps: number | null;
+  received: bigint;
+  txHash?: `0x${string}`;
+  gasUsed?: string;
+}
+
+/** Approves and sells `amount` of the token via the router, reusing live pool reserves to
+ * compute the expected quote output for tax comparison. Used for both the small partial-sell
+ * test and the final full/remainder sell so "small sell passes, large sell fails" is
+ * distinguishable from a flat honeypot. */
+async function runSellTest(
+  publicClient: ReturnType<typeof createPublicClient>,
+  walletClient: ReturnType<typeof createWalletClient>,
+  input: ForkTradeSimulatorInput,
+  params: { tokenAddress: `0x${string}`; account: `0x${string}`; amount: bigint; deadline: bigint }
+): Promise<SellTestResult> {
+  if (params.amount <= 0n) {
+    return { succeeded: false, taxBps: null, received: 0n };
+  }
+
+  try {
+    const approveTxHash = await walletClient.writeContract({
+      address: params.tokenAddress,
+      abi: erc20Abi,
+      functionName: "approve",
+      args: [robinhoodUniswapV2RouterAddress, params.amount],
+      gas: 500_000n,
+      account: params.account,
+      chain: null
+    });
+    await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
+
+    const expectedOut = await expectedSellOutAfterBuy(publicClient, input, params.amount);
+    const quoteBefore = await publicClient.readContract({
+      address: robinhoodWrappedNativeAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [params.account]
+    });
+    const txHash = await walletClient.writeContract({
+      address: robinhoodUniswapV2RouterAddress,
+      abi: routerAbi,
+      functionName: "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+      args: [
+        params.amount,
+        0n,
+        [params.tokenAddress, robinhoodWrappedNativeAddress],
+        params.account,
+        params.deadline
+      ],
+      gas: 3_000_000n,
+      account: params.account,
+      chain: null
+    });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+    const quoteAfter = await publicClient.readContract({
+      address: robinhoodWrappedNativeAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [params.account]
+    });
+    const received = quoteAfter - quoteBefore;
+
+    return {
+      succeeded: received > 0n,
+      taxBps: taxBps(expectedOut, received),
+      received,
+      txHash,
+      gasUsed: receipt.gasUsed.toString()
+    };
+  } catch {
+    return { succeeded: false, taxBps: null, received: 0n };
   }
 }
 

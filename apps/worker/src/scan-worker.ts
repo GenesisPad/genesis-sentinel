@@ -349,21 +349,35 @@ async function createRobinhoodRouteTradeSimulations(input: {
     sellSimulation.revertReason = sellTransferCall.reason;
   }
 
-  return [
-    buySimulation,
-    sellSimulation,
-    {
-      kind: "TRANSFER",
-      outcome: "DATA_UNAVAILABLE",
-      blockNumber: input.blockNumber,
-      input: common,
-      result: {
-        transferTaxBps: null,
-        reason: "Transfer behavior requires a forked call from a funded holder wallet."
-      },
-      simulationTool: common.simulationTool
-    }
-  ];
+  const transferSimulation: SimulationResult =
+    forkResult?.transferSucceeded !== undefined
+      ? {
+          kind: "TRANSFER",
+          outcome: forkResult.transferSucceeded ? "PASSED" : "FAILED",
+          blockNumber: input.blockNumber,
+          input: common,
+          result: {
+            transferTaxBps: forkResult.transferTaxBps ?? null,
+            forkSimulation: forkResult
+          },
+          simulationTool: common.simulationTool,
+          ...(!forkResult.transferSucceeded
+            ? { revertReason: forkResult.error ?? "Forked wallet-to-wallet transfer failed." }
+            : {})
+        }
+      : {
+          kind: "TRANSFER",
+          outcome: "DATA_UNAVAILABLE",
+          blockNumber: input.blockNumber,
+          input: common,
+          result: {
+            transferTaxBps: null,
+            reason: "Transfer behavior requires a forked call from a funded holder wallet."
+          },
+          simulationTool: common.simulationTool
+        };
+
+  return [buySimulation, sellSimulation, transferSimulation];
 }
 
 function selectDeepestPool(pools: DiscoveredPool[]): DiscoveredPool | null {
@@ -545,7 +559,19 @@ export interface ForkTradeSimulatorResult {
   sellQuoteReceivedRaw?: string;
   buyTxHash?: `0x${string}`;
   sellTxHash?: `0x${string}`;
+  buyGasUsed?: string;
+  sellGasUsed?: string;
   error?: string;
+  /** Small (~10% of the bought amount) sell tested before the full/remainder sell, so a
+   * "small sell succeeds but larger sell fails" pattern is distinguishable from a flat
+   * honeypot. Undefined when the fork didn't reach this step (e.g. the buy itself failed). */
+  partialSellSucceeded?: boolean;
+  partialSellTaxBps?: number | null;
+  /** Wallet-to-wallet transfer test: sends a small slice of the bought tokens from the fork
+   * buyer to a second, freshly generated fork-only account and measures received vs sent. */
+  transferSucceeded?: boolean;
+  transferTaxBps?: number | null;
+  transferTxHash?: `0x${string}`;
 }
 
 export type ForkTradeSimulator = (
