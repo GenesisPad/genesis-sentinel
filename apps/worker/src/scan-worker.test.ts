@@ -10,7 +10,7 @@ function fetchUrl(input: string | URL | Request): string {
   return input.url;
 }
 
-function createRepository() {
+function createRepository(chainId = 4663) {
   const calls: string[] = [];
   const repository: ScanRepository = {
     async createOrGetQueuedScan() {
@@ -38,7 +38,7 @@ function createRepository() {
       calls.push(`get:${scanId}`);
       return {
         scanId,
-        chainId: 4663,
+        chainId,
         address: "0x0000000000000000000000000000000000000001",
         state: "QUEUED",
         scanBlockNumber: null
@@ -169,14 +169,14 @@ describe("scan worker orchestration", () => {
     vi.restoreAllMocks();
   });
 
-  it("records chain resolution, bytecode fetch, and partial completion", async () => {
-    const { repository, calls } = createRepository();
+  it("records chain resolution, bytecode fetch, and partial completion on a chain with no wired providers", async () => {
+    const { repository, calls } = createRepository(1);
 
     await processScanJob(
       {
         data: {
           scanId: "scan-1",
-          chainId: 4663,
+          chainId: 1,
           address: "0x0000000000000000000000000000000000000001"
         }
       },
@@ -235,13 +235,13 @@ describe("scan worker orchestration", () => {
   });
 
   it("persists detector-based risk when findings are available", async () => {
-    const { repository, calls } = createRepository();
+    const { repository, calls } = createRepository(1);
 
     await processScanJob(
       {
         data: {
           scanId: "scan-2",
-          chainId: 4663,
+          chainId: 1,
           address: "0x0000000000000000000000000000000000000001"
         }
       },

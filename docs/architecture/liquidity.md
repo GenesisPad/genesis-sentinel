@@ -3,6 +3,11 @@
 Stage 9 introduced the liquidity discovery boundary. Robinhood Chain now executes live, cheap
 on-chain discovery across Uniswap V3, V4, and V2 pools.
 
+The discovery code itself now lives behind the `LiquidityProvider` interface in
+`@genesis-sentinel/providers` (`packages/providers/src/robinhood-liquidity.ts`) rather than in
+`apps/worker/src/scan-worker.ts` directly — see `docs/architecture/providers.md` for the
+provider abstraction and how a second chain or DEX would be added.
+
 The worker records `DISCOVERING_MARKETS` as a scan stage. For Robinhood Chain it checks configured
 quote tokens against:
 

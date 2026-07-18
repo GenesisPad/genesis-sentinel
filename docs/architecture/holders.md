@@ -11,6 +11,10 @@ Stage 10 defines the holder-analysis boundary without pretending Genesis Sentine
 
 An empty holder summary means holder analysis is unsupported for that scan. It does not mean the token has healthy distribution, no whale risk, no contract-controlled holders, or low concentration.
 
+Holder retrieval now lives behind the `HolderProvider` interface in
+`@genesis-sentinel/providers` (`packages/providers/src/blockscout.ts`) rather than in
+`apps/worker/src/scan-worker.ts` directly — see `docs/architecture/providers.md`.
+
 ## Future Sources
 
 Holder snapshots should come from one of these bounded sources:

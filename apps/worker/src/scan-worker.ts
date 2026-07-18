@@ -1,14 +1,18 @@
-import {
-  decodeEventLog,
-  encodeFunctionData,
-  parseAbi,
-  parseAbiItem,
-  toEventSelector,
-  type Hex
-} from "viem";
+import { encodeFunctionData, parseAbi } from "viem";
 import type { ChainAdapter } from "@genesis-sentinel/chain-adapters";
 import type { ScanRepository } from "@genesis-sentinel/database";
 import type { ScanJobData } from "@genesis-sentinel/queue";
+import {
+  getProviderSet,
+  robinhoodUniswapV2RouterAddress,
+  robinhoodWrappedNativeAddress,
+  type DiscoveredPool,
+  type HolderSnapshotResult as DiscoveredHolderSnapshot,
+  type ProviderSet,
+  addressValue,
+  bigintFromRecord,
+  numberFromRecord
+} from "@genesis-sentinel/providers";
 import type {
   ContractSourceDetectorInput,
   DetectorResult,
@@ -24,74 +28,14 @@ import {
 } from "@genesis-sentinel/security-engine";
 import { scannerVersion } from "@genesis-sentinel/shared";
 
-const robinhoodBlockscoutApiUrl = "https://robinhoodchain.blockscout.com/api/v2";
-
-// Verified independently against Blockscout source + a live router.WETH() call — see
-// docs/architecture/liquidity.md for provenance.
-const robinhoodUniswapV2FactoryAddress = "0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f" as const;
-const robinhoodUniswapV2RouterAddress = "0x89e5db8b5aa49aa85ac63f691524311aeb649eba" as const;
-const robinhoodUniswapV3FactoryAddress = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa" as const;
-const robinhoodUniswapV4PoolManagerAddress = "0x8366a39cc670b4001a1121b8f6a443a643e40951" as const;
-const robinhoodUniswapV4StateViewAddress = "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b" as const;
-const robinhoodWrappedNativeAddress = "0x0bd7d308f8e1639fab988df18a8011f41eacad73" as const;
 const sentinelStaticCallWallet = "0x0000000000000000000000000000000000001001" as const;
-const robinhoodQuoteTokens = [
-  {
-    address: robinhoodWrappedNativeAddress,
-    symbol: "WETH",
-    decimals: 18
-  },
-  {
-    address: "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34",
-    symbol: "USDE",
-    decimals: 18
-  },
-  {
-    address: "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
-    symbol: "USDG",
-    decimals: 6
-  }
-] as const;
-const knownBurnAddresses = [
-  "0x000000000000000000000000000000000000dead",
-  "0x0000000000000000000000000000000000000000"
-] as const;
 
 const ownableAbi = parseAbi(["function owner() view returns (address)"]);
-const uniswapV2FactoryAbi = parseAbi([
-  "function getPair(address tokenA, address tokenB) view returns (address pair)"
-]);
-const uniswapV3FactoryAbi = parseAbi([
-  "function getPool(address tokenA, address tokenB, uint24 fee) view returns (address pool)"
-]);
-const uniswapV2PairAbi = parseAbi([
-  "function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
-  "function token0() view returns (address)",
-  "function totalSupply() view returns (uint256)",
-  "function balanceOf(address account) view returns (uint256)"
-]);
-const uniswapV3PoolAbi = parseAbi([
-  "function liquidity() view returns (uint128)",
-  "function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
-  "function token0() view returns (address)",
-  "function token1() view returns (address)",
-  "function fee() view returns (uint24)"
-]);
-const v4StateViewAbi = parseAbi([
-  "function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)",
-  "function getLiquidity(bytes32 poolId) view returns (uint128 liquidity)"
-]);
-const erc20BalanceAbi = parseAbi(["function balanceOf(address account) view returns (uint256)"]);
 const uniswapV2RouterAbi = parseAbi([
   "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint amountOutMin, address[] calldata path, address to, uint deadline) payable",
   "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) payable"
 ]);
 const erc20TransferAbi = parseAbi(["function transfer(address to, uint256 amount) returns (bool)"]);
-const uniswapV3FeeTiers = [100, 500, 3000, 10_000] as const;
-const uniswapV4InitializeEvent = parseAbiItem(
-  "event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)"
-);
-const uniswapV4InitializeTopic = toEventSelector(uniswapV4InitializeEvent);
 
 async function readOwnerAddress(
   adapter: ChainAdapter,
@@ -106,515 +50,6 @@ async function readOwnerAddress(
   } catch {
     return null;
   }
-}
-
-interface DiscoveredPool {
-  poolAddress: `0x${string}`;
-  dex: string;
-  quoteTokenAddress: `0x${string}`;
-  quoteSymbol: string;
-  quoteDecimals: number;
-  liquidityData: Record<string, unknown>;
-}
-
-async function discoverRobinhoodLiquidity(
-  adapter: ChainAdapter,
-  tokenAddress: `0x${string}`,
-  blockNumber: bigint
-): Promise<DiscoveredPool[]> {
-  const [v3Pools, v4Pools, v2Pools] = await Promise.all([
-    discoverRobinhoodUniswapV3Liquidity(adapter, tokenAddress).catch(() => []),
-    discoverRobinhoodUniswapV4Liquidity(adapter, tokenAddress, blockNumber).catch(() => []),
-    discoverRobinhoodUniswapV2Liquidity(adapter, tokenAddress).catch(() => [])
-  ]);
-
-  return [...v3Pools, ...v4Pools, ...v2Pools];
-}
-
-/**
- * Checks the verified Uniswap V2 Factory on Robinhood Chain for pairs against configured
- * quote tokens, then reads reserves and how much of the LP supply sits at burn addresses.
- */
-async function discoverRobinhoodUniswapV2Liquidity(
-  adapter: ChainAdapter,
-  tokenAddress: `0x${string}`
-): Promise<DiscoveredPool[]> {
-  return compact(
-    await Promise.all(
-      robinhoodQuoteTokens
-        .filter((quote) => quote.address.toLowerCase() !== tokenAddress.toLowerCase())
-        .map((quote) =>
-          discoverRobinhoodUniswapV2Pool(adapter, tokenAddress, quote).catch(() => null)
-        )
-    )
-  );
-}
-
-async function discoverRobinhoodUniswapV2Pool(
-  adapter: ChainAdapter,
-  tokenAddress: `0x${string}`,
-  quote: (typeof robinhoodQuoteTokens)[number]
-): Promise<DiscoveredPool | null> {
-  const pairAddress = await adapter
-    .readContract<`0x${string}`>({
-      address: robinhoodUniswapV2FactoryAddress,
-      abi: uniswapV2FactoryAbi,
-      functionName: "getPair",
-      args: [tokenAddress, quote.address]
-    })
-    .catch(() => null);
-
-  if (!pairAddress || pairAddress.toLowerCase() === "0x0000000000000000000000000000000000000000") {
-    return null;
-  }
-
-  const [reserves, token0, lpTotalSupply, burnedBalances] = await Promise.all([
-    adapter.readContract<[bigint, bigint, number]>({
-      address: pairAddress,
-      abi: uniswapV2PairAbi,
-      functionName: "getReserves"
-    }),
-    adapter.readContract<`0x${string}`>({
-      address: pairAddress,
-      abi: uniswapV2PairAbi,
-      functionName: "token0"
-    }),
-    adapter.readContract<bigint>({
-      address: pairAddress,
-      abi: uniswapV2PairAbi,
-      functionName: "totalSupply"
-    }),
-    Promise.all(
-      knownBurnAddresses.map((burnAddress) =>
-        adapter
-          .readContract<bigint>({
-            address: pairAddress,
-            abi: uniswapV2PairAbi,
-            functionName: "balanceOf",
-            args: [burnAddress]
-          })
-          .catch(() => 0n)
-      )
-    )
-  ]);
-
-  const tokenIsToken0 = token0.toLowerCase() === tokenAddress.toLowerCase();
-  const reserveToken = tokenIsToken0 ? reserves[0] : reserves[1];
-  const reserveQuote = tokenIsToken0 ? reserves[1] : reserves[0];
-  const burnedTotal = burnedBalances.reduce((sum, balance) => sum + balance, 0n);
-  const lpBurnedPct =
-    lpTotalSupply > 0n ? Number((burnedTotal * 10_000n) / lpTotalSupply) / 100 : null;
-
-  // Best-effort USD valuation via the quote token's own Blockscout price (2x reserveQuote,
-  // since AMM pool value splits ~evenly between the two sides). Null, not fabricated, if
-  // the price lookup fails.
-  const quotePriceUsd = await fetchExplorerTokenPrice(quote.address).catch(() => null);
-  const totalLiquidityUsd =
-    quotePriceUsd !== null
-      ? (Number(reserveQuote) / 10 ** quote.decimals) * 2 * quotePriceUsd
-      : null;
-
-  return {
-    poolAddress: pairAddress,
-    dex: "Uniswap V2",
-    quoteTokenAddress: quote.address,
-    quoteSymbol: quote.symbol,
-    quoteDecimals: quote.decimals,
-    liquidityData: {
-      reserveTokenRaw: reserveToken.toString(),
-      reserveQuoteRaw: reserveQuote.toString(),
-      protocol: "UNISWAP_V2",
-      quoteSymbol: quote.symbol,
-      quoteDecimals: quote.decimals,
-      lpTotalSupplyRaw: lpTotalSupply.toString(),
-      lpBurnedOrLockedRaw: burnedTotal.toString(),
-      lpBurnedOrLockedPct: lpBurnedPct,
-      totalLiquidityUsd
-    }
-  };
-}
-
-async function discoverRobinhoodUniswapV3Liquidity(
-  adapter: ChainAdapter,
-  tokenAddress: `0x${string}`
-): Promise<DiscoveredPool[]> {
-  return compact(
-    await Promise.all(
-      robinhoodQuoteTokens
-        .filter((quote) => quote.address.toLowerCase() !== tokenAddress.toLowerCase())
-        .flatMap((quote) =>
-          uniswapV3FeeTiers.map((fee) =>
-            discoverRobinhoodUniswapV3Pool(adapter, tokenAddress, quote, fee).catch(() => null)
-          )
-        )
-    )
-  );
-}
-
-async function discoverRobinhoodUniswapV3Pool(
-  adapter: ChainAdapter,
-  tokenAddress: `0x${string}`,
-  quote: (typeof robinhoodQuoteTokens)[number],
-  feeTier: (typeof uniswapV3FeeTiers)[number]
-): Promise<DiscoveredPool | null> {
-  const poolAddress = await adapter
-    .readContract<`0x${string}`>({
-      address: robinhoodUniswapV3FactoryAddress,
-      abi: uniswapV3FactoryAbi,
-      functionName: "getPool",
-      args: [tokenAddress, quote.address, feeTier]
-    })
-    .catch(() => null);
-
-  if (!poolAddress || isZeroAddress(poolAddress)) {
-    return null;
-  }
-
-  const [liquidity, slot0, token0, token1, fee, tokenBalance, quoteBalance] = await Promise.all([
-    adapter.readContract<bigint>({
-      address: poolAddress,
-      abi: uniswapV3PoolAbi,
-      functionName: "liquidity"
-    }),
-    adapter.readContract<[bigint, number, number, number, number, number, boolean]>({
-      address: poolAddress,
-      abi: uniswapV3PoolAbi,
-      functionName: "slot0"
-    }),
-    adapter.readContract<`0x${string}`>({
-      address: poolAddress,
-      abi: uniswapV3PoolAbi,
-      functionName: "token0"
-    }),
-    adapter.readContract<`0x${string}`>({
-      address: poolAddress,
-      abi: uniswapV3PoolAbi,
-      functionName: "token1"
-    }),
-    adapter.readContract<number>({
-      address: poolAddress,
-      abi: uniswapV3PoolAbi,
-      functionName: "fee"
-    }),
-    adapter
-      .readContract<bigint>({
-        address: tokenAddress,
-        abi: erc20BalanceAbi,
-        functionName: "balanceOf",
-        args: [poolAddress]
-      })
-      .catch(() => 0n),
-    adapter
-      .readContract<bigint>({
-        address: quote.address,
-        abi: erc20BalanceAbi,
-        functionName: "balanceOf",
-        args: [poolAddress]
-      })
-      .catch(() => 0n)
-  ]);
-
-  const quotePriceUsd = await fetchExplorerTokenPrice(quote.address).catch(() => null);
-  const totalLiquidityUsd =
-    quotePriceUsd !== null
-      ? (Number(quoteBalance) / 10 ** quote.decimals) * 2 * quotePriceUsd
-      : null;
-
-  return {
-    poolAddress,
-    dex: "Uniswap V3",
-    quoteTokenAddress: quote.address,
-    quoteSymbol: quote.symbol,
-    quoteDecimals: quote.decimals,
-    liquidityData: {
-      protocol: "UNISWAP_V3",
-      factoryAddress: robinhoodUniswapV3FactoryAddress,
-      token0,
-      token1,
-      fee,
-      feeTier,
-      liquidityRaw: liquidity.toString(),
-      sqrtPriceX96Raw: slot0[0].toString(),
-      tick: slot0[1],
-      tokenBalanceRaw: tokenBalance.toString(),
-      quoteBalanceRaw: quoteBalance.toString(),
-      quoteSymbol: quote.symbol,
-      quoteDecimals: quote.decimals,
-      totalLiquidityUsd
-    }
-  };
-}
-
-async function discoverRobinhoodUniswapV4Liquidity(
-  adapter: ChainAdapter,
-  tokenAddress: `0x${string}`,
-  blockNumber: bigint
-): Promise<DiscoveredPool[]> {
-  return compact(
-    await Promise.all(
-      robinhoodQuoteTokens
-        .filter((quote) => quote.address.toLowerCase() !== tokenAddress.toLowerCase())
-        .flatMap((quote) => [
-          discoverRobinhoodUniswapV4Pool(adapter, tokenAddress, quote, blockNumber, {
-            currency0: tokenAddress,
-            currency1: quote.address
-          }).catch(() => null),
-          discoverRobinhoodUniswapV4Pool(adapter, tokenAddress, quote, blockNumber, {
-            currency0: quote.address,
-            currency1: tokenAddress
-          }).catch(() => null)
-        ])
-    )
-  );
-}
-
-async function discoverRobinhoodUniswapV4Pool(
-  adapter: ChainAdapter,
-  tokenAddress: `0x${string}`,
-  quote: (typeof robinhoodQuoteTokens)[number],
-  blockNumber: bigint,
-  currencies: { currency0: `0x${string}`; currency1: `0x${string}` }
-): Promise<DiscoveredPool | null> {
-  const logs = await adapter.getLogs({
-    address: robinhoodUniswapV4PoolManagerAddress,
-    fromBlock: 0n,
-    toBlock: blockNumber,
-    topics: [
-      uniswapV4InitializeTopic,
-      null,
-      addressToTopic(currencies.currency0),
-      addressToTopic(currencies.currency1)
-    ]
-  });
-  const latest = logs.at(-1);
-  if (!latest) {
-    return null;
-  }
-
-  const decoded = decodeEventLog({
-    abi: [uniswapV4InitializeEvent],
-    data: latest.data,
-    topics: latest.topics as [Hex, ...Hex[]],
-    eventName: "Initialize"
-  });
-  const args = decoded.args;
-  const poolId = args.id;
-  const [slot0, liquidity] = await Promise.all([
-    adapter
-      .readContract<[bigint, number, number, number]>({
-        address: robinhoodUniswapV4StateViewAddress,
-        abi: v4StateViewAbi,
-        functionName: "getSlot0",
-        args: [poolId]
-      })
-      .catch(() => [args.sqrtPriceX96, args.tick, 0, args.fee] as [bigint, number, number, number]),
-    adapter
-      .readContract<bigint>({
-        address: robinhoodUniswapV4StateViewAddress,
-        abi: v4StateViewAbi,
-        functionName: "getLiquidity",
-        args: [poolId]
-      })
-      .catch(() => 0n)
-  ]);
-
-  return {
-    poolAddress: poolIdToAddress(poolId),
-    dex: "Uniswap V4",
-    quoteTokenAddress: quote.address,
-    quoteSymbol: quote.symbol,
-    quoteDecimals: quote.decimals,
-    liquidityData: {
-      protocol: "UNISWAP_V4",
-      poolId,
-      poolIdentifierKind: "V4_POOL_ID_TRUNCATED_ADDRESS",
-      poolManagerAddress: robinhoodUniswapV4PoolManagerAddress,
-      stateViewAddress: robinhoodUniswapV4StateViewAddress,
-      currency0: args.currency0,
-      currency1: args.currency1,
-      fee: args.fee,
-      tickSpacing: args.tickSpacing,
-      hooks: args.hooks,
-      liquidityRaw: liquidity.toString(),
-      sqrtPriceX96Raw: slot0[0].toString(),
-      tick: slot0[1],
-      protocolFee: slot0[2],
-      lpFee: slot0[3],
-      initializedBlockNumber: latest.blockNumber?.toString() ?? null,
-      initializationTxHash: latest.transactionHash,
-      quoteSymbol: quote.symbol,
-      quoteDecimals: quote.decimals
-    }
-  };
-}
-
-async function fetchExplorerTokenPrice(address: `0x${string}`): Promise<number | null> {
-  const token = await fetchJson(`${robinhoodBlockscoutApiUrl}/tokens/${address}`);
-  if (!isRecord(token)) {
-    return null;
-  }
-  const price = decimalStringValue(token.exchange_rate);
-  return price !== null ? Number(price) : null;
-}
-
-interface DiscoveredHolderSnapshot {
-  holderCount: number | null;
-  topHolders: EnrichedHolder[];
-  concentration: HolderConcentration;
-}
-
-interface EnrichedHolder {
-  address: `0x${string}`;
-  balanceRaw: string;
-  isContract: boolean;
-  labels: string[];
-  totalSupplyPct: number;
-}
-
-interface HolderConcentration extends Record<string, unknown> {
-  top1Pct: number;
-  top5Pct: number;
-  top10Pct: number;
-  top1Address: `0x${string}` | null;
-  deployerPct: number | null;
-  ownerPct: number | null;
-  liquidityPoolPct: number;
-  burnedPct: number;
-  excludedContractPct: number;
-  suspiciousFlags: string[];
-}
-
-/**
- * Uses Blockscout's token holders endpoint (Robinhood Chain only) to rank real balances —
- * no fabricated distribution. Contract-owned balances (pools, lockers) are excluded so the
- * percentages reflect wallet concentration, matching "excluding pools" in the UI.
- */
-async function discoverRobinhoodHolderConcentration(
-  address: `0x${string}`,
-  totalSupply: string | null,
-  context: {
-    holderCount?: number | null;
-    deployerAddress?: `0x${string}` | null;
-    ownerAddress?: `0x${string}` | null;
-    liquidityPoolAddresses?: `0x${string}`[];
-  } = {}
-): Promise<DiscoveredHolderSnapshot | null> {
-  if (!totalSupply || totalSupply === "0") {
-    return null;
-  }
-
-  const holders = await fetchJson(
-    `${robinhoodBlockscoutApiUrl}/tokens/${address}/holders?items_count=25`
-  );
-  if (!isRecord(holders) || !Array.isArray(holders.items)) {
-    return null;
-  }
-
-  const rows = holders.items
-    .filter((item): item is Record<string, unknown> => isRecord(item))
-    .map((item) => {
-      const addressRecord = isRecord(item.address) ? item.address : {};
-      return {
-        address: addressValue(addressRecord.hash),
-        balanceRaw: stringValue(item.value),
-        isContract: booleanValue(addressRecord.is_contract) ?? false
-      };
-    })
-    .filter(
-      (row): row is { address: `0x${string}`; balanceRaw: string; isContract: boolean } =>
-        row.address !== null && row.balanceRaw !== null
-    );
-
-  let total: bigint;
-  try {
-    total = BigInt(totalSupply);
-  } catch {
-    return null;
-  }
-  if (total === 0n) {
-    return null;
-  }
-
-  const normalizedBurnAddresses = knownBurnAddresses.map((burnAddress) =>
-    burnAddress.toLowerCase()
-  );
-  const normalizedPools = (context.liquidityPoolAddresses ?? []).map((pool) => pool.toLowerCase());
-  const normalizedDeployer = context.deployerAddress?.toLowerCase();
-  const normalizedOwner = context.ownerAddress?.toLowerCase();
-  const pctOfBalance = (balanceRaw: string): number => {
-    try {
-      return Number((BigInt(balanceRaw) * 10_000n) / total) / 100;
-    } catch {
-      return 0;
-    }
-  };
-  const pctOfRows = (candidateRows: typeof rows): number => {
-    const sum = candidateRows.reduce((acc, row) => acc + BigInt(row.balanceRaw), 0n);
-    return Number((sum * 10_000n) / total) / 100;
-  };
-  const enrichedRows: EnrichedHolder[] = rows.map((row) => {
-    const normalized = row.address.toLowerCase();
-    const labels: string[] = [];
-    if (normalized === normalizedDeployer) labels.push("DEPLOYER");
-    if (normalized === normalizedOwner) labels.push("OWNER");
-    if (normalizedBurnAddresses.includes(normalized)) labels.push("BURN");
-    if (normalizedPools.includes(normalized)) labels.push("LIQUIDITY_POOL");
-    labels.push(row.isContract ? "CONTRACT" : "EOA");
-
-    return {
-      ...row,
-      labels,
-      totalSupplyPct: pctOfBalance(row.balanceRaw)
-    };
-  });
-  const distributionRows = enrichedRows.filter(
-    (row) =>
-      !row.isContract && !row.labels.includes("BURN") && !row.labels.includes("LIQUIDITY_POOL")
-  );
-  const pctOfTopN = (n: number): number => {
-    const sum = distributionRows.slice(0, n).reduce((acc, row) => acc + BigInt(row.balanceRaw), 0n);
-    return Number((sum * 10_000n) / total) / 100;
-  };
-  const deployerPct = normalizedDeployer
-    ? (enrichedRows.find((row) => row.address.toLowerCase() === normalizedDeployer)
-        ?.totalSupplyPct ?? 0)
-    : null;
-  const ownerPct = normalizedOwner
-    ? (enrichedRows.find((row) => row.address.toLowerCase() === normalizedOwner)?.totalSupplyPct ??
-      0)
-    : null;
-  const liquidityPoolPct = pctOfRows(
-    enrichedRows.filter((row) => row.labels.includes("LIQUIDITY_POOL"))
-  );
-  const burnedPct = pctOfRows(enrichedRows.filter((row) => row.labels.includes("BURN")));
-  const excludedContractPct = pctOfRows(enrichedRows.filter((row) => row.isContract));
-  const top1Pct = pctOfTopN(1);
-  const top5Pct = pctOfTopN(5);
-  const top10Pct = pctOfTopN(10);
-  const suspiciousFlags = [
-    ...(top1Pct >= 20 ? ["TOP_1_WALLET_HIGH"] : []),
-    ...(top10Pct >= 60 ? ["TOP_10_WALLETS_CRITICAL"] : []),
-    ...(top10Pct >= 35 && top10Pct < 60 ? ["TOP_10_WALLETS_HIGH"] : []),
-    ...(deployerPct !== null && deployerPct >= 5 ? ["DEPLOYER_BALANCE_HIGH"] : []),
-    ...(ownerPct !== null && ownerPct >= 5 ? ["OWNER_BALANCE_HIGH"] : [])
-  ];
-
-  return {
-    holderCount: context.holderCount ?? null,
-    topHolders: enrichedRows.slice(0, 25),
-    concentration: {
-      top1Pct,
-      top5Pct,
-      top10Pct,
-      top1Address: distributionRows[0]?.address ?? null,
-      deployerPct,
-      ownerPct,
-      liquidityPoolPct,
-      burnedPct,
-      excludedContractPct,
-      suspiciousFlags
-    }
-  };
 }
 
 function createHolderConcentrationDetectorResult(input: {
@@ -1106,6 +541,7 @@ export async function processScanJob(
   }
 
   const adapter = dependencies.getChainAdapter(target.chainId);
+  const providers = getProviderSet(target.chainId);
 
   await dependencies.scans.updateScanState({
     scanId: target.scanId,
@@ -1160,7 +596,7 @@ export async function processScanJob(
       bytecode
     });
 
-    const tokenProfile = await collectTokenProfile(adapter, {
+    const tokenProfile = await collectTokenProfile(adapter, providers, {
       chainId: target.chainId,
       address: target.address,
       blockNumber,
@@ -1207,9 +643,10 @@ export async function processScanJob(
         blockNumber
       }
     );
-    const sourceProfile: ContractSourceDetectorInput =
-      adapter.name === "Robinhood Chain"
-        ? await fetchExplorerContractSource(target.chainId, target.address).catch(
+    const sourceProfile: ContractSourceDetectorInput = providers
+      ? await providers.source
+          .getContractSource({ chainId: target.chainId, address: target.address })
+          .catch(
             () =>
               ({
                 status: "UNAVAILABLE",
@@ -1217,11 +654,11 @@ export async function processScanJob(
                 sourceFiles: []
               }) satisfies ContractSourceDetectorInput
           )
-        : ({
-            status: "UNAVAILABLE",
-            address: target.address,
-            sourceFiles: []
-          } satisfies ContractSourceDetectorInput);
+      : ({
+          status: "UNAVAILABLE",
+          address: target.address,
+          sourceFiles: []
+        } satisfies ContractSourceDetectorInput);
     const sourceDetectorResult = await sourceCodeRiskDetector.run(sourceProfile, {
       scanId: target.scanId,
       chainId: target.chainId,
@@ -1264,10 +701,16 @@ export async function processScanJob(
       status: "RUNNING",
       startedAt: now()
     });
-    const discoveredPools =
-      adapter.name === "Robinhood Chain"
-        ? await discoverRobinhoodLiquidity(adapter, target.address, blockNumber).catch(() => null)
-        : null;
+    const discoveredPools = providers
+      ? await providers.liquidity
+          .discoverPools({
+            adapter,
+            chainId: target.chainId,
+            tokenAddress: target.address,
+            blockNumber
+          })
+          .catch(() => null)
+      : null;
 
     if (discoveredPools && discoveredPools.length > 0) {
       for (const discoveredPool of discoveredPools) {
@@ -1293,7 +736,8 @@ export async function processScanJob(
           poolAddresses: discoveredPools.map((pool) => pool.poolAddress)
         }
       });
-    } else if (adapter.name === "Robinhood Chain") {
+    } else if (providers) {
+      const coverage = providers.liquidity.describeCoverage();
       await dependencies.scans.recordStage({
         scanId: target.scanId,
         name: "DISCOVERING_MARKETS",
@@ -1301,9 +745,9 @@ export async function processScanJob(
         completedAt: now(),
         metadata: {
           poolCount: 0,
-          checkedDexes: ["Uniswap V3", "Uniswap V4", "Uniswap V2"],
-          checkedQuoteSymbols: robinhoodQuoteTokens.map((quote) => quote.symbol),
-          reason: "No Uniswap V3, V4, or V2 pool found against configured quote tokens."
+          checkedDexes: coverage.checkedDexes,
+          checkedQuoteSymbols: coverage.checkedQuoteSymbols,
+          reason: `No pool found against configured quote tokens using ${coverage.discoveryTool}.`
         }
       });
     } else {
@@ -1333,15 +777,21 @@ export async function processScanJob(
       status: "RUNNING",
       startedAt: now()
     });
-    const holderSnapshot =
-      adapter.name === "Robinhood Chain"
-        ? await discoverRobinhoodHolderConcentration(target.address, tokenProfile.totalSupply, {
-            holderCount: tokenProfile.holderCount,
-            deployerAddress: tokenProfile.deployerAddress,
-            ownerAddress,
-            liquidityPoolAddresses: discoveredPools?.map((pool) => pool.poolAddress) ?? []
-          }).catch(() => null)
-        : null;
+    const holderSnapshot = providers
+      ? await providers.holder
+          .getHolderSnapshot({
+            chainId: target.chainId,
+            address: target.address,
+            totalSupply: tokenProfile.totalSupply,
+            context: {
+              holderCount: tokenProfile.holderCount,
+              deployerAddress: tokenProfile.deployerAddress,
+              ownerAddress,
+              liquidityPoolAddresses: discoveredPools?.map((pool) => pool.poolAddress) ?? []
+            }
+          })
+          .catch(() => null)
+      : null;
     const holderDetectorResults: DetectorResult[] = [];
 
     if (holderSnapshot) {
@@ -1406,7 +856,7 @@ export async function processScanJob(
       startedAt: now()
     });
     const simulations =
-      adapter.name === "Robinhood Chain" && discoveredPools && discoveredPools.length > 0
+      providers && discoveredPools && discoveredPools.length > 0
         ? await createRobinhoodRouteTradeSimulations({
             adapter,
             ...(dependencies.forkTradeSimulator
@@ -1526,7 +976,11 @@ interface TokenProfileInput {
   bytecode: `0x${string}`;
 }
 
-async function collectTokenProfile(adapter: ChainAdapter, input: TokenProfileInput) {
+async function collectTokenProfile(
+  adapter: ChainAdapter,
+  providers: ProviderSet | null,
+  input: TokenProfileInput
+) {
   if (input.bytecode === "0x") {
     return {
       chainId: input.chainId,
@@ -1550,13 +1004,17 @@ async function collectTokenProfile(adapter: ChainAdapter, input: TokenProfileInp
     };
   }
 
-  const [metadata, explorer, dex] = await Promise.all([
+  const [metadata, explorer, market] = await Promise.all([
     adapter.getTokenMetadata(input.address).catch(() => null),
-    adapter.name === "Robinhood Chain"
-      ? fetchExplorerTokenProfile(input.chainId, input.address).catch(() => null)
+    providers
+      ? providers.explorer
+          .getTokenProfile({ chainId: input.chainId, address: input.address })
+          .catch(() => null)
       : Promise.resolve(null),
-    adapter.name === "Robinhood Chain"
-      ? fetchDexScreenerTokenProfile(input.address).catch(() => null)
+    providers
+      ? providers.market
+          .getMarketProfile({ chainId: input.chainId, address: input.address })
+          .catch(() => null)
       : Promise.resolve(null)
   ]);
 
@@ -1564,417 +1022,24 @@ async function collectTokenProfile(adapter: ChainAdapter, input: TokenProfileInp
     chainId: input.chainId,
     address: input.address,
     blockNumber: input.blockNumber,
-    name: metadata?.name ?? explorer?.name ?? dex?.name ?? null,
-    symbol: metadata?.symbol ?? explorer?.symbol ?? dex?.symbol ?? null,
+    name: metadata?.name ?? explorer?.name ?? market?.name ?? null,
+    symbol: metadata?.symbol ?? explorer?.symbol ?? market?.symbol ?? null,
     decimals: metadata?.decimals ?? explorer?.decimals ?? null,
     totalSupply: explorer?.totalSupply ?? null,
     holderCount: explorer?.holderCount ?? null,
     sourceVerified: explorer?.sourceVerified ?? null,
     deployerAddress: explorer?.deployerAddress ?? null,
-    contractCreatedAt: explorer?.contractCreatedAt ?? dex?.pairCreatedAt ?? null,
+    contractCreatedAt: explorer?.contractCreatedAt ?? market?.pairCreatedAt ?? null,
     creationTxHash: explorer?.creationTxHash ?? null,
-    tokenType: explorer?.tokenType ?? dex?.labels ?? null,
-    iconUrl: explorer?.iconUrl ?? dex?.iconUrl ?? null,
+    tokenType: explorer?.tokenType ?? market?.labels ?? null,
+    iconUrl: explorer?.iconUrl ?? market?.iconUrl ?? null,
     reputation: explorer?.reputation ?? null,
-    priceUsd: explorer?.priceUsd ?? dex?.priceUsd ?? null,
-    marketCapUsd: explorer?.marketCapUsd ?? dex?.marketCapUsd ?? null,
-    volume24hUsd: explorer?.volume24hUsd ?? dex?.volume24hUsd ?? null
+    priceUsd: explorer?.priceUsd ?? market?.priceUsd ?? null,
+    marketCapUsd: explorer?.marketCapUsd ?? market?.marketCapUsd ?? null,
+    volume24hUsd: explorer?.volume24hUsd ?? market?.volume24hUsd ?? null
   };
-}
-
-interface ExplorerTokenProfile {
-  name: string | null;
-  symbol: string | null;
-  decimals: number | null;
-  totalSupply: string | null;
-  holderCount: number | null;
-  sourceVerified: boolean | null;
-  deployerAddress: `0x${string}` | null;
-  contractCreatedAt: Date | null;
-  creationTxHash: `0x${string}` | null;
-  tokenType: string | null;
-  iconUrl: string | null;
-  reputation: string | null;
-  priceUsd: string | null;
-  marketCapUsd: string | null;
-  volume24hUsd: string | null;
-}
-
-interface DexScreenerTokenProfile {
-  name: string | null;
-  symbol: string | null;
-  iconUrl: string | null;
-  labels: string | null;
-  priceUsd: string | null;
-  marketCapUsd: string | null;
-  volume24hUsd: string | null;
-  liquidityUsd: number | null;
-  pairCreatedAt: Date | null;
-}
-
-async function fetchExplorerContractSource(
-  chainId: number,
-  address: `0x${string}`
-): Promise<ContractSourceDetectorInput> {
-  if (chainId !== 4663) {
-    return {
-      status: "UNAVAILABLE",
-      address,
-      sourceFiles: []
-    };
-  }
-
-  const response = await fetchJson(
-    `${robinhoodChainLegacyApiUrl()}?module=contract&action=getsourcecode&address=${address}`
-  );
-  if (!isRecord(response) || !Array.isArray(response.result) || !isRecord(response.result[0])) {
-    return {
-      status: "UNAVAILABLE",
-      address,
-      sourceFiles: []
-    };
-  }
-
-  const record = response.result[0];
-  const sourceFiles = extractSourceFiles(record);
-  if (sourceFiles.length === 0) {
-    return {
-      status: "UNAVAILABLE",
-      address,
-      contractName: stringValue(record.ContractName),
-      compilerVersion: stringValue(record.CompilerVersion),
-      sourceFiles: []
-    };
-  }
-
-  return {
-    status: "VERIFIED",
-    address,
-    contractName: stringValue(record.ContractName),
-    compilerVersion: stringValue(record.CompilerVersion),
-    language: stringValue(record.Language),
-    abi: parseMaybeJson(stringValue(record.ABI)),
-    sourceFiles
-  };
-}
-
-function robinhoodChainLegacyApiUrl(): string {
-  return "https://robinhoodchain.blockscout.com/api";
-}
-
-function extractSourceFiles(
-  record: Record<string, unknown>
-): ContractSourceDetectorInput["sourceFiles"] {
-  const files: ContractSourceDetectorInput["sourceFiles"] = [];
-  const primarySource = stringValue(record.SourceCode);
-  if (primarySource) {
-    const parsedPrimary = parseSourceCodePayload(primarySource);
-    if (parsedPrimary.length > 0) {
-      files.push(...parsedPrimary);
-    } else {
-      files.push({
-        filename:
-          stringValue(record.FileName) ?? stringValue(record.ContractName) ?? "Contract.sol",
-        sourceCode: primarySource
-      });
-    }
-  }
-
-  if (Array.isArray(record.AdditionalSources)) {
-    for (const item of record.AdditionalSources) {
-      if (!isRecord(item)) continue;
-      const sourceCode = stringValue(item.SourceCode);
-      if (!sourceCode) continue;
-      files.push({
-        filename: stringValue(item.Filename) ?? "AdditionalSource.sol",
-        sourceCode
-      });
-    }
-  }
-
-  return dedupeSourceFiles(files).slice(0, 80);
-}
-
-function parseSourceCodePayload(sourceCode: string): ContractSourceDetectorInput["sourceFiles"] {
-  const trimmed = sourceCode.trim();
-  const normalized =
-    trimmed.startsWith("{{") && trimmed.endsWith("}}") ? trimmed.slice(1, -1) : trimmed;
-  const parsed = parseMaybeJson(normalized);
-  if (!isRecord(parsed)) {
-    return [];
-  }
-
-  const sources = isRecord(parsed.sources) ? parsed.sources : parsed;
-  const files: ContractSourceDetectorInput["sourceFiles"] = [];
-  for (const [filename, value] of Object.entries(sources)) {
-    if (typeof value === "string") {
-      files.push({ filename, sourceCode: value });
-    } else if (isRecord(value) && typeof value.content === "string") {
-      files.push({ filename, sourceCode: value.content });
-    }
-  }
-
-  return files;
-}
-
-function dedupeSourceFiles(
-  files: ContractSourceDetectorInput["sourceFiles"]
-): ContractSourceDetectorInput["sourceFiles"] {
-  const seen = new Set<string>();
-  return files.filter((file) => {
-    const key = `${file.filename}:${file.sourceCode.length}:${file.sourceCode.slice(0, 64)}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function parseMaybeJson(value: string | null): unknown {
-  if (!value) return null;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
-async function fetchExplorerTokenProfile(
-  chainId: number,
-  address: `0x${string}`
-): Promise<ExplorerTokenProfile | null> {
-  if (chainId !== 4663) {
-    return null;
-  }
-
-  const [token, search, addressInfo] = await Promise.all([
-    fetchJson(`${robinhoodBlockscoutApiUrl}/tokens/${address}`),
-    fetchJson(`${robinhoodBlockscoutApiUrl}/search?q=${encodeURIComponent(address)}`),
-    fetchJson(`${robinhoodBlockscoutApiUrl}/addresses/${address}`)
-  ]);
-
-  const tokenRecord = isRecord(token) ? token : {};
-  const searchItem = firstMatchingSearchItem(search, address);
-  const addressRecord = isRecord(addressInfo) ? addressInfo : {};
-  const creationTxHash = hexStringValue(addressRecord.creation_transaction_hash);
-  const creationTx = creationTxHash
-    ? await fetchJson(`${robinhoodBlockscoutApiUrl}/transactions/${creationTxHash}`).catch(
-        () => null
-      )
-    : null;
-  const creationTxRecord = isRecord(creationTx) ? creationTx : {};
-
-  return {
-    name: stringValue(tokenRecord.name) ?? stringValue(searchItem?.name) ?? null,
-    symbol: stringValue(tokenRecord.symbol) ?? stringValue(searchItem?.symbol) ?? null,
-    decimals: numberValue(tokenRecord.decimals),
-    totalSupply:
-      stringValue(tokenRecord.total_supply) ?? stringValue(searchItem?.total_supply) ?? null,
-    holderCount: numberValue(tokenRecord.holders_count) ?? numberValue(searchItem?.holder_count),
-    sourceVerified:
-      booleanValue(addressRecord.is_verified) ??
-      booleanValue(searchItem?.is_smart_contract_verified),
-    deployerAddress: addressValue(addressRecord.creator_address_hash),
-    contractCreatedAt: dateValue(creationTxRecord.timestamp),
-    creationTxHash,
-    tokenType: stringValue(tokenRecord.type),
-    iconUrl: stringValue(tokenRecord.icon_url),
-    reputation: stringValue(addressRecord.reputation) ?? stringValue(tokenRecord.reputation),
-    priceUsd:
-      decimalStringValue(tokenRecord.exchange_rate) ??
-      decimalStringValue(searchItem?.exchange_rate),
-    marketCapUsd:
-      decimalStringValue(tokenRecord.circulating_market_cap) ??
-      decimalStringValue(searchItem?.circulating_market_cap),
-    volume24hUsd: decimalStringValue(tokenRecord.volume_24h)
-  };
-}
-
-async function fetchDexScreenerTokenProfile(
-  address: `0x${string}`
-): Promise<DexScreenerTokenProfile | null> {
-  const response = await fetchJson(
-    `https://api.dexscreener.com/token-pairs/v1/robinhood/${address}`
-  );
-  if (!Array.isArray(response)) {
-    return null;
-  }
-
-  const pairs = response.filter(isRecord);
-  if (pairs.length === 0) {
-    return null;
-  }
-
-  const normalizedAddress = address.toLowerCase();
-  const matchingPairs = pairs.filter((pair) => {
-    const base = isRecord(pair.baseToken) ? pair.baseToken : null;
-    return stringValue(base?.address)?.toLowerCase() === normalizedAddress;
-  });
-  const bestPair = selectBestDexScreenerPair(matchingPairs.length > 0 ? matchingPairs : pairs);
-  if (!bestPair) {
-    return null;
-  }
-
-  const baseToken = isRecord(bestPair.baseToken) ? bestPair.baseToken : {};
-  const info = isRecord(bestPair.info) ? bestPair.info : {};
-  const volume = isRecord(bestPair.volume) ? bestPair.volume : {};
-  const liquidity = isRecord(bestPair.liquidity) ? bestPair.liquidity : {};
-  const labels = Array.isArray(bestPair.labels)
-    ? bestPair.labels.filter((label): label is string => typeof label === "string").join(", ")
-    : null;
-
-  return {
-    name: stringValue(baseToken.name),
-    symbol: stringValue(baseToken.symbol),
-    iconUrl: stringValue(info.imageUrl),
-    labels,
-    priceUsd: decimalStringValue(bestPair.priceUsd),
-    marketCapUsd:
-      decimalStringValue(bestPair.marketCap) ?? decimalStringValue(bestPair.fdv),
-    volume24hUsd: decimalStringValue(volume.h24),
-    liquidityUsd: numberValue(liquidity.usd),
-    pairCreatedAt: timestampMsDateValue(bestPair.pairCreatedAt)
-  };
-}
-
-function selectBestDexScreenerPair(pairs: Record<string, unknown>[]): Record<string, unknown> | null {
-  const sorted = [...pairs].sort((a, b) => {
-    const aLiquidity = numberValue(isRecord(a.liquidity) ? a.liquidity.usd : undefined) ?? 0;
-    const bLiquidity = numberValue(isRecord(b.liquidity) ? b.liquidity.usd : undefined) ?? 0;
-    return bLiquidity - aLiquidity;
-  });
-  return sorted[0] ?? null;
-}
-
-async function fetchJson(url: string): Promise<unknown> {
-  const response = await fetch(url, {
-    headers: {
-      accept: "application/json"
-    }
-  });
-
-  if (!response.ok) {
-    return null;
-  }
-
-  return response.json();
-}
-
-function firstMatchingSearchItem(
-  value: unknown,
-  address: `0x${string}`
-): Record<string, unknown> | null {
-  if (!isRecord(value) || !Array.isArray(value.items)) {
-    return null;
-  }
-
-  const normalizedAddress = address.toLowerCase();
-  const items: unknown[] = value.items;
-  const match = items.find((item) => {
-    return isRecord(item) && stringValue(item.address_hash)?.toLowerCase() === normalizedAddress;
-  });
-
-  return isRecord(match) ? match : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function stringValue(value: unknown): string | null {
-  if (typeof value === "string" && value.length > 0) {
-    return value;
-  }
-
-  return null;
-}
-
-function bigintFromRecord(record: Record<string, unknown>, key: string): bigint | null {
-  const value = record[key];
-  if (typeof value !== "string" || !/^\d+$/u.test(value)) {
-    return null;
-  }
-
-  try {
-    return BigInt(value);
-  } catch {
-    return null;
-  }
-}
-
-function numberFromRecord(record: Record<string, unknown>, key: string): number | null {
-  const value = record[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "eth_call reverted";
-}
-
-function hexStringValue(value: unknown): `0x${string}` | null {
-  return typeof value === "string" && /^0x[a-fA-F0-9]+$/.test(value)
-    ? (value as `0x${string}`)
-    : null;
-}
-
-function addressValue(value: unknown): `0x${string}` | null {
-  return typeof value === "string" && /^0x[a-fA-F0-9]{40}$/.test(value)
-    ? (value.toLowerCase() as `0x${string}`)
-    : null;
-}
-
-function dateValue(value: unknown): Date | null {
-  if (typeof value !== "string" || value.length === 0) {
-    return null;
-  }
-
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function timestampMsDateValue(value: unknown): Date | null {
-  const numeric = numberValue(value);
-  if (numeric === null) {
-    return null;
-  }
-
-  const date = new Date(numeric);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function decimalStringValue(value: unknown): string | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value.toString();
-  }
-
-  if (typeof value === "string" && value.length > 0 && Number.isFinite(Number(value))) {
-    return value;
-  }
-
-  return null;
-}
-
-function numberValue(value: unknown): number | null {
-  const numeric =
-    typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
-  return Number.isFinite(numeric) ? numeric : null;
-}
-
-function booleanValue(value: unknown): boolean | null {
-  return typeof value === "boolean" ? value : null;
-}
-
-function isZeroAddress(address: `0x${string}`): boolean {
-  return address.toLowerCase() === "0x0000000000000000000000000000000000000000";
-}
-
-function addressToTopic(address: `0x${string}`): Hex {
-  return `0x${address.toLowerCase().slice(2).padStart(64, "0")}`;
-}
-
-function poolIdToAddress(poolId: Hex): `0x${string}` {
-  return `0x${poolId.slice(2, 42)}`;
-}
-
-function compact<T>(values: Array<T | null | undefined>): T[] {
-  return values.filter((value): value is T => value !== null && value !== undefined);
 }
