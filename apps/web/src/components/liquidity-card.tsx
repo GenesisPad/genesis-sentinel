@@ -2,6 +2,12 @@ import type { LiquidityInfo } from "@/lib/types";
 import { formatUsd, shortAddress } from "@/lib/utils";
 import { EmptyState } from "@/components/empty-state";
 
+const HEALTH_TIER_STYLE = {
+  low: { label: "Low", hex: "#f0483e" },
+  medium: { label: "Medium", hex: "#f5a623" },
+  healthy: { label: "Healthy", hex: "#37d67a" }
+} as const;
+
 export function LiquidityCard({ liquidity, technical }: { liquidity: LiquidityInfo; technical?: boolean }) {
   if (liquidity.locked == null && liquidity.totalUsd == null) {
     return (
@@ -42,6 +48,17 @@ export function LiquidityCard({ liquidity, technical }: { liquidity: LiquidityIn
         <div className="mt-2 flex justify-between text-sm text-muted">
           <span>Total liquidity</span>
           <span className="text-foreground">{formatUsd(liquidity.totalUsd)}</span>
+        </div>
+      ) : null}
+      {liquidity.healthTier ? (
+        <div className="flex justify-between text-sm text-muted">
+          <span>Liquidity health</span>
+          <span className="font-bold" style={{ color: HEALTH_TIER_STYLE[liquidity.healthTier].hex }}>
+            {HEALTH_TIER_STYLE[liquidity.healthTier].label}
+            {liquidity.quoteSidePctOfMarketCap != null
+              ? ` (${liquidity.quoteSidePctOfMarketCap.toFixed(1)}% of market cap)`
+              : ""}
+          </span>
         </div>
       ) : null}
       {liquidity.locked != null ? (

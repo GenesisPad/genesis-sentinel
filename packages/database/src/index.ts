@@ -21,6 +21,7 @@ import {
   type HolderSummaryView,
   type LiquidityPoolView,
   type LiquiditySummaryView,
+  type RecentScanView,
   type RiskSnapshot,
   type ScanResultView,
   type ScanProgress,
@@ -73,6 +74,13 @@ export interface ScanRepository {
   createOrGetQueuedScan(input: CreateScanInput): Promise<{ scan: ScanProgress; created: boolean }>;
   getScan(scanId: string): Promise<ScanProgress | null>;
   getScanResult(scanId: string): Promise<ScanResultView | null>;
+  /** Latest scan result for a token, regardless of which scanId it lives under — used by the
+   * public token page so it reflects current state instead of being pinned to whichever scan
+   * an idempotency key first resolved to. */
+  getLatestScanResult(chainId: number, address: `0x${string}`): Promise<ScanResultView | null>;
+  /** Public "recent detections" feed — most recent scan per token, newest first, limited to
+   * scans with a real persisted numeric score. */
+  getRecentScans(limit: number): Promise<RecentScanView[]>;
   getTokenFindings(chainId: number, address: `0x${string}`): Promise<SecurityFindingView[]>;
   getRiskSnapshot(chainId: number, address: `0x${string}`): Promise<RiskSnapshot | null>;
   getScanTarget(scanId: string): Promise<ScanTarget | null>;
@@ -374,6 +382,54 @@ export function createScanRepository(db: PrismaDatabase): ScanRepository {
             await findHolderSnapshots(db, scan.chainId, scan.targetAddress)
           )
         : null;
+    },
+
+    async getLatestScanResult(chainId, address) {
+      const latestScan = await findLatestTokenScan(db, chainId, address);
+      if (!latestScan) {
+        return null;
+      }
+
+      return toScanResultView(
+        latestScan,
+        await findLiquidityPools(db, latestScan.chainId, latestScan.targetAddress),
+        await findHolderSnapshots(db, latestScan.chainId, latestScan.targetAddress)
+      );
+    },
+
+    async getRecentScans(limit) {
+      const scans = await db.scan.findMany({
+        where: {
+          state: { in: ["COMPLETED", "PARTIALLY_COMPLETED"] },
+          riskAssessment: { score: { not: null } }
+        },
+        distinct: ["chainId", "targetAddress"],
+        orderBy: { completedAt: "desc" },
+        take: limit,
+        include: { token: true, riskAssessment: true }
+      });
+
+      return scans.flatMap((scan): RecentScanView[] => {
+        const score = scan.riskAssessment?.score;
+        if (score === null || score === undefined) {
+          return [];
+        }
+
+        return [
+          {
+            chainId: scan.chainId,
+            address: scan.targetAddress as `0x${string}`,
+            name: scan.token?.name ?? null,
+            symbol: scan.token?.symbol ?? null,
+            riskScore: score,
+            riskLevel:
+              scan.riskAssessment?.level === "UNABLE_TO_VERIFY"
+                ? "UNABLE_TO_ASSESS"
+                : (scan.riskAssessment?.level ?? "UNABLE_TO_ASSESS"),
+            scannedAt: (scan.completedAt ?? scan.queuedAt).toISOString()
+          }
+        ];
+      });
     },
 
     async getTokenFindings(chainId, address) {

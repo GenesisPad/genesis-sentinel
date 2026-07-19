@@ -25,6 +25,14 @@ function createRepository(chainId = 4663) {
       await Promise.resolve();
       throw new Error("not used");
     },
+    async getLatestScanResult() {
+      await Promise.resolve();
+      throw new Error("not used");
+    },
+    async getRecentScans() {
+      await Promise.resolve();
+      throw new Error("not used");
+    },
     async getTokenFindings() {
       await Promise.resolve();
       throw new Error("not used");

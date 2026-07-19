@@ -52,7 +52,19 @@ export function ResultSummary({ report, onFresh, freshBusy = false }: { report: 
 
       {/* identity + score */}
       <Card className="grid gap-7 bg-[linear-gradient(180deg,#101311,#0c0e0c)] p-6 md:grid-cols-2 md:items-center">
-        <TokenHeader token={report.token} size="lg" />
+        <div className="flex flex-col gap-3">
+          <TokenHeader token={report.token} size="lg" />
+          {onFresh ? (
+            <button
+              onClick={onFresh}
+              disabled={freshBusy}
+              className="inline-flex w-fit items-center gap-1.5 text-sm font-bold text-primary transition-[filter] hover:brightness-110 disabled:pointer-events-none disabled:opacity-60"
+            >
+              <RefreshCcw className={freshBusy ? "size-3.5 animate-spin" : "size-3.5"} aria-hidden />
+              {freshBusy ? "Rerunning" : "Rerun scan"}
+            </button>
+          ) : null}
+        </div>
         <div>
           <div className="mb-2 flex items-center gap-3">
             <span className="text-xs font-bold uppercase tracking-[0.12em] text-muted">Risk Score</span>

@@ -100,6 +100,10 @@ export interface LiquidityInfo {
   lpOwner?: string;
   poolAddress?: string;
   dex?: string;
+  /** Native/stablecoin side of the pool as a percentage of market cap: <10% low, 10-20%
+   * medium, >20% healthy. Null when market cap or pool value isn't known. */
+  quoteSidePctOfMarketCap?: number | null;
+  healthTier?: "low" | "medium" | "healthy" | null;
 }
 
 export interface HolderInfo {
@@ -198,5 +202,6 @@ export interface RecentScan {
   name: string;
   symbol: string;
   riskScore: number;
+  riskLevel?: string;
   scannedAt: string;
 }

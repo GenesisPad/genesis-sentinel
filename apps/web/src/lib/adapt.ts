@@ -222,6 +222,13 @@ function mapSimulationCapability(outcome: CheckOutcome | undefined): boolean | n
 // persisted today (packages/database LiquidityPool). "Locked" here means burned/sent to a
 // known dead address — the backend has no LP-locker-contract detection yet, so a genuine
 // third-party lock (not burn) still reads as `locked: false` rather than a guess.
+/** <10% of market cap is low, 10-20% is medium, >20% is healthy. */
+function liquidityHealthTier(pct: number): "low" | "medium" | "healthy" {
+  if (pct > 20) return "healthy";
+  if (pct >= 10) return "medium";
+  return "low";
+}
+
 function mapLiquidity(view: ScanResultView): LiquidityInfo {
   const pool = view.liquidity.pools[0];
   if (!pool?.liquidityData) {
@@ -232,12 +239,24 @@ function mapLiquidity(view: ScanResultView): LiquidityInfo {
   const burnedPct =
     typeof data.lpBurnedOrLockedPct === "number" ? data.lpBurnedOrLockedPct : undefined;
   const totalUsd = typeof data.totalLiquidityUsd === "number" ? data.totalLiquidityUsd : null;
+  // totalLiquidityUsd is computed as quote-side value * 2 (packages/providers), assuming a
+  // roughly symmetric pool — so the quote (native/stablecoin) side alone is half of it.
+  const quoteSideUsd = totalUsd != null ? totalUsd / 2 : null;
+  const marketCapUsd = view.token.marketCapUsd ? Number(view.token.marketCapUsd) : null;
+  const quoteSidePctOfMarketCap =
+    quoteSideUsd != null && marketCapUsd != null && marketCapUsd > 0
+      ? (quoteSideUsd / marketCapUsd) * 100
+      : null;
 
   return {
     totalUsd,
     locked: burnedPct != null ? burnedPct >= 50 : null,
     burnedPct,
-    lockedPct: burnedPct
+    lockedPct: burnedPct,
+    poolAddress: pool.poolAddress,
+    dex: pool.dex ?? undefined,
+    quoteSidePctOfMarketCap,
+    healthTier: quoteSidePctOfMarketCap != null ? liquidityHealthTier(quoteSidePctOfMarketCap) : null
   };
 }
 
@@ -246,12 +265,23 @@ function mapHolders(view: ScanResultView): HolderInfo {
   const snapshot = holderView.snapshots[0];
   const concentration = snapshot?.concentration as
     { top1Pct?: number; top5Pct?: number; top10Pct?: number } | undefined;
+  const topHolders = snapshot?.topHolders as { holders?: unknown[] } | undefined;
+  const clusteredWithDeployer = Array.isArray(topHolders?.holders)
+    ? topHolders.holders.filter(
+        (holder): holder is { labels: string[] } =>
+          typeof holder === "object" &&
+          holder !== null &&
+          Array.isArray((holder as { labels?: unknown }).labels) &&
+          (holder as { labels: string[] }).labels.includes("RELATED_WALLET")
+      ).length
+    : undefined;
 
   return {
     top1Pct: concentration?.top1Pct ?? null,
     top5Pct: concentration?.top5Pct ?? null,
     top10Pct: concentration?.top10Pct ?? null,
-    holderCount: view.token.holderCount ?? snapshot?.holderCount
+    holderCount: view.token.holderCount ?? snapshot?.holderCount,
+    ...(clusteredWithDeployer ? { clusteredWithDeployer } : {})
   };
 }
 

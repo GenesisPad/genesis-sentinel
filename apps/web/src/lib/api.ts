@@ -105,17 +105,50 @@ export async function getScanReport(scanId: string): Promise<ScanReport> {
   return mapResultToReport(json as ScanResultView);
 }
 
-/** Canonical report for the public /token/:chainId/:address page — resolves (or starts) a scan. */
+/**
+ * Canonical report for the public /token/:chainId/:address page. Reads the token's latest scan
+ * result directly (GET /v1/tokens/:chainId/:address) so the page reflects current state instead
+ * of being pinned forever to whichever scan the deterministic (non-fresh) idempotency key first
+ * resolved to. Only creates a new scan when no scan has ever run for this token (404).
+ */
 export async function getTokenReport(chainId: ChainId, address: string): Promise<ScanReport> {
   if (USE_FIXTURES) return buildFixtureReport(chainId, address);
-  const job = await createScan({ address, chainId });
-  return getScanReport(job.scanId);
+  const numeric = numericChainId(chainId);
+  try {
+    const json = await request(`/tokens/${numeric}/${address}`);
+    return mapResultToReport(json as ScanResultView);
+  } catch (error) {
+    if (error instanceof ApiError && error.code === "not_found") {
+      const job = await createScan({ address, chainId });
+      return getScanReport(job.scanId);
+    }
+    throw error;
+  }
 }
 
-/** GET recent public detections. Not implemented by the API yet — degrades to an empty list. */
-export function getRecentScans(): Promise<RecentScan[]> {
-  if (USE_FIXTURES) return Promise.resolve(FIXTURE_RECENT);
-  return Promise.resolve([]);
+/** GET /v1/scans/recent — public "recent detections" feed. */
+export async function getRecentScans(): Promise<RecentScan[]> {
+  if (USE_FIXTURES) return FIXTURE_RECENT;
+  const json = (await request("/scans/recent")) as { scans: RecentScanApiRow[] };
+  return json.scans.map((row) => ({
+    chainId: (Object.keys(CHAINS) as ChainId[]).find((key) => CHAINS[key].chainId === row.chainId) ?? "robinhood",
+    address: row.address,
+    name: row.name ?? row.symbol ?? "Unknown token",
+    symbol: row.symbol ?? "",
+    riskScore: row.riskScore,
+    riskLevel: row.riskLevel,
+    scannedAt: row.scannedAt,
+  }));
+}
+
+interface RecentScanApiRow {
+  chainId: number;
+  address: string;
+  name: string | null;
+  symbol: string | null;
+  riskScore: number;
+  riskLevel: string;
+  scannedAt: string;
 }
 
 /** No SSE endpoint on the backend yet — useScan always falls back to polling. */

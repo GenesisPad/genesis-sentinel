@@ -472,7 +472,12 @@ async function staticCallRouterNativeBuy(
       to: robinhoodUniswapV2RouterAddress,
       data,
       value: input.amountInRaw,
-      blockNumber: input.blockNumber
+      blockNumber: input.blockNumber,
+      // sentinelStaticCallWallet holds no real funds — this static-only probe wallet needs a
+      // synthetic balance override for the call, or every buy check would fail on
+      // "insufficient balance for gas * gasFee + value" regardless of whether the token is
+      // actually buyable. Scoped to this one eth_call; never a real transaction.
+      stateOverride: [{ address: sentinelStaticCallWallet, balance: input.amountInRaw * 2n }]
     });
 
     return {
@@ -974,9 +979,23 @@ export async function processScanJob(
       { launch: genesispadLaunch },
       detectorRunContext
     );
-    const deployerHistory = tokenProfile.deployerAddress
+    // Explorers attribute contract creation to whichever address's CREATE/CREATE2 call directly
+    // spawned the bytecode — for a confirmed GenesisPad launch that's a generic CREATE2 factory
+    // (e.g. "Create2Factory"), never the person who actually launched the token. When the
+    // on-chain GenesisLaunchRegistry confirms this launch, its `originalCreator` field is the
+    // real, verified creator and takes priority over the explorer's raw deployer attribution.
+    const effectiveDeployerAddress = genesispadLaunch?.originalCreator ?? tokenProfile.deployerAddress;
+    if (
+      genesispadLaunch?.originalCreator &&
+      genesispadLaunch.originalCreator.toLowerCase() !== tokenProfile.deployerAddress?.toLowerCase()
+    ) {
+      await dependencies.scans
+        .recordTokenProfile({ ...tokenProfile, deployerAddress: genesispadLaunch.originalCreator })
+        .catch(() => undefined);
+    }
+    const deployerHistory = effectiveDeployerAddress
       ? await dependencies.scans
-          .getDeployerHistory(target.chainId, tokenProfile.deployerAddress, target.address)
+          .getDeployerHistory(target.chainId, effectiveDeployerAddress, target.address)
           .catch(() => null)
       : null;
     const bytecodeHash = bytecode !== "0x" ? hashBytecode(bytecode) : null;
@@ -992,7 +1011,7 @@ export async function processScanJob(
       chainId: target.chainId,
       tokenAddress: target.address,
       blockNumber,
-      deployerAddress: tokenProfile.deployerAddress,
+      deployerAddress: effectiveDeployerAddress,
       ownerAddress: ownerAddressForEdges,
       totalSupply: tokenProfile.totalSupply,
       bytecodeReuse
@@ -1126,7 +1145,7 @@ export async function processScanJob(
             totalSupply: tokenProfile.totalSupply,
             context: {
               holderCount: tokenProfile.holderCount,
-              deployerAddress: tokenProfile.deployerAddress,
+              deployerAddress: effectiveDeployerAddress,
               ownerAddress,
               liquidityPoolAddresses: discoveredPools?.map((pool) => pool.poolAddress) ?? [],
               relatedWalletAddresses: relatedWalletAddressesForHolders(relatedWalletEdges)

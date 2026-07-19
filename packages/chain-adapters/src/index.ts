@@ -85,6 +85,10 @@ export interface TraceCallInput {
   data?: Hex;
   value?: bigint;
   blockNumber?: bigint;
+  /** Per-address state overrides for this call only (e.g. a synthetic native balance so a
+   * zero-balance static-check wallet can probe a payable call without a real funding
+   * transaction). Never persisted or broadcast — scoped to this one `eth_call`. */
+  stateOverride?: Array<{ address: `0x${string}`; balance?: bigint }>;
 }
 
 export interface TraceResult {
@@ -338,7 +342,15 @@ export function createViemChainAdapter(
         to: normalizeEvmAddress(input.to),
         data: input.data,
         value: input.value,
-        blockNumber: input.blockNumber
+        blockNumber: input.blockNumber,
+        ...(input.stateOverride
+          ? {
+              stateOverride: input.stateOverride.map((override) => ({
+                address: override.address,
+                ...(override.balance !== undefined ? { balance: override.balance } : {})
+              }))
+            }
+          : {})
       });
 
       return {

@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { TokenHeader } from "@/components/token-header";
 import { ScoreGauge } from "@/components/score-gauge";
 import { RiskBadge } from "@/components/risk-badge";
+import { ScanProgress } from "@/components/scan-progress";
 import { QuickAnswers } from "@/components/quick-answers";
 import { FindingsList } from "@/components/findings-list";
 import { ContractControlsGrid } from "@/components/contract-controls";
@@ -54,7 +55,7 @@ export function TokenReportView({
   address: string;
   initialData?: ScanReport;
 }) {
-  const { data: report, rerun, isRerunning, rerunError } = useTokenReport(chainId, address, initialData);
+  const { data: report, rerun, isRerunning, rerunError, freshJob } = useTokenReport(chainId, address, initialData);
   const view = useUiStore((s) => s.reportView);
   const setView = useUiStore((s) => s.setReportView);
   if (!report) return null;
@@ -93,7 +94,6 @@ export function TokenReportView({
             </div>
           </div>
           {rerunError ? <p className="text-xs text-danger">Fresh scan failed. Try again in a moment.</p> : null}
-          {isRerunning ? <p className="text-xs text-muted">Running a fresh scan against the latest chain state.</p> : null}
         </div>
       </Card>
       <p className="mt-2 text-xs text-muted">
@@ -101,6 +101,12 @@ export function TokenReportView({
           ? "Fast answers for a buy/sell decision. Switch to Technical View for raw evidence."
           : "Raw contract controls, detector checks, and evidence. Switch to Trader View for a quick summary."}
       </p>
+
+      {isRerunning && freshJob ? (
+        <div className="mt-6">
+          <ScanProgress job={freshJob} />
+        </div>
+      ) : null}
 
       <div className="mt-6 grid gap-6 lg:grid-cols-[220px_1fr]">
         <aside className="hidden lg:block">
@@ -212,7 +218,10 @@ function TechnicalSections({ report }: { report: ScanReport }) {
 }
 
 function TopRisks({ report }: { report: ScanReport }) {
-  const top = sortFindings(report.findings).slice(0, 3);
+  // INFO findings (e.g. "launched via GenesisPad with liquidity locked") are evidence, not
+  // risk — they never belong in a "most serious first" risk callout, regardless of how few
+  // actual risk findings exist.
+  const top = sortFindings(report.findings.filter((f) => f.severity !== "info")).slice(0, 3);
   if (top.length === 0) {
     return <p className="text-sm text-muted">No findings detected. This does not guarantee the token is safe.</p>;
   }

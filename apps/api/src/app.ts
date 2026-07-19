@@ -44,6 +44,10 @@ const tokenParamsSchema = z.object({
   address: evmAddressSchema
 });
 
+const recentScansQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50).default(20)
+});
+
 export interface AppOptions {
   env: AppEnv;
   logger: Logger;
@@ -180,6 +184,12 @@ export async function buildApp({ env, logger, scanRepository, scanQueue }: AppOp
     return reply.code(result.created ? 202 : 200).send(result.scan);
   });
 
+  app.get("/v1/scans/recent", async (request) => {
+    const parsed = recentScansQuerySchema.safeParse(request.query);
+    const limit = parsed.success ? parsed.data.limit : 20;
+    return { scans: await scans.getRecentScans(limit) };
+  });
+
   app.get("/v1/scans/:scanId", async (request, reply) => {
     const scanId = (request.params as { scanId?: string }).scanId;
     const scan = scanId ? await scans.getScan(scanId) : undefined;
@@ -206,6 +216,26 @@ export async function buildApp({ env, logger, scanRepository, scanQueue }: AppOp
     }
 
     return scan;
+  });
+
+  app.get("/v1/tokens/:chainId/:address", async (request, reply) => {
+    const parsed = tokenParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_token_request",
+        message: "Provide Robinhood Chain ID 4663 and a valid EVM contract address."
+      });
+    }
+
+    const result = await scans.getLatestScanResult(parsed.data.chainId, parsed.data.address);
+    if (!result) {
+      return reply.code(404).send({
+        error: "scan_not_found",
+        message: "No scan has been run for this token yet."
+      });
+    }
+
+    return result;
   });
 
   app.get("/v1/tokens/:chainId/:address/findings", async (request, reply) => {

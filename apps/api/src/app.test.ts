@@ -86,6 +86,17 @@ describe("api foundation", () => {
           }
         : null;
     },
+    async getLatestScanResult(chainId: number, address: `0x${string}`) {
+      await Promise.resolve();
+      const scan = [...scans.values()]
+        .reverse()
+        .find((item) => item.chainId === chainId && item.address === address);
+      return scan ? await this.getScanResult(scan.scanId) : null;
+    },
+    async getRecentScans() {
+      await Promise.resolve();
+      return [];
+    },
     async getTokenFindings() {
       await Promise.resolve();
       return [];

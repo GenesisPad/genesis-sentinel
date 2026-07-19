@@ -295,6 +295,18 @@ export interface SimulationRunView {
   createdAt: string;
 }
 
+/** One row for the public "recent detections" feed — only scans with a real, persisted numeric
+ * score are eligible, so an UNABLE_TO_ASSESS scan never shows up looking like a risk verdict. */
+export interface RecentScanView {
+  chainId: number;
+  address: `0x${string}`;
+  name: string | null;
+  symbol: string | null;
+  riskScore: number;
+  riskLevel: RiskLevel;
+  scannedAt: string;
+}
+
 export interface RiskSnapshot {
   chainId: number;
   address: `0x${string}`;
