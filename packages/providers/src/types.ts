@@ -93,6 +93,15 @@ export interface ExplorerTokenProfile {
   holderCount: number | null;
   sourceVerified: boolean | null;
   deployerAddress: `0x${string}` | null;
+  /** The creation transaction's actual signer (tx.from) — distinct from `deployerAddress` when
+   * the token was launched through a factory/launchpad contract, since explorers report the
+   * immediate CREATE/CREATE2 caller (the factory) as the "creator," not the person who actually
+   * signed and paid for the transaction. Null when unavailable or identical to deployerAddress. */
+  creationTxSenderAddress: `0x${string}` | null;
+  /** True when the creation transaction called into a contract (a factory/launchpad) rather than
+   * being a raw EOA-to-nobody CREATE transaction — the signal used to prefer
+   * creationTxSenderAddress over deployerAddress as the real creator. */
+  deployerIsLaunchFactory: boolean;
   contractCreatedAt: Date | null;
   creationTxHash: `0x${string}` | null;
   tokenType: string | null;

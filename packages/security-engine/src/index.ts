@@ -383,14 +383,15 @@ const selectorRules: SelectorRule[] = [
       "Selector presence indicates the contract may restrict trade size or wallet holdings. It does not prove the caps are currently active or what their values are.",
     recommendation:
       "Verify current cap values and whether a privileged role can change them without limits.",
-    signatures: [
-      "maxTransactionAmount()",
-      "setMaxTxAmount(uint256)",
-      "maxWalletAmount()",
-      "setMaxWalletAmount(uint256)",
-      "_maxTxAmount()",
-      "_maxWalletSize()"
-    ]
+    // Only setter selectors — a bare no-argument getter like maxWalletAmount()/
+    // maxTransactionAmount() is the auto-generated accessor Solidity creates for ANY `public`
+    // state variable, including a permanently `immutable` one with no setter at all. Matching
+    // getter selectors here means any contract exposing its (harmless, fixed-at-deploy) limits
+    // for transparency gets flagged the same as one with a privileged setter. Verified against a
+    // real deployed token whose maxWalletAmount/maxTxAmount are immutable, have no setter, and
+    // are enforced only for a fixed anti-snipe block window — this detector still reported a
+    // "control surface" purely from the read-only getter's selector matching by coincidence.
+    signatures: ["setMaxTxAmount(uint256)", "setMaxWalletAmount(uint256)"]
   },
   {
     detectorId: "trading-control-selector-patterns",
@@ -861,7 +862,13 @@ const sourceRiskRules: SourceRiskRule[] = [
       "Review current fee and limit values and whether privileged roles can raise them without a cap.",
     patterns: [
       /\b(?:setTax|setTaxes|setFees|setBuyFee|setSellFee|buyTax|sellTax|taxFee|marketingFee|liquidityFee)\b/i,
-      /\b(?:maxWallet|maxTx|maxTransaction|setMaxWallet|setMaxTx|excludeFromFees|isExcludedFromFee|whitelist)\b/i
+      // Only setter-shaped names (setMaxWallet/setMaxTx/...) — NOT a bare "maxWallet"/"maxTx"/
+      // "maxTransaction" match, which false-positives on read-only getters, immutable variable
+      // names, struct fields, and even unrelated identifiers like a custom error's parameter
+      // name (verified against a real deployed token: `error MaxWalletExceeded(..., uint256
+      // maxWallet)` alone triggered this finding with no owner, no setter, and the limit itself
+      // declared `immutable` — a false claim of a mutable "control surface" that doesn't exist).
+      /\b(?:setMaxWallet|setMaxTx|setMaxTransaction|excludeFromFees|isExcludedFromFee|whitelist)\b/i
     ]
   },
   {

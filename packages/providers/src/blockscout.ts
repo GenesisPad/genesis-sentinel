@@ -168,6 +168,29 @@ export function createBlockscoutExplorerProvider(config: BlockscoutChainConfig):
         : null;
       const creationTxRecord = isRecord(creationTx) ? creationTx : {};
 
+      // Blockscout's creator_address_hash is the immediate CREATE/CREATE2 caller — for a token
+      // launched through a factory/launchpad contract, that's the factory, not the person who
+      // actually signed and paid for the deployment. The creation transaction's own `from` is
+      // always the real signer; when it differs from creator_address_hash AND the transaction's
+      // `to` is itself a contract (i.e. this was a contract call, not a raw EOA deployment), the
+      // deployer is a launch factory and the tx sender is the true creator. Verified against a
+      // real GenesisPad `launchToken` transaction: Blockscout tags the `to` address "Launch
+      // Factory" via its Open Labels Initiative metadata, and `from.is_contract` is false (a
+      // genuine EOA) — this generalizes to any launchpad using the same factory-call pattern.
+      const deployerAddress = addressValue(addressRecord.creator_address_hash);
+      const txFrom = isRecord(creationTxRecord.from) ? creationTxRecord.from : {};
+      const txTo = isRecord(creationTxRecord.to) ? creationTxRecord.to : {};
+      const txSenderAddress = addressValue(txFrom.hash);
+      const txSenderIsContract = booleanValue(txFrom.is_contract) ?? false;
+      const txDestinationIsContract = booleanValue(txTo.is_contract) ?? false;
+      const deployerIsLaunchFactory = Boolean(
+        deployerAddress &&
+          txSenderAddress &&
+          !txSenderIsContract &&
+          txDestinationIsContract &&
+          txSenderAddress !== deployerAddress
+      );
+
       const profile: ExplorerTokenProfile = {
         name: stringValue(tokenRecord.name) ?? stringValue(searchItem?.name) ?? null,
         symbol: stringValue(tokenRecord.symbol) ?? stringValue(searchItem?.symbol) ?? null,
@@ -179,7 +202,9 @@ export function createBlockscoutExplorerProvider(config: BlockscoutChainConfig):
         sourceVerified:
           booleanValue(addressRecord.is_verified) ??
           booleanValue(searchItem?.is_smart_contract_verified),
-        deployerAddress: addressValue(addressRecord.creator_address_hash),
+        deployerAddress,
+        creationTxSenderAddress: deployerIsLaunchFactory ? txSenderAddress : null,
+        deployerIsLaunchFactory,
         contractCreatedAt: dateValue(creationTxRecord.timestamp),
         creationTxHash,
         tokenType: stringValue(tokenRecord.type),

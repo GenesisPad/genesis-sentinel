@@ -485,6 +485,111 @@ describe("scan worker orchestration", () => {
     });
   });
 
+  it("does not report the deployer seeding its own liquidity pool as a supply transfer to a wallet", async () => {
+    // Reproduces a real, live scan bug: the deployer sends ~100% of supply to the token's own
+    // pool to seed trading (completely normal launch behavior), but the wallet-clustering
+    // detector had no way to know that address was a pool rather than an unrelated wallet, and
+    // reported it as a "transferred supply to this wallet" finding — a false, misleading claim.
+    const { repository, calls } = createRepository();
+    const tokenAddress = "0x0000000000000000000000000000000000000001";
+    const pairAddress = "0x00000000000000000000000000000000000000f1";
+    const deployerAddress = "0x0000000000000000000000000000000000000dd1";
+    const totalSupplyRaw = 1_000_000_000_000_000_000_000n;
+
+    function addressToTopic(address: string): `0x${string}` {
+      return `0x${address.toLowerCase().slice(2).padStart(64, "0")}`;
+    }
+    const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = fetchUrl(input);
+      const body = url.includes(`/addresses/${deployerAddress}/transactions`)
+        ? { items: [] }
+        : url.includes(`/addresses/${tokenAddress}`)
+          ? { creator_address_hash: deployerAddress, is_verified: true }
+          : url.includes("/holders")
+            ? {
+                items: [
+                  {
+                    address: { hash: "0x00000000000000000000000000000000000000b1", is_contract: false },
+                    value: "1000000000000000000000"
+                  }
+                ]
+              }
+            : url.includes(`/tokens/${tokenAddress}`)
+              ? {
+                  name: "Token",
+                  symbol: "TOK",
+                  decimals: "18",
+                  total_supply: totalSupplyRaw.toString(),
+                  holders_count: "1"
+                }
+              : url.includes("/tokens/")
+                ? { exchange_rate: "1" }
+                : { items: [] };
+
+      return Promise.resolve(
+        new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } })
+      );
+    });
+
+    await processScanJob(
+      {
+        data: { scanId: "scan-pool-seed", chainId: 4663, address: tokenAddress }
+      },
+      {
+        scans: repository,
+        getChainAdapter() {
+          return createAdapter("0x6000", {
+            name: "Robinhood Chain",
+            onReadContract(parameters) {
+              if (parameters.functionName === "getPair") {
+                return parameters.args?.[1] === "0x0bd7d308f8e1639fab988df18a8011f41eacad73"
+                  ? pairAddress
+                  : "0x0000000000000000000000000000000000000000";
+              }
+              if (parameters.functionName === "getReserves") {
+                return [1_000_000_000_000_000_000_000n, 10_000_000_000_000_000_000n, 0];
+              }
+              if (parameters.functionName === "token0") return tokenAddress;
+              if (parameters.functionName === "totalSupply") return 1000n;
+              if (parameters.functionName === "balanceOf") return 0n;
+              return undefined;
+            },
+            onGetLogs(parameters) {
+              // Only answer the deployer's outgoing Transfer-log scan (findSupplyTransfers);
+              // other log scans (e.g. OwnershipTransferred) get no matching data.
+              if (
+                parameters.topics?.[0] === transferTopic &&
+                parameters.topics?.[1] === addressToTopic(deployerAddress)
+              ) {
+                return [
+                  {
+                    address: tokenAddress,
+                    topics: [transferTopic, addressToTopic(deployerAddress), addressToTopic(pairAddress)],
+                    data: `0x${totalSupplyRaw.toString(16)}`,
+                    blockNumber: 100n
+                  }
+                ];
+              }
+              return [];
+            },
+            onTraceCall() {
+              return "0x";
+            }
+          });
+        },
+        now: () => new Date("2026-07-11T00:00:00.000Z")
+      }
+    );
+
+    expect(calls).toContain(`liquidity:${pairAddress}`);
+    // The deployer-history detector turns TRANSFERRED_SUPPLY_TO edges into
+    // SUPPLY_TRANSFERRED_TO_WALLET findings — zero findings here confirms the pool-address
+    // transfer was correctly filtered out, not reported as a wallet relationship.
+    expect(calls).toContain("detector:deployer-history:0");
+  });
+
   it("runs Uniswap V3 route-quote trade simulation from the pool's spot price", async () => {
     const { repository, calls } = createRepository();
     const tokenAddress = "0x0000000000000000000000000000000000000001";

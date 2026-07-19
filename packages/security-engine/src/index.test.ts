@@ -271,6 +271,24 @@ describe("new selector-pattern detectors", () => {
     });
   });
 
+  it("does not flag a read-only maxWalletAmount()/maxTransactionAmount() getter with no setter present", async () => {
+    // Reproduces a real false positive: a token with immutable, no-owner, no-setter max-wallet/
+    // max-tx limits (Solidity auto-generates a public getter for any `public` state variable,
+    // including immutable ones) was flagged as having a mutable "control surface" purely because
+    // the getter's selector happened to match this list — with no setter anywhere in the bytecode.
+    const detector = selectorPatternDetectors.find(
+      (d) => d.metadata.id === "max-transaction-selector-patterns"
+    );
+    const result = await detector!.run(
+      {
+        bytecode: `0x${toFunctionSelector("maxWalletAmount()").slice(2)}${toFunctionSelector("maxTransactionAmount()").slice(2)}6000`
+      },
+      context
+    );
+
+    expect(result.findings).toEqual([]);
+  });
+
   it("detects trading-control selector surface", async () => {
     const detector = selectorPatternDetectors.find(
       (d) => d.metadata.id === "trading-control-selector-patterns"
@@ -351,6 +369,53 @@ describe("source-code risk detector", () => {
       ])
     );
     expect(result.findings[0]?.evidence[0]).toMatchObject({ type: "EXTERNAL_SOURCE" });
+  });
+
+  it("does not flag immutable max-wallet/max-tx limits with no owner or setter as a tax/limit control", async () => {
+    // Reproduces a real false positive verified against a live deployed token (CASHCAT):
+    // maxWalletAmount/maxTxAmount are immutable, set once in the constructor, enforced only for
+    // a fixed anti-snipe block window, with no owner and no setter anywhere in the contract. The
+    // only occurrence of "maxWallet" in source was a custom error's parameter name
+    // (`error MaxWalletExceeded(..., uint256 maxWallet)`), which the old bare-word pattern
+    // treated as evidence of a mutable "control surface" that does not exist.
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        contractName: "LaunchToken",
+        compilerVersion: "v0.8.30",
+        language: "solidity",
+        sourceFiles: [
+          {
+            filename: "LaunchToken.sol",
+            sourceCode: `
+              contract LaunchToken {
+                error MaxWalletExceeded(address account, uint256 balanceAfter, uint256 maxWallet);
+                error MaxTxExceeded(address account, uint256 amount, uint256 maxTx);
+
+                uint256 public immutable maxWalletAmount;
+                uint256 public immutable maxTxAmount;
+
+                function maxWalletLimit() external view returns (uint256) { return maxWalletAmount; }
+                function maxTxLimit() external view returns (uint256) { return maxTxAmount; }
+
+                function _update(address from, address to, uint256 value) internal {
+                  if (to != address(0)) {
+                    uint256 balanceAfter = value;
+                    if (balanceAfter > maxWalletAmount) {
+                      revert MaxWalletExceeded(to, balanceAfter, maxWalletAmount);
+                    }
+                  }
+                }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    expect(result.findings.map((finding) => finding.code)).not.toContain("SOURCE_TAX_OR_LIMIT_CONTROL");
   });
 
   it("detects ownership recovery and forced-transfer surfaces in verified source", async () => {

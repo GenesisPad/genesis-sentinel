@@ -624,6 +624,10 @@ async function buildRelatedWalletEdges(input: {
   ownerAddress: `0x${string}` | null;
   totalSupply: string | null;
   bytecodeReuse: BytecodeReuseView | null;
+  /** Addresses (lowercased) of this token's own discovered liquidity pools — supply sent here
+   * is the deployer seeding the pool, not a wallet relationship, and must never be reported as
+   * a "transferred supply to a wallet" finding. */
+  knownPoolAddresses: Set<string>;
 }): Promise<RelatedWalletEdge[]> {
   const edges: RelatedWalletEdge[] = [];
   const ownerIsActive =
@@ -736,7 +740,12 @@ async function buildRelatedWalletEdges(input: {
           totalSupply: input.totalSupply
         })
         .catch((): RelatedWalletEdge[] => []);
-      edges.push(...supplyEdges);
+      // A deployer/owner sending most or all of the supply to the token's own liquidity pool is
+      // exactly how every DEX launch seeds trading — expected, not a distribution risk. Reporting
+      // it as "transferred supply to this wallet" is a false claim about a pool contract.
+      edges.push(
+        ...supplyEdges.filter((edge) => !input.knownPoolAddresses.has(edge.address.toLowerCase()))
+      );
     }
   }
 
@@ -989,17 +998,24 @@ export async function processScanJob(
       detectorRunContext
     );
     // Explorers attribute contract creation to whichever address's CREATE/CREATE2 call directly
-    // spawned the bytecode — for a confirmed GenesisPad launch that's a generic CREATE2 factory
-    // (e.g. "Create2Factory"), never the person who actually launched the token. When the
-    // on-chain GenesisLaunchRegistry confirms this launch, its `originalCreator` field is the
-    // real, verified creator and takes priority over the explorer's raw deployer attribution.
-    const effectiveDeployerAddress = genesispadLaunch?.originalCreator ?? tokenProfile.deployerAddress;
+    // spawned the bytecode — for a token launched through a factory/launchpad, that's the
+    // factory contract, never the person who actually signed and paid for the deployment.
+    // Priority: (1) the on-chain GenesisLaunchRegistry's `originalCreator`, the most authoritative
+    // source for GenesisPad's current direct-V3 launch model; (2) the creation transaction's own
+    // sender when the explorer detected a factory-mediated deployment (deployerIsLaunchFactory) —
+    // this generalizes to ANY launchpad, not just GenesisPad, since it's derived from the raw
+    // transaction (tx.from vs. tx.to.is_contract), not a specific registry. Verified against a
+    // real GenesisPad launchToken transaction where both signals agree on the same real creator.
+    const correctedDeployerAddress =
+      genesispadLaunch?.originalCreator ??
+      (tokenProfile.deployerIsLaunchFactory ? tokenProfile.creationTxSenderAddress : null);
+    const effectiveDeployerAddress = correctedDeployerAddress ?? tokenProfile.deployerAddress;
     if (
-      genesispadLaunch?.originalCreator &&
-      genesispadLaunch.originalCreator.toLowerCase() !== tokenProfile.deployerAddress?.toLowerCase()
+      correctedDeployerAddress &&
+      correctedDeployerAddress.toLowerCase() !== tokenProfile.deployerAddress?.toLowerCase()
     ) {
       await dependencies.scans
-        .recordTokenProfile({ ...tokenProfile, deployerAddress: genesispadLaunch.originalCreator })
+        .recordTokenProfile({ ...tokenProfile, deployerAddress: correctedDeployerAddress })
         .catch(() => undefined);
     }
     const deployerHistory = effectiveDeployerAddress
@@ -1014,6 +1030,20 @@ export async function processScanJob(
           .catch(() => null)
       : null;
     const ownerAddressForEdges = readOwnerAddressFromDetectorResults(detectorResults);
+    // Liquidity pools are normally discovered later, in the DISCOVERING_MARKETS stage — but
+    // wallet-clustering needs to know pool addresses NOW, before that stage runs, so it never
+    // mislabels a deployer seeding its own pool as "transferred supply to a wallet" (a token
+    // launch legitimately sends the bulk of its supply to its own pool; that's expected
+    // behavior, not a distribution risk). Fetched here once and reused at DISCOVERING_MARKETS
+    // below instead of calling the provider twice.
+    const discoveredPools = providers
+      ? await providers.liquidity
+          .discoverPools({ adapter, chainId: target.chainId, tokenAddress: target.address, blockNumber })
+          .catch(() => null)
+      : null;
+    const knownPoolAddresses = new Set(
+      (discoveredPools ?? []).map((pool) => pool.poolAddress.toLowerCase())
+    );
     const relatedWalletEdges = await buildRelatedWalletEdges({
       adapter,
       providers,
@@ -1023,7 +1053,8 @@ export async function processScanJob(
       deployerAddress: effectiveDeployerAddress,
       ownerAddress: ownerAddressForEdges,
       totalSupply: tokenProfile.totalSupply,
-      bytecodeReuse
+      bytecodeReuse,
+      knownPoolAddresses
     });
     const deployerHistoryResult = await deployerHistoryDetector.run(
       { deployerHistory, bytecodeReuse, relatedWalletEdges },
@@ -1070,17 +1101,8 @@ export async function processScanJob(
       status: "RUNNING",
       startedAt: now()
     });
-    const discoveredPools = providers
-      ? await providers.liquidity
-          .discoverPools({
-            adapter,
-            chainId: target.chainId,
-            tokenAddress: target.address,
-            blockNumber
-          })
-          .catch(() => null)
-      : null;
-
+    // discoveredPools was already fetched above (before wallet-clustering ran) — reused here
+    // rather than calling providers.liquidity.discoverPools a second time.
     if (discoveredPools && discoveredPools.length > 0) {
       for (const discoveredPool of discoveredPools) {
         await dependencies.scans.recordLiquidityPool({
@@ -1354,6 +1376,8 @@ async function collectTokenProfile(
       holderCount: null,
       sourceVerified: null,
       deployerAddress: null,
+      creationTxSenderAddress: null,
+      deployerIsLaunchFactory: false,
       contractCreatedAt: null,
       creationTxHash: null,
       tokenType: null,
@@ -1391,6 +1415,8 @@ async function collectTokenProfile(
     holderCount: explorer?.holderCount ?? null,
     sourceVerified: explorer?.sourceVerified ?? null,
     deployerAddress: explorer?.deployerAddress ?? null,
+    creationTxSenderAddress: explorer?.creationTxSenderAddress ?? null,
+    deployerIsLaunchFactory: explorer?.deployerIsLaunchFactory ?? false,
     contractCreatedAt: explorer?.contractCreatedAt ?? market?.pairCreatedAt ?? null,
     creationTxHash: explorer?.creationTxHash ?? null,
     tokenType: explorer?.tokenType ?? market?.labels ?? null,

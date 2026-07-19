@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createBlockscoutContractSourceProvider, createBlockscoutHolderProvider } from "./blockscout.js";
+import {
+  createBlockscoutContractSourceProvider,
+  createBlockscoutExplorerProvider,
+  createBlockscoutHolderProvider
+} from "./blockscout.js";
 
 const config = {
   chainId: 4663,
@@ -13,6 +17,84 @@ function jsonResponse(body: unknown): Response {
     headers: { "content-type": "application/json" }
   });
 }
+
+function fetchUrl(input: string | URL | Request): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  return input.url;
+}
+
+const TOKEN_ADDRESS = "0x0000000000000000000000000000000000000001";
+
+describe("createBlockscoutExplorerProvider", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function mockEndpoints(overrides: {
+    creatorAddressHash?: string;
+    creationTx?: unknown;
+  }) {
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = fetchUrl(input);
+      if (url.includes("/transactions/")) {
+        return Promise.resolve(jsonResponse(overrides.creationTx ?? {}));
+      }
+      if (url.includes("/addresses/")) {
+        return Promise.resolve(
+          jsonResponse({
+            creator_address_hash: overrides.creatorAddressHash,
+            creation_transaction_hash: "0xabc",
+            is_verified: true
+          })
+        );
+      }
+      if (url.includes("/search")) {
+        return Promise.resolve(jsonResponse([]));
+      }
+      return Promise.resolve(jsonResponse({ name: "Token", symbol: "TOK" }));
+    });
+  }
+
+  it("does not flag a normal EOA deployment as a launch factory", async () => {
+    mockEndpoints({
+      creatorAddressHash: "0x1111111111111111111111111111111111111111",
+      creationTx: {
+        timestamp: "2026-01-01T00:00:00.000Z",
+        from: { hash: "0x1111111111111111111111111111111111111111", is_contract: false },
+        to: null
+      }
+    });
+
+    const provider = createBlockscoutExplorerProvider(config);
+    const profile = await provider.getTokenProfile({ chainId: 4663, address: TOKEN_ADDRESS });
+
+    expect(profile?.deployerIsLaunchFactory).toBe(false);
+    expect(profile?.creationTxSenderAddress).toBeNull();
+    expect(profile?.deployerAddress).toBe("0x1111111111111111111111111111111111111111");
+  });
+
+  it("identifies the real creator when the reported deployer is a launch-factory contract", async () => {
+    // Reproduces a real GenesisPad launchToken transaction: creator_address_hash resolves to
+    // the factory (the immediate CREATE2 caller), but the transaction's own `from` is the real
+    // EOA that signed and paid — that's the true creator, not the factory.
+    mockEndpoints({
+      creatorAddressHash: "0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb",
+      creationTx: {
+        timestamp: "2026-06-18T20:01:25.000Z",
+        from: { hash: "0xcdfc08a1c1fbafb355645e5ddc32122e5716ca90", is_contract: false },
+        to: { hash: "0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb", is_contract: true }
+      }
+    });
+
+    const provider = createBlockscoutExplorerProvider(config);
+    const profile = await provider.getTokenProfile({ chainId: 4663, address: TOKEN_ADDRESS });
+
+    expect(profile?.deployerIsLaunchFactory).toBe(true);
+    expect(profile?.creationTxSenderAddress).toBe("0xcdfc08a1c1fbafb355645e5ddc32122e5716ca90");
+    expect(profile?.deployerAddress).toBe("0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb");
+  });
+});
 
 describe("createBlockscoutContractSourceProvider", () => {
   afterEach(() => {
