@@ -192,6 +192,34 @@ describe("mapResultToReport", () => {
     expect(report.liquidity.poolAddress).toBe("0x2222222222222222222222222222222222222222");
   });
 
+  it("applies stricter liquidity-health thresholds to an ultra-low-cap token than a mid-cap one", () => {
+    // Same 15% quote-side liquidity reads differently depending on market cap: "medium" for an
+    // ultra-low-cap token (needs >=20% to be healthy, per the launchpad-depth cheatsheet) but
+    // "healthy" for anything $5M+ (only needs >=10%).
+    const pool = (totalLiquidityUsd: number) => ({
+      chainId: 4663,
+      tokenAddress: ADDRESS,
+      poolAddress: "0x1234567890123456789012345678901234567890" as const,
+      liquidityData: { totalLiquidityUsd }
+    });
+
+    const ultraLowCap = mapResultToReport(
+      baseView({
+        token: { chainId: 4663, address: ADDRESS, marketCapUsd: "80000" },
+        liquidity: { status: "AVAILABLE", message: "m", pools: [pool(24_000)] } // 15% quote-side
+      })
+    );
+    expect(ultraLowCap.liquidity.healthTier).toBe("medium");
+
+    const midCap = mapResultToReport(
+      baseView({
+        token: { chainId: 4663, address: ADDRESS, marketCapUsd: "10000000" },
+        liquidity: { status: "AVAILABLE", message: "m", pools: [pool(3_000_000)] } // 15% quote-side
+      })
+    );
+    expect(midCap.liquidity.healthTier).toBe("healthy");
+  });
+
   it("does not claim liquidity is locked when burned/locked pct is low", () => {
     const report = mapResultToReport(
       baseView({

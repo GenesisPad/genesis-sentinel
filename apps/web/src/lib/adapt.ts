@@ -232,10 +232,32 @@ function mapSimulationCapability(outcome: CheckOutcome | undefined): boolean | n
 // persisted today (packages/database LiquidityPool). "Locked" here means burned/sent to a
 // known dead address — the backend has no LP-locker-contract detection yet, so a genuine
 // third-party lock (not burn) still reads as `locked: false` rather than a guess.
-/** <10% of market cap is low, 10-20% is medium, >20% is healthy. */
-function liquidityHealthTier(pct: number): "low" | "medium" | "healthy" {
-  if (pct > 20) return "healthy";
-  if (pct >= 10) return "medium";
+//
+// A fixed 10/20% threshold treats a $50K ultra-low-cap the same as a $50M mid-cap, which isn't
+// how launchpad/DEX liquidity actually reads: smaller caps need deeper *relative* liquidity to
+// resist sniper/whale drainage, while larger caps can be "healthy" at a much lower percentage
+// because their absolute dollar depth is already large. Thresholds below follow this size-aware
+// cheatsheet (quote-side USD as a % of market cap, matching quoteSidePctOfMarketCap):
+//   <$100K   (ultra-low-cap): low <10%,  medium 10-20%,  healthy >=20%
+//   $100K-5M (low-cap):       low <5%,   medium 5-12%,   healthy >=12%
+//   >=$5M    (micro/mid-cap): low <5%,   medium 5-10%,   healthy >=10%
+// The cheatsheet's micro-cap ($5-6M) and mid-cap ($50-60M) brackets share identical thresholds,
+// so they're merged into one ">=$5M" tier; the $100K-200K gap between its ultra-low and low-cap
+// brackets is folded into the low-cap tier (the stricter/lower of the two nearby thresholds).
+const LIQUIDITY_HEALTH_BRACKETS = [
+  { maxMarketCapUsd: 100_000, healthyPct: 20, mediumPct: 10 },
+  { maxMarketCapUsd: 5_000_000, healthyPct: 12, mediumPct: 5 },
+  { maxMarketCapUsd: Infinity, healthyPct: 10, mediumPct: 5 }
+] as const;
+
+function liquidityHealthTier(pct: number, marketCapUsd: number | null): "low" | "medium" | "healthy" {
+  const bracket =
+    marketCapUsd != null
+      ? (LIQUIDITY_HEALTH_BRACKETS.find((b) => marketCapUsd < b.maxMarketCapUsd) ??
+        LIQUIDITY_HEALTH_BRACKETS[LIQUIDITY_HEALTH_BRACKETS.length - 1])
+      : LIQUIDITY_HEALTH_BRACKETS[LIQUIDITY_HEALTH_BRACKETS.length - 1];
+  if (pct >= bracket.healthyPct) return "healthy";
+  if (pct >= bracket.mediumPct) return "medium";
   return "low";
 }
 
@@ -279,7 +301,8 @@ function mapLiquidity(view: ScanResultView): LiquidityInfo {
     poolAddress: pool.poolAddress,
     dex: pool.dex ?? undefined,
     quoteSidePctOfMarketCap,
-    healthTier: quoteSidePctOfMarketCap != null ? liquidityHealthTier(quoteSidePctOfMarketCap) : null
+    healthTier:
+      quoteSidePctOfMarketCap != null ? liquidityHealthTier(quoteSidePctOfMarketCap, marketCapUsd) : null
   };
 }
 
