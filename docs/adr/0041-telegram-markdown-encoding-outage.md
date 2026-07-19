@@ -72,3 +72,32 @@ before verification, and hand-corrected. Full verification (`lint`, `typecheck`,
 Lesson: when a mis-encoding is found in one string in a file, grep the whole file for the same
 byte pattern before considering the fix complete — don't assume the corruption is isolated to the
 one string that happened to crash first.
+
+## Follow-up: third root cause (same outage, same file)
+
+Redeploying the emoji fix and checking production logs directly (SSH, PM2 logs) showed replies
+were *still* failing with the identical `can't parse entities` error, now at a different byte
+offset, and with the emoji rendering correctly this time — proof the second fix worked but did not
+fully resolve the outage. The payload text pointed at `PARTIALLY_COMPLETED`: `ScanState` values
+(`RESOLVING_CHAIN`, `ANALYZING_CONTRACT`, `PARTIALLY_COMPLETED`, etc.) and the `UNABLE_TO_ASSESS`
+`RiskLevel` value all contain literal underscores, which legacy Telegram Markdown treats as
+unescaped italic delimiters regardless of word-boundary context. An odd total count of unescaped
+underscores across the message (state, or state plus risk level, depending on which fields are
+present) makes Telegram unable to find a closing entity, rejecting the whole message.
+
+The file already had an `escapeMarkdown()` helper used for other dynamic fields (finding titles,
+holder/progress messages) — `scan.state` and `risk.level` were simply never routed through it at
+three call sites (`formatTelegramScanReply`, `formatTelegramProgressReply`, `formatRiskLine`).
+Fixed by wrapping all three in `escapeMarkdown()`. Added a regression test asserting the full
+reply has a balanced (even) count of unescaped `_`, `*`, and `` ` `` characters — a general check
+that would have caught this bug and would catch a similar one in any other enum interpolated into
+Markdown text going forward, rather than a test pinned to one specific value.
+
+Verified fixed live: after this third fix deployed, the exact address that previously reproduced
+the crash on production (byte offset 607, `PARTIALLY_COMPLETED`/`UNABLE_TO_ASSESS` combination)
+was re-tested via SSH-confirmed PM2 logs with no further `can't parse entities` errors.
+
+Lesson: an `escapeMarkdown()` helper existing in a file is not a guarantee every dynamic value is
+routed through it — grep every raw `${...}` interpolation feeding a Markdown-formatted message
+for enum-typed values, not just free-text ones, since `_` is a common character in TypeScript
+union-type string literals and is easy to overlook as "safe" because it's not user-supplied text.

@@ -135,7 +135,9 @@ describe("telegram scan helpers", () => {
 
     const reply = formatTelegramProgressReply(scan);
 
-    expect(reply).toContain("State: ANALYZING_CONTRACT");
+    // Escaped: legacy Telegram Markdown treats a raw underscore as an italic delimiter, and
+    // ANALYZING_CONTRACT's underscore would otherwise break entity parsing.
+    expect(reply).toContain("State: ANALYZING\\_CONTRACT");
     expect(reply).toContain("Block: 123");
   });
 
@@ -324,6 +326,60 @@ describe("telegram scan helpers", () => {
     // ASCII rather than the whole reply.
     const deployerLine = reply.split("\n").find((line) => line.startsWith("Deployer:"));
     expect(deployerLine && /^[\x00-\x7F]*$/.test(deployerLine)).toBe(true);
+  });
+
+  it("escapes underscores in scan-state and risk-level enum values, never breaking Telegram's Markdown parser", () => {
+    // Reproduces a third production outage found in the same file as the ellipsis and emoji
+    // mojibake bugs: scan states like PARTIALLY_COMPLETED and risk levels like UNABLE_TO_ASSESS
+    // contain literal underscores, which legacy Telegram Markdown treats as unescaped italic
+    // delimiters. An odd total count of unescaped underscores across the whole message breaks
+    // parsing ("can't parse entities: Can't find end of the entity...") for every reply, exactly
+    // like the two bugs fixed above it. These values must go through escapeMarkdown().
+    const result: ScanResultView = {
+      scan: {
+        scanId: "scan-5",
+        chainId: 4663,
+        address: "0x0000000000000000000000000000000000000005",
+        state: "PARTIALLY_COMPLETED",
+        scannerVersion: "0.1.0-foundation",
+        submittedAt: "2026-07-19T00:00:00.000Z",
+        message: "Scan state is PARTIALLY_COMPLETED."
+      },
+      token: {
+        chainId: 4663,
+        address: "0x0000000000000000000000000000000000000005"
+      },
+      detectorChecks: [],
+      findings: [],
+      liquidity: { status: "UNSUPPORTED", pools: [], message: "Liquidity discovery is not configured yet." },
+      holders: { status: "UNSUPPORTED", snapshots: [], message: "Holder analysis is not configured yet." },
+      simulations: [],
+      risk: {
+        chainId: 4663,
+        address: "0x0000000000000000000000000000000000000005",
+        scannerVersion: "0.1.0-foundation",
+        status: "UNABLE_TO_ASSESS",
+        level: "UNABLE_TO_ASSESS",
+        score: null,
+        confidence: "LOW",
+        categoryScores: [],
+        findingContributions: [],
+        unableToAssessReasons: [],
+        findingCounts: { INFO: 0, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 },
+        message: "No detector findings were produced for this scan."
+      }
+    };
+
+    const reply = formatTelegramResultReply(result);
+
+    expect(reply).toContain("UNABLE\\_TO\\_ASSESS");
+    expect(reply).toContain("PARTIALLY\\_COMPLETED");
+    // Legacy Markdown entities must be balanced: every unescaped _, *, ` must pair up, or
+    // Telegram's parser rejects the whole message and the bot goes silent.
+    for (const marker of ["_", "*", "`"]) {
+      const unescapedCount = (reply.match(new RegExp(`(?<!\\\\)\\${marker}`, "g")) ?? []).length;
+      expect(unescapedCount % 2).toBe(0);
+    }
   });
 
   it("flags negligible liquidity and paid-dex status, using the highest-liquidity pool not pools[0]", () => {

@@ -433,9 +433,9 @@ export function formatTelegramScanReply(
 
   const lines = [
     `🛡️ *Scan submitted*`,
-    `🔎 State: ${scan.state}`,
+    `🔎 State: ${escapeMarkdown(scan.state)}`,
     `\`${scan.address}\``,
-    `⚙️ Scanner: ${scan.scannerVersion}${block}`,
+    `⚙️ Scanner: ${escapeMarkdown(scan.scannerVersion)}${block}`,
     "Use the buttons below for progress or report.",
     "_Results are risk indicators, not guarantees._"
   ];
@@ -454,7 +454,7 @@ export function formatTelegramRateLimitReply(retryAfterSeconds: number): string 
 export function formatTelegramProgressReply(scan: ScanProgress): string {
   const fields = [
     `🔎 *Scan progress*`,
-    `State: ${scan.state}`,
+    `State: ${escapeMarkdown(scan.state)}`,
     `\`${scan.scanId}\``,
     `Address: \`${scan.address}\``,
     `Message: ${escapeMarkdown(scan.message)}`
@@ -540,7 +540,7 @@ export function formatTelegramResultReply(result: ScanResultView): string {
     topRisksBlock,
     "",
     result.risk.score === null ? null : "_Higher score means greater risk._",
-    `${result.scan.state} · v${result.scan.scannerVersion}`,
+    `${escapeMarkdown(result.scan.state)} · v${escapeMarkdown(result.scan.scannerVersion)}`,
     "_DYOR/NFA. Risk indicator, not a guarantee._"
   ]).filter((line, index, lines) => line !== "" || (lines[index - 1] !== "" && lines[index + 1] !== ""));
 
@@ -688,9 +688,8 @@ function severityRank(severity: SecurityFindingView["severity"]): number {
 }
 
 function formatRiskLine(result: ScanResultView): string {
-  return result.risk.score === null
-    ? result.risk.level
-    : `${result.risk.level} | Risk Score: ${result.risk.score}/100`;
+  const level = escapeMarkdown(result.risk.level);
+  return result.risk.score === null ? level : `${level} | Risk Score: ${result.risk.score}/100`;
 }
 
 function formatTokenLabel(result: ScanResultView): string {
