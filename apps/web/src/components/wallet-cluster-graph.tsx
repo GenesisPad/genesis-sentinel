@@ -1,5 +1,11 @@
+"use client";
+import { useId, useState } from "react";
+import { ExternalLink } from "lucide-react";
+import type { ChainId } from "@/lib/chains";
+import { CHAINS } from "@/lib/chains";
 import type { WalletClusterEdge, WalletClusterEdgeType } from "@/lib/types";
 import { shortAddress } from "@/lib/utils";
+import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion";
 import { EmptyState } from "@/components/empty-state";
 
 const EDGE_STYLE: Record<WalletClusterEdgeType, { label: string; hex: string }> = {
@@ -11,27 +17,38 @@ const EDGE_STYLE: Record<WalletClusterEdgeType, { label: string; hex: string }> 
   SHARED_BYTECODE: { label: "Shared bytecode", hex: "#e893c8" },
 };
 
-const SIZE = 320;
+const SIZE = 340;
 const CENTER = SIZE / 2;
-const RADIUS = 118;
-const NODE_R = 15;
-const CENTER_R = 24;
+const RADIUS = 122;
+const NODE_R = 16;
+const CENTER_R = 26;
+
+function explorerAddressUrl(chainId: ChainId, address: string): string {
+  return `${CHAINS[chainId].explorerUrl}/address/${address}`;
+}
 
 /**
  * Radial "bubble map" of real, evidenced wallet-relationship edges (Milestone 6) — the token
- * at the center, one satellite bubble per connected wallet, colored and labeled by the specific
- * on-chain evidence that connects it (never a guess from timing coincidence). Node count varies
- * per scan, so positions are computed at render time rather than fixed like the stage graph.
+ * at the center, one glowing satellite bubble per connected wallet, colored and labeled by the
+ * specific on-chain evidence that connects it (never a guess from timing coincidence). Node
+ * count varies per scan, so positions are computed at render time rather than fixed like the
+ * stage graph. Each address links out to the chain's block explorer.
  */
 export function WalletClusterGraph({
+  chainId,
   tokenSymbol,
   tokenAddress,
   edges,
 }: {
+  chainId: ChainId;
   tokenSymbol?: string | null;
   tokenAddress: string;
   edges: WalletClusterEdge[];
 }) {
+  const gradientId = useId();
+  const reducedMotion = usePrefersReducedMotion();
+  const [hovered, setHovered] = useState<number | null>(null);
+
   if (edges.length === 0) {
     return (
       <EmptyState
@@ -50,66 +67,151 @@ export function WalletClusterGraph({
     };
   });
   const usedTypes = [...new Set(edges.map((e) => e.type))];
+  const active = hovered != null ? nodes[hovered] : null;
 
   return (
     <div className="flex flex-col gap-4">
-      <svg
-        viewBox={`0 0 ${SIZE} ${SIZE}`}
-        className="mx-auto h-auto w-full max-w-[420px]"
-        role="img"
-        aria-label="Wallet clustering graph"
-      >
-        {nodes.map(({ edge, x, y }) => (
-          <line
-            key={`line-${edge.address}-${edge.type}`}
-            x1={CENTER}
-            y1={CENTER}
-            x2={x}
-            y2={y}
-            stroke={EDGE_STYLE[edge.type].hex}
-            strokeOpacity={0.45}
-            strokeWidth={1.5}
-          />
-        ))}
-
-        <circle cx={CENTER} cy={CENTER} r={CENTER_R} fill="#0e1a06" stroke="#b4f11f" strokeWidth={2} />
-        <text
-          x={CENTER}
-          y={CENTER + 4}
-          textAnchor="middle"
-          className="font-display"
-          fontSize={11}
-          fontWeight={700}
-          fill="#f4f6f4"
+      <div className="relative mx-auto w-full max-w-[440px]">
+        <svg
+          viewBox={`0 0 ${SIZE} ${SIZE}`}
+          className="mx-auto h-auto w-full"
+          role="img"
+          aria-label="Wallet clustering graph"
         >
-          {(tokenSymbol ?? shortAddress(tokenAddress)).slice(0, 8)}
-        </text>
+          <defs>
+            <radialGradient id={`${gradientId}-center`} cx="35%" cy="30%" r="75%">
+              <stop offset="0%" stopColor="#1c2a0d" />
+              <stop offset="100%" stopColor="#0a1104" />
+            </radialGradient>
+            {nodes.map(({ edge }, i) => (
+              <radialGradient key={`grad-${i}`} id={`${gradientId}-node-${i}`} cx="35%" cy="30%" r="75%">
+                <stop offset="0%" stopColor={EDGE_STYLE[edge.type].hex} stopOpacity={0.35} />
+                <stop offset="100%" stopColor={EDGE_STYLE[edge.type].hex} stopOpacity={0.05} />
+              </radialGradient>
+            ))}
+            <filter id={`${gradientId}-glow`} x="-60%" y="-60%" width="220%" height="220%">
+              <feGaussianBlur stdDeviation="4.5" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+          </defs>
 
-        {nodes.map(({ edge, x, y }) => (
-          <g key={`node-${edge.address}-${edge.type}`}>
-            <title>{`${EDGE_STYLE[edge.type].label}: ${edge.evidence}`}</title>
-            <circle
-              cx={x}
-              cy={y}
-              r={NODE_R}
-              fill="#12160f"
-              stroke={EDGE_STYLE[edge.type].hex}
-              strokeWidth={2}
-            />
-            <text
-              x={x}
-              y={y + (y > CENTER ? NODE_R + 14 : -NODE_R - 8)}
-              textAnchor="middle"
-              fontSize={10}
-              fontWeight={600}
-              fill="#c7cdc4"
-              className="font-mono"
-            >
-              {shortAddress(edge.address)}
-            </text>
-          </g>
-        ))}
-      </svg>
+          {nodes.map(({ edge, x, y }, i) => {
+            const isActive = hovered === i;
+            return (
+              <line
+                key={`line-${edge.address}-${edge.type}`}
+                x1={CENTER}
+                y1={CENTER}
+                x2={x}
+                y2={y}
+                stroke={EDGE_STYLE[edge.type].hex}
+                strokeOpacity={isActive ? 0.9 : 0.32}
+                strokeWidth={isActive ? 2 : 1.25}
+                strokeDasharray={edge.type === "PREVIOUSLY_OWNED_BY" ? "3 4" : undefined}
+                className="transition-[stroke-opacity,stroke-width] duration-300 ease-out"
+              />
+            );
+          })}
+
+          {/* Center: the scanned token itself */}
+          <circle cx={CENTER} cy={CENTER} r={CENTER_R + 10} fill={`url(#${gradientId}-center)`} />
+          <circle
+            cx={CENTER}
+            cy={CENTER}
+            r={CENTER_R}
+            fill="#0e1a06"
+            stroke="#b4f11f"
+            strokeWidth={2}
+            className={reducedMotion ? undefined : "animate-[gs-pulse-ring_3s_ease-out_infinite]"}
+            style={{ transformOrigin: `${CENTER}px ${CENTER}px` }}
+          />
+          <circle cx={CENTER} cy={CENTER} r={CENTER_R} fill="none" stroke="#b4f11f" strokeWidth={2} filter={`url(#${gradientId}-glow)`} opacity={0.5} />
+          <text
+            x={CENTER}
+            y={CENTER + 4}
+            textAnchor="middle"
+            className="font-display select-none"
+            fontSize={11}
+            fontWeight={700}
+            fill="#f4f6f4"
+          >
+            {(tokenSymbol ?? shortAddress(tokenAddress)).slice(0, 8)}
+          </text>
+
+          {nodes.map(({ edge, x, y }, i) => {
+            const isActive = hovered === i;
+            const hex = EDGE_STYLE[edge.type].hex;
+            return (
+              <a
+                key={`node-${edge.address}-${edge.type}`}
+                href={explorerAddressUrl(chainId, edge.address)}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label={`${EDGE_STYLE[edge.type].label}: ${shortAddress(edge.address)}. Open on block explorer.`}
+                onMouseEnter={() => setHovered(i)}
+                onMouseLeave={() => setHovered((h) => (h === i ? null : h))}
+                onFocus={() => setHovered(i)}
+                onBlur={() => setHovered((h) => (h === i ? null : h))}
+                className="cursor-pointer outline-none"
+              >
+                <title>{`${EDGE_STYLE[edge.type].label}: ${edge.evidence}`}</title>
+                <circle
+                  cx={x}
+                  cy={y}
+                  r={NODE_R + 8}
+                  fill={`url(#${gradientId}-node-${i})`}
+                  className="transition-opacity duration-300"
+                  opacity={isActive ? 1 : 0.7}
+                />
+                <circle
+                  cx={x}
+                  cy={y}
+                  r={isActive ? NODE_R + 2.5 : NODE_R}
+                  fill="#12160f"
+                  stroke={hex}
+                  strokeWidth={isActive ? 2.5 : 2}
+                  filter={isActive ? `url(#${gradientId}-glow)` : undefined}
+                  className="transition-[r,stroke-width] duration-200 ease-out"
+                  style={{ transformOrigin: `${x}px ${y}px` }}
+                />
+                <text
+                  x={x}
+                  y={y + (y > CENTER ? NODE_R + 16 : -NODE_R - 10)}
+                  textAnchor="middle"
+                  fontSize={10}
+                  fontWeight={600}
+                  fill={isActive ? "#f4f6f4" : "#c7cdc4"}
+                  className="select-none font-mono transition-colors duration-200"
+                >
+                  {shortAddress(edge.address)}
+                </text>
+              </a>
+            );
+          })}
+        </svg>
+
+        {/* Floating detail card for the hovered node, replacing the terse native title tooltip */}
+        <div
+          className="pointer-events-none absolute inset-x-2 bottom-1 rounded-lg border border-border-strong bg-surface-deep/95 px-3 py-2 text-xs shadow-lg backdrop-blur-sm transition-all duration-200 ease-out"
+          style={{
+            opacity: active ? 1 : 0,
+            transform: active ? "translateY(0)" : "translateY(4px)",
+          }}
+          aria-hidden={!active}
+        >
+          {active ? (
+            <>
+              <span className="font-semibold" style={{ color: EDGE_STYLE[active.edge.type].hex }}>
+                {EDGE_STYLE[active.edge.type].label}
+              </span>
+              <p className="mt-0.5 leading-snug text-secondary">{active.edge.evidence}</p>
+            </>
+          ) : null}
+        </div>
+      </div>
 
       <div className="flex flex-wrap justify-center gap-x-4 gap-y-1.5 text-xs">
         {usedTypes.map((type) => (
@@ -121,17 +223,27 @@ export function WalletClusterGraph({
       </div>
 
       <ul className="flex flex-col gap-2">
-        {edges.map((edge) => (
+        {edges.map((edge, i) => (
           <li
             key={`${edge.type}-${edge.address}`}
-            className="rounded-lg border border-border bg-surface-deep px-3.5 py-2.5 text-sm"
+            onMouseEnter={() => setHovered(i)}
+            onMouseLeave={() => setHovered((h) => (h === i ? null : h))}
+            className="rounded-lg border border-border bg-surface-deep px-3.5 py-2.5 text-sm transition-colors hover:border-border-strong"
           >
             <div className="flex items-center justify-between gap-2">
               <span className="inline-flex items-center gap-1.5 font-semibold" style={{ color: EDGE_STYLE[edge.type].hex }}>
                 <span className="size-2 rounded-full" style={{ backgroundColor: EDGE_STYLE[edge.type].hex }} aria-hidden />
                 {EDGE_STYLE[edge.type].label}
               </span>
-              <span className="font-mono text-xs text-muted">{shortAddress(edge.address)}</span>
+              <a
+                href={explorerAddressUrl(chainId, edge.address)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 font-mono text-xs text-muted transition-colors hover:text-primary"
+              >
+                {shortAddress(edge.address)}
+                <ExternalLink className="size-3" aria-hidden />
+              </a>
             </div>
             <p className="mt-1 text-[13px] leading-snug text-muted">{edge.evidence}</p>
           </li>

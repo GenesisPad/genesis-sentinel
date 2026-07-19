@@ -1,6 +1,8 @@
+import { Info } from "lucide-react";
 import type { LiquidityInfo } from "@/lib/types";
 import { formatUsd, shortAddress } from "@/lib/utils";
 import { EmptyState } from "@/components/empty-state";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 const HEALTH_TIER_STYLE = {
   low: { label: "Low", hex: "#f0483e" },
@@ -46,7 +48,28 @@ export function LiquidityCard({ liquidity, technical }: { liquidity: LiquidityIn
       ) : null}
       {liquidity.totalUsd != null ? (
         <div className="mt-2 flex justify-between text-sm text-muted">
-          <span>Total liquidity</span>
+          <span className="inline-flex items-center gap-1.5">
+            Total liquidity
+            <Tooltip>
+              <TooltipTrigger
+                type="button"
+                className="text-faint transition-colors hover:text-foreground focus-visible:outline-none"
+                aria-label="How liquidity is measured"
+              >
+                <Info className="size-3.5" aria-hidden />
+              </TooltipTrigger>
+              <TooltipContent>
+                <p className="font-semibold text-foreground">
+                  ETH side: {formatUsd(liquidity.totalUsd / 2)}
+                </p>
+                <p className="mt-1 leading-relaxed text-muted">
+                  Total liquidity is the full pool value (token + paired asset). The paired-asset
+                  (ETH/quote) side alone is what actually backs sell orders — liquidity health is
+                  measured against that half, not the combined total.
+                </p>
+              </TooltipContent>
+            </Tooltip>
+          </span>
           <span className="text-foreground">{formatUsd(liquidity.totalUsd)}</span>
         </div>
       ) : null}

@@ -93,6 +93,9 @@ export function TokenHeader({
           <span className="font-mono text-xs">{shortAddress(token.address)}</span>
           {token.verified === true ? <span className="text-primary">Verified</span> : null}
           {token.verified === false ? <span className="text-warn">Unverified</span> : null}
+          {token.verified != null && token.dexPaid != null ? (
+            <span className="h-3 w-px bg-border-strong" aria-hidden />
+          ) : null}
           {token.dexPaid === true ? <span className="text-primary">Dex · Paid</span> : null}
           {token.dexPaid === false ? <span className="text-faint">Dex · Not Paid</span> : null}
         </div>

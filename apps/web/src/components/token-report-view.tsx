@@ -28,7 +28,6 @@ import { ShareMenu } from "@/components/share-menu";
 const TRADER_SECTIONS = [
   { id: "quick-answers", label: "Quick answers" },
   { id: "risk", label: "Risk overview" },
-  { id: "assessment", label: "Assessment" },
   { id: "top-risks", label: "Top risks" },
   { id: "sim", label: "Trading simulation" },
   { id: "liquidity", label: "Liquidity" },
@@ -153,10 +152,6 @@ function TraderSections({ report }: { report: ScanReport }) {
         <div className="mt-5"><ScoreGauge score={report.riskScore} /></div>
       </Section>
 
-      <Section id="assessment" title="Plain-language assessment">
-        <p className="text-[15px] leading-relaxed text-secondary">{report.scoreExplanation}</p>
-      </Section>
-
       <Section id="top-risks" title="Top risks" subtitle="Most serious first. See Technical View for the full list and evidence.">
         <TopRisks report={report} />
       </Section>
@@ -174,7 +169,7 @@ function TraderSections({ report }: { report: ScanReport }) {
       </Section>
 
       <Section id="wallet-cluster" title="Connected wallets" subtitle="Real, evidenced wallet relationships — never inferred from timing coincidence.">
-        <WalletClusterGraph tokenSymbol={report.token.symbol} tokenAddress={report.token.address} edges={report.walletCluster} />
+        <WalletClusterGraph chainId={report.token.chainId} tokenSymbol={report.token.symbol} tokenAddress={report.token.address} edges={report.walletCluster} />
       </Section>
 
       <Section id="metadata" title="Scan metadata">
@@ -217,7 +212,7 @@ function TechnicalSections({ report }: { report: ScanReport }) {
       </Section>
 
       <Section id="wallet-cluster" title="Connected wallets" subtitle="Real, evidenced wallet relationships — never inferred from timing coincidence.">
-        <WalletClusterGraph tokenSymbol={report.token.symbol} tokenAddress={report.token.address} edges={report.walletCluster} />
+        <WalletClusterGraph chainId={report.token.chainId} tokenSymbol={report.token.symbol} tokenAddress={report.token.address} edges={report.walletCluster} />
       </Section>
 
       <Section id="metadata" title="Scan metadata">

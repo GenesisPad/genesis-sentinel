@@ -1,6 +1,7 @@
-import { Check, Circle, ShieldAlert, X } from "lucide-react";
+import { Check, Info, ShieldAlert, X } from "lucide-react";
 import type { ScanReport } from "@/lib/types";
 import { bpsToPct, formatUsd } from "@/lib/utils";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 type Tone = "good" | "bad" | "warn" | "info";
 
@@ -9,13 +10,18 @@ interface Answer {
   value: string;
   tone: Tone;
   detail?: string;
+  /** Extra context shown on hover — used when `detail` alone doesn't fully explain the number
+   * (e.g. what "liquidity" is actually measuring). */
+  hint?: string;
 }
 
-const TONE_STYLE: Record<Tone, { hex: string; Icon: typeof Check }> = {
+const TONE_STYLE: Record<Tone, { hex: string; Icon: typeof Check | null }> = {
   good: { hex: "#37d67a", Icon: Check },
   bad: { hex: "#f0483e", Icon: X },
   warn: { hex: "#f5a623", Icon: ShieldAlert },
-  info: { hex: "#c4cabf", Icon: Circle },
+  // No icon for neutral data points (market cap, volume, token age) — a bullet in front of a
+  // plain fact doesn't communicate anything a tone color wouldn't already.
+  info: { hex: "#c4cabf", Icon: null },
 };
 
 /** The investor decision strip only renders answers backed by real backend values. */
@@ -35,10 +41,24 @@ export function QuickAnswers({ report }: { report: ScanReport }) {
       {answers.map((a) => {
         const { hex, Icon } = TONE_STYLE[a.tone];
         return (
-          <div key={a.question} className="rounded-xl border border-border bg-surface-deep px-3.5 py-3">
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">{a.question}</div>
+          <div key={a.question} className="rounded-xl border border-border bg-surface-deep px-3.5 py-3 transition-colors hover:border-border-strong">
+            <div className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-muted">
+              {a.question}
+              {a.hint ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    type="button"
+                    className="text-faint transition-colors hover:text-foreground focus-visible:outline-none"
+                    aria-label={`More about ${a.question}`}
+                  >
+                    <Info className="size-3" aria-hidden />
+                  </TooltipTrigger>
+                  <TooltipContent>{a.hint}</TooltipContent>
+                </Tooltip>
+              ) : null}
+            </div>
             <div className="mt-1 flex items-center gap-1.5 text-sm font-bold" style={{ color: hex }}>
-              <Icon className="size-3.5 shrink-0" aria-hidden />
+              {Icon ? <Icon className="size-3.5 shrink-0" aria-hidden /> : null}
               <span>{a.value}</span>
             </div>
             {a.detail ? <div className="mt-0.5 text-[11px] text-faint">{a.detail}</div> : null}
@@ -75,6 +95,7 @@ function buildAnswers(report: ScanReport): Answer[] {
                   : ""
               }`
             : undefined,
+          hint: `ETH side: ${formatUsd(liquidity.totalUsd / 2)}. This figure is the full pool value (token + paired asset) — health is measured against the paired-asset side alone, since that's what actually backs sell orders.`,
         }
       : null,
     lpLockedAnswer(liquidity.locked, liquidity.burnedPct),

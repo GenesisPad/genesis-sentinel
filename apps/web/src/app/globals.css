@@ -9,7 +9,9 @@
   --color-foreground: #f4f6f4;
   --color-secondary: #c4cabf;
   --color-muted: #8b938a;
-  --color-faint: #6b736a;
+  /* #6b736a measured 3.8-4.1:1 against surface/background — fails WCAG AA (4.5:1) for normal
+     text. Brightened to #7a827a (4.7-5.0:1) while staying visually dimmer than --color-muted. */
+  --color-faint: #7a827a;
 
   --color-primary: #b4f11f;
   --color-primary-foreground: #0a1400;
@@ -39,6 +41,12 @@
   0% { transform: translate(-50%, -50%) scale(0.35); opacity: 0.55; }
   70% { opacity: 0; }
   100% { transform: translate(-50%, -50%) scale(1.6); opacity: 0; }
+}
+/* Subtle breathing glow for the wallet-cluster graph's center node — a gentle stroke-width
+   pulse, not a bounce or scale-pop, per this project's motion rules. */
+@keyframes gs-pulse-ring {
+  0%, 100% { stroke-width: 2; stroke-opacity: 1; }
+  50% { stroke-width: 3; stroke-opacity: 0.75; }
 }
 
 * { box-sizing: border-box; }
