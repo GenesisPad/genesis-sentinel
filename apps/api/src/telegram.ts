@@ -432,10 +432,10 @@ export function formatTelegramScanReply(
     : null;
 
   const lines = [
-    `ðŸ›¡ï¸ *Scan submitted*`,
-    `ðŸ”Ž State: ${scan.state}`,
+    `🛡️ *Scan submitted*`,
+    `🔎 State: ${scan.state}`,
     `\`${scan.address}\``,
-    `âš™ï¸ Scanner: ${scan.scannerVersion}${block}`,
+    `⚙️ Scanner: ${scan.scannerVersion}${block}`,
     "Use the buttons below for progress or report.",
     "_Results are risk indicators, not guarantees._"
   ];
@@ -448,12 +448,12 @@ export function formatTelegramScanReply(
 }
 
 export function formatTelegramRateLimitReply(retryAfterSeconds: number): string {
-  return `â³ Too many scan requests. Try again in about ${retryAfterSeconds} seconds.`;
+  return `⏳ Too many scan requests. Try again in about ${retryAfterSeconds} seconds.`;
 }
 
 export function formatTelegramProgressReply(scan: ScanProgress): string {
   const fields = [
-    `ðŸ”Ž *Scan progress*`,
+    `🔎 *Scan progress*`,
     `State: ${scan.state}`,
     `\`${scan.scanId}\``,
     `Address: \`${scan.address}\``,
@@ -648,7 +648,7 @@ export function formatTelegramSectionReply(
   }
 
   return [
-    `ðŸ“ˆ *Chart*`,
+    `📈 *Chart*`,
     `\`${result.scan.address}\``,
     "",
     "_Chart links are not configured yet for Robinhood Chain markets._"
@@ -656,19 +656,19 @@ export function formatTelegramSectionReply(
 }
 
 function riskEmoji(result: ScanResultView): string {
-  if (result.risk.level === "LOW") return "ðŸŸ¢";
-  if (result.risk.level === "MODERATE") return "ðŸŸ¡";
-  if (result.risk.level === "HIGH") return "ðŸŸ ";
-  if (result.risk.level === "CRITICAL") return "ðŸ”´";
-  return "âšª";
+  if (result.risk.level === "LOW") return "🟢";
+  if (result.risk.level === "MODERATE") return "🟡";
+  if (result.risk.level === "HIGH") return "🟠";
+  if (result.risk.level === "CRITICAL") return "🔴";
+  return "⚪";
 }
 
 function severityEmoji(severity: SecurityFindingView["severity"]): string {
-  if (severity === "CRITICAL") return "ðŸ”´";
-  if (severity === "HIGH") return "ðŸŸ ";
-  if (severity === "MEDIUM") return "ðŸŸ¡";
-  if (severity === "LOW") return "ðŸ”µ";
-  return "âšª";
+  if (severity === "CRITICAL") return "🔴";
+  if (severity === "HIGH") return "🟠";
+  if (severity === "MEDIUM") return "🟡";
+  if (severity === "LOW") return "🔵";
+  return "⚪";
 }
 
 /** Escapes legacy Telegram Markdown special characters in dynamic/external text. */

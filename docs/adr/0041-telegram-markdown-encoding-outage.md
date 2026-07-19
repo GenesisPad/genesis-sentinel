@@ -50,3 +50,25 @@ encoding at its source (unknown/unclear where the mis-encoding was introduced).
   no automated guard beyond the new regression test — worth keeping in mind that any future
   Telegram message formatting change should avoid non-ASCII punctuation in code spans unless
   verified against Telegram's actual parser behavior.
+
+## Follow-up: second root cause (same outage, same file)
+
+This ellipsis fix alone did not fully resolve the outage. The `shortenAddress()` bug only broke
+replies containing an address, but a second, broader corruption existed in the same file: every
+emoji literal used for risk levels and section headers (`riskEmoji`, `severityEmoji`, and others,
+~15 call sites) had the identical mis-encoding pattern — UTF-8 bytes for the emoji re-interpreted
+as **Windows-1252** (not plain Latin-1; confirmed via byte-level analysis, since the corruption
+included codepoints only reachable through the CP1252 mapping) and re-saved as UTF-8. This meant
+essentially every reply, address or not, still hit Telegram's `can't parse entities` failure after
+the first fix deployed.
+
+Fixed by reversing the exact CP1252 mis-encoding across the whole file. The first pass of that
+reversal was too broad — a codepoint-range regex swept up a few already-correct characters
+elsewhere in the file (an em dash and a middle dot used in comments and separators), corrupting
+them into replacement characters. Caught by a full-file scan for stray replacement characters
+before verification, and hand-corrected. Full verification (`lint`, `typecheck`, `test`, `build`,
+`prisma:validate`) passed clean after both passes.
+
+Lesson: when a mis-encoding is found in one string in a file, grep the whole file for the same
+byte pattern before considering the fix complete — don't assume the corruption is isolated to the
+one string that happened to crash first.
