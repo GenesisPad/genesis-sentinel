@@ -34,7 +34,8 @@ export function ResultSummary({ report, onFresh, freshBusy = false }: { report: 
       {report.cachedAt ? (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-surface-deep px-4 py-2.5 text-sm">
           <span className="text-muted">
-            Showing a cached scan. <span className="text-foreground">Not re-scanned just now.</span>
+            Showing this token&apos;s last saved scan.{" "}
+            <span className="text-foreground">Some details may have changed since then — hit Rerun for the latest.</span>
           </span>
           {onFresh ? (
             <button

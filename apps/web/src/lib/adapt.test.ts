@@ -156,6 +156,42 @@ describe("mapResultToReport", () => {
     expect(report.liquidity.burnedPct).toBe(99.5);
   });
 
+  it("picks the pool with the highest real liquidity, not just the first one in the list", () => {
+    const report = mapResultToReport(
+      baseView({
+        liquidity: {
+          status: "AVAILABLE",
+          message: "Persisted liquidity pools are available for this token.",
+          pools: [
+            {
+              chainId: 4663,
+              tokenAddress: ADDRESS,
+              poolAddress: "0x1111111111111111111111111111111111111111",
+              dex: "Uniswap V3",
+              liquidityData: { totalLiquidityUsd: 0.0000000000000037 }
+            },
+            {
+              chainId: 4663,
+              tokenAddress: ADDRESS,
+              poolAddress: "0x2222222222222222222222222222222222222222",
+              dex: "Uniswap V3",
+              liquidityData: { totalLiquidityUsd: 2_712_302.89 }
+            },
+            {
+              chainId: 4663,
+              tokenAddress: ADDRESS,
+              poolAddress: "0x3333333333333333333333333333333333333333",
+              dex: "Uniswap V4",
+              liquidityData: {}
+            }
+          ]
+        }
+      })
+    );
+    expect(report.liquidity.totalUsd).toBe(2_712_302.89);
+    expect(report.liquidity.poolAddress).toBe("0x2222222222222222222222222222222222222222");
+  });
+
   it("does not claim liquidity is locked when burned/locked pct is low", () => {
     const report = mapResultToReport(
       baseView({

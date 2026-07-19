@@ -115,7 +115,11 @@ export async function getExistingTokenReport(chainId: ChainId, address: string):
   const numeric = numericChainId(chainId);
   try {
     const json = await request(`/tokens/${numeric}/${address}`);
-    return mapResultToReport(json as ScanResultView);
+    const report = mapResultToReport(json as ScanResultView);
+    // This is always a previously-completed scan, never one just triggered by this request —
+    // callers (the homepage result view) use cachedAt to show "not re-scanned just now" and
+    // surface the Rerun action, without giving up the resource savings of reusing the result.
+    return { ...report, cachedAt: report.scannedAt };
   } catch (error) {
     if (error instanceof ApiError && error.code === "not_found") {
       return null;

@@ -240,7 +240,20 @@ function liquidityHealthTier(pct: number): "low" | "medium" | "healthy" {
 }
 
 function mapLiquidity(view: ScanResultView): LiquidityInfo {
-  const pool = view.liquidity.pools[0];
+  // Pools are persisted in discovery order, not by liquidity size — a token can have many
+  // near-empty or unused fee-tier pools alongside its real trading pool. Picking pools[0]
+  // blindly showed "$0 liquidity" for tokens whose largest pool wasn't discovered first (e.g.
+  // CASHCAT: pool 0 held $0.0000000000000037 while its real pool held $2.7M). The pool with
+  // the highest totalLiquidityUsd is the one that actually matters to a trader.
+  const pool = view.liquidity.pools.reduce<(typeof view.liquidity.pools)[number] | undefined>(
+    (best, candidate) => {
+      const candidateUsd = candidate.liquidityData?.totalLiquidityUsd;
+      if (typeof candidateUsd !== "number") return best;
+      const bestUsd = best?.liquidityData?.totalLiquidityUsd;
+      return typeof bestUsd !== "number" || candidateUsd > bestUsd ? candidate : best;
+    },
+    undefined
+  );
   if (!pool?.liquidityData) {
     return { totalUsd: null, locked: null };
   }
