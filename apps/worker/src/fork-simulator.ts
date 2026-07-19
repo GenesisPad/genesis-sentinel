@@ -20,19 +20,50 @@ const forkPrivateKey =
 const forkNativeBalance = 100_000_000_000_000_000_000n;
 const robinhoodUniswapV2RouterAddress = "0x89e5db8b5aa49aa85ac63f691524311aeb649eba" as const;
 const robinhoodWrappedNativeAddress = "0x0bd7d308f8e1639fab988df18a8011f41eacad73" as const;
+// Uniswap V3 SwapRouter02, verified by reading GenesisProtocolConfig.swapRouter() live on-chain
+// (0x4C8a488f3C1139B189AFF60cac97787BCe9684F2) and cross-checked against Blockscout, which
+// reports this address as a verified contract named "SwapRouter02".
+const robinhoodUniswapV3RouterAddress = "0xcaf681a66d020601342297493863e78c959e5cb2" as const;
 const routerAbi = parseAbi([
   "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint amountOutMin, address[] calldata path, address to, uint deadline) payable",
   "function swapExactTokensForTokensSupportingFeeOnTransferTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) payable"
+]);
+const swapRouter02Abi = parseAbi([
+  "function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) external payable returns (uint256 amountOut)"
 ]);
 const erc20Abi = parseAbi([
   "function balanceOf(address account) view returns (uint256)",
   "function approve(address spender, uint256 value) returns (bool)",
   "function transfer(address to, uint256 value) returns (bool)"
 ]);
+const wethAbi = parseAbi(["function deposit() external payable"]);
 const pairAbi = parseAbi([
   "function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
   "function token0() view returns (address)"
 ]);
+const v3PoolAbi = parseAbi([
+  "function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, uint8, bool)",
+  "function token0() view returns (address)"
+]);
+const uniswapV3PriceQ192 = 2n ** 192n;
+
+/** Same spot-price approximation as scan-worker.ts's route-quote tier — used here only to
+ * compute an expected-output baseline for tax-percentage comparison against the fork's real
+ * measured V3 sell output. */
+function getV3SpotAmountOut(amountIn: bigint, sqrtPriceX96: bigint, zeroForOne: boolean): bigint {
+  if (amountIn <= 0n || sqrtPriceX96 <= 0n) {
+    return 0n;
+  }
+
+  const priceX192 = sqrtPriceX96 * sqrtPriceX96;
+  if (priceX192 <= 0n) {
+    return 0n;
+  }
+
+  return zeroForOne
+    ? (amountIn * priceX192) / uniswapV3PriceQ192
+    : (amountIn * uniswapV3PriceQ192) / priceX192;
+}
 
 export function createGanacheForkTradeSimulator(env: AppEnv): ForkTradeSimulator | undefined {
   if (!env.SIMULATION_FORK_ENABLED || !env.ROBINHOOD_RPC_URL) {
@@ -84,20 +115,68 @@ async function runGanacheForkTradeSimulation(
     const walletClient = createWalletClient({ account, chain, transport: http(localRpcUrl) });
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 3_600);
 
+    const isV3 = input.dex === "Uniswap V3";
+    if (isV3 && !input.feeTier) {
+      return {
+        simulationTool: "0.1.0-ganache-fork",
+        canBuy: false,
+        canSell: false,
+        isHoneypot: true,
+        buyTaxBps: null,
+        sellTaxBps: null,
+        error: "Missing Uniswap V3 fee tier; cannot route a fork swap for this pool."
+      };
+    }
+
     const tokenBeforeBuy = await publicClient.readContract({
       address: input.tokenAddress,
       abi: erc20Abi,
       functionName: "balanceOf",
       args: [account.address]
     });
-    const buyTxHash = await walletClient.writeContract({
-      address: robinhoodUniswapV2RouterAddress,
-      abi: routerAbi,
-      functionName: "swapExactETHForTokensSupportingFeeOnTransferTokens",
-      args: [0n, [robinhoodWrappedNativeAddress, input.tokenAddress], account.address, deadline],
-      value: config.nativeAmountWei,
-      gas: 3_000_000n
-    });
+    let buyTxHash: `0x${string}`;
+    if (isV3) {
+      await walletClient.writeContract({
+        address: robinhoodWrappedNativeAddress,
+        abi: wethAbi,
+        functionName: "deposit",
+        value: config.nativeAmountWei,
+        gas: 200_000n
+      });
+      await walletClient.writeContract({
+        address: robinhoodWrappedNativeAddress,
+        abi: erc20Abi,
+        functionName: "approve",
+        args: [robinhoodUniswapV3RouterAddress, config.nativeAmountWei],
+        gas: 200_000n
+      });
+      buyTxHash = await walletClient.writeContract({
+        address: robinhoodUniswapV3RouterAddress,
+        abi: swapRouter02Abi,
+        functionName: "exactInputSingle",
+        args: [
+          {
+            tokenIn: robinhoodWrappedNativeAddress,
+            tokenOut: input.tokenAddress,
+            fee: input.feeTier!,
+            recipient: account.address,
+            amountIn: config.nativeAmountWei,
+            amountOutMinimum: 0n,
+            sqrtPriceLimitX96: 0n
+          }
+        ],
+        gas: 3_000_000n
+      });
+    } else {
+      buyTxHash = await walletClient.writeContract({
+        address: robinhoodUniswapV2RouterAddress,
+        abi: routerAbi,
+        functionName: "swapExactETHForTokensSupportingFeeOnTransferTokens",
+        args: [0n, [robinhoodWrappedNativeAddress, input.tokenAddress], account.address, deadline],
+        value: config.nativeAmountWei,
+        gas: 3_000_000n
+      });
+    }
     await publicClient.waitForTransactionReceipt({ hash: buyTxHash });
     const tokenAfterBuy = await publicClient.readContract({
       address: input.tokenAddress,
@@ -266,40 +345,65 @@ async function runSellTest(
     return { succeeded: false, taxBps: null, received: 0n };
   }
 
+  const isV3 = input.dex === "Uniswap V3";
+
   try {
+    const routerAddress = isV3 ? robinhoodUniswapV3RouterAddress : robinhoodUniswapV2RouterAddress;
     const approveTxHash = await walletClient.writeContract({
       address: params.tokenAddress,
       abi: erc20Abi,
       functionName: "approve",
-      args: [robinhoodUniswapV2RouterAddress, params.amount],
+      args: [routerAddress, params.amount],
       gas: 500_000n,
       account: params.account,
       chain: null
     });
     await publicClient.waitForTransactionReceipt({ hash: approveTxHash });
 
-    const expectedOut = await expectedSellOutAfterBuy(publicClient, input, params.amount);
+    const expectedOut = isV3
+      ? await expectedV3SellOut(publicClient, input, params.amount)
+      : await expectedSellOutAfterBuy(publicClient, input, params.amount);
     const quoteBefore = await publicClient.readContract({
       address: robinhoodWrappedNativeAddress,
       abi: erc20Abi,
       functionName: "balanceOf",
       args: [params.account]
     });
-    const txHash = await walletClient.writeContract({
-      address: robinhoodUniswapV2RouterAddress,
-      abi: routerAbi,
-      functionName: "swapExactTokensForTokensSupportingFeeOnTransferTokens",
-      args: [
-        params.amount,
-        0n,
-        [params.tokenAddress, robinhoodWrappedNativeAddress],
-        params.account,
-        params.deadline
-      ],
-      gas: 3_000_000n,
-      account: params.account,
-      chain: null
-    });
+    const txHash = isV3
+      ? await walletClient.writeContract({
+          address: robinhoodUniswapV3RouterAddress,
+          abi: swapRouter02Abi,
+          functionName: "exactInputSingle",
+          args: [
+            {
+              tokenIn: params.tokenAddress,
+              tokenOut: robinhoodWrappedNativeAddress,
+              fee: input.feeTier!,
+              recipient: params.account,
+              amountIn: params.amount,
+              amountOutMinimum: 0n,
+              sqrtPriceLimitX96: 0n
+            }
+          ],
+          gas: 3_000_000n,
+          account: params.account,
+          chain: null
+        })
+      : await walletClient.writeContract({
+          address: robinhoodUniswapV2RouterAddress,
+          abi: routerAbi,
+          functionName: "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+          args: [
+            params.amount,
+            0n,
+            [params.tokenAddress, robinhoodWrappedNativeAddress],
+            params.account,
+            params.deadline
+          ],
+          gas: 3_000_000n,
+          account: params.account,
+          chain: null
+        });
     const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
     const quoteAfter = await publicClient.readContract({
       address: robinhoodWrappedNativeAddress,
@@ -343,6 +447,30 @@ async function expectedSellOutAfterBuy(
   const reserveQuote = tokenIsToken0 ? reserves[1] : reserves[0];
 
   return getAmountOut(amountIn, reserveToken, reserveQuote);
+}
+
+/** V3 counterpart to expectedSellOutAfterBuy — reads the pool's live post-buy spot price
+ * instead of constant-product reserves. */
+async function expectedV3SellOut(
+  publicClient: ReturnType<typeof createPublicClient>,
+  input: ForkTradeSimulatorInput,
+  amountIn: bigint
+): Promise<bigint> {
+  const [slot0, token0] = await Promise.all([
+    publicClient.readContract({
+      address: input.poolAddress,
+      abi: v3PoolAbi,
+      functionName: "slot0"
+    }),
+    publicClient.readContract({
+      address: input.poolAddress,
+      abi: v3PoolAbi,
+      functionName: "token0"
+    })
+  ]);
+  const tokenIsToken0 = token0.toLowerCase() === input.tokenAddress.toLowerCase();
+
+  return getV3SpotAmountOut(amountIn, slot0[0], tokenIsToken0);
 }
 
 function getAmountOut(amountIn: bigint, reserveIn: bigint, reserveOut: bigint): bigint {

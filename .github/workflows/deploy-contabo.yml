@@ -91,7 +91,7 @@ jobs:
             TELEGRAM_SCAN_COOLDOWN_SECONDS=15
             TELEGRAM_SCAN_BURST_LIMIT=5
             TELEGRAM_SCAN_BURST_WINDOW_SECONDS=300
-            SIMULATION_FORK_ENABLED=false
+            SIMULATION_FORK_ENABLED=true
             SIMULATION_FORK_TIMEOUT_MS=30000
             SIMULATION_FORK_NATIVE_AMOUNT_WEI=1000000000000000
             SENTRY_DSN=
@@ -107,6 +107,15 @@ jobs:
             if grep -Eq '^(DATABASE_URL|REDIS_URL|ROBINHOOD_RPC_URL)=$' "$ENV_FILE"; then
               echo "DATABASE_URL, REDIS_URL, and ROBINHOOD_RPC_URL must be populated in $ENV_FILE"
               exit 1
+            fi
+
+            # Milestone 5: forked buy/sell trade simulation (Ganache) is enabled in production.
+            # Ensures this stays true across deploys even though $ENV_FILE is only created once
+            # and otherwise left untouched by this script.
+            if grep -q "^SIMULATION_FORK_ENABLED=" "$ENV_FILE"; then
+              sed -i 's/^SIMULATION_FORK_ENABLED=.*/SIMULATION_FORK_ENABLED=true/' "$ENV_FILE"
+            else
+              echo "SIMULATION_FORK_ENABLED=true" >> "$ENV_FILE"
             fi
 
             rm -rf "$RELEASE_DIR"

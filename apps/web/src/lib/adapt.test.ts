@@ -240,6 +240,57 @@ describe("mapResultToReport", () => {
     expect(report.controls.canLimitTransactions).toBe(false);
     expect(report.controls.hasFeeWhitelist).toBe(false);
   });
+
+  it("derives honeypot status and tax bps from simulation results instead of always reporting null", () => {
+    const report = mapResultToReport(
+      baseView({
+        simulations: [
+          {
+            id: "sim-buy",
+            kind: "BUY",
+            outcome: "PASSED",
+            input: {},
+            result: { isHoneypot: false, buyTaxBps: 300 },
+            simulationTool: "0.1.0-ganache-fork",
+            createdAt: "2026-07-11T00:00:00.000Z"
+          },
+          {
+            id: "sim-sell",
+            kind: "SELL",
+            outcome: "FAILED",
+            input: {},
+            result: { isHoneypot: true, sellTaxBps: 10_000 },
+            simulationTool: "0.1.0-ganache-fork",
+            createdAt: "2026-07-11T00:00:00.000Z"
+          }
+        ]
+      })
+    );
+
+    expect(report.simulation.isHoneypot).toBe(true);
+    expect(report.simulation.buyTaxBps).toBe(300);
+    expect(report.simulation.sellTaxBps).toBe(10_000);
+  });
+
+  it("keeps honeypot status null when neither leg produced a real verdict", () => {
+    const report = mapResultToReport(
+      baseView({
+        simulations: [
+          {
+            id: "sim-buy",
+            kind: "BUY",
+            outcome: "UNSUPPORTED",
+            input: {},
+            result: { isRouteAvailable: false },
+            simulationTool: "0.1.0-unsupported",
+            createdAt: "2026-07-11T00:00:00.000Z"
+          }
+        ]
+      })
+    );
+
+    expect(report.simulation.isHoneypot).toBeNull();
+  });
 });
 
 describe("mapProgressToJob", () => {

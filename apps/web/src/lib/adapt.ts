@@ -177,14 +177,33 @@ function mapOutcomeToSimStatus(outcome: CheckOutcome): "passed" | "failed" | "in
   return "inconclusive";
 }
 
+function numberFromResult(result: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = result?.[key];
+  return typeof value === "number" ? value : undefined;
+}
+
+function boolFromResult(result: Record<string, unknown> | undefined, key: string): boolean | undefined {
+  const value = result?.[key];
+  return typeof value === "boolean" ? value : undefined;
+}
+
 function mapSimulations(view: ScanResultView["simulations"]): TradeSimulation {
   const buy = view.find((run) => run.kind === "BUY");
   const sell = view.find((run) => run.kind === "SELL");
+  const transfer = view.find((run) => run.kind === "TRANSFER");
+
+  // isHoneypot is reported per-leg (a failed sell is the strongest signal, but a failed buy
+  // is reported too) — never fabricated when neither leg produced a real verdict.
+  const isHoneypot =
+    boolFromResult(sell?.result, "isHoneypot") ?? boolFromResult(buy?.result, "isHoneypot") ?? null;
 
   return {
-    isHoneypot: null,
+    isHoneypot,
     canBuy: mapSimulationCapability(buy?.outcome),
     canSell: mapSimulationCapability(sell?.outcome),
+    buyTaxBps: numberFromResult(buy?.result, "buyTaxBps"),
+    sellTaxBps: numberFromResult(sell?.result, "sellTaxBps"),
+    transferTaxBps: numberFromResult(transfer?.result, "transferTaxBps"),
     results: view.map((run) => ({
       label: `${run.kind.charAt(0)}${run.kind.slice(1).toLowerCase()} simulation`,
       status: mapOutcomeToSimStatus(run.outcome),

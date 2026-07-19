@@ -477,7 +477,7 @@ describe("scan worker orchestration", () => {
     });
   });
 
-  it("records Robinhood Uniswap V3 pools without treating them as V2 route simulations", async () => {
+  it("runs Uniswap V3 route-quote trade simulation from the pool's spot price", async () => {
     const { repository, calls } = createRepository();
     const tokenAddress = "0x0000000000000000000000000000000000000001";
     const poolAddress = "0x00000000000000000000000000000000000000f3";
@@ -552,9 +552,9 @@ describe("scan worker orchestration", () => {
     );
 
     expect(calls).toContain(`liquidity:${poolAddress}`);
-    expect(calls).toContain("simulation:BUY:UNSUPPORTED");
-    expect(calls).toContain("simulation:SELL:UNSUPPORTED");
-    expect(calls).toContain("stage:SIMULATING_TRADES:SKIPPED");
+    expect(calls).toContain("simulation:BUY:PASSED");
+    expect(calls).toContain("simulation:SELL:PASSED");
+    expect(calls).toContain("stage:SIMULATING_TRADES:SUCCEEDED");
   });
 
   it("records Robinhood Uniswap V4 PoolManager pools from initialization logs", async () => {

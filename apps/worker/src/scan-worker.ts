@@ -207,7 +207,11 @@ async function createRobinhoodRouteTradeSimulations(input: {
   holderSnapshot: DiscoveredHolderSnapshot | null;
 }): Promise<SimulationResult[]> {
   const pool = selectDeepestPool(
-    input.pools.filter((candidate) => candidate.liquidityData.protocol === "UNISWAP_V2")
+    input.pools.filter(
+      (candidate) =>
+        candidate.liquidityData.protocol === "UNISWAP_V2" ||
+        candidate.liquidityData.protocol === "UNISWAP_V3"
+    )
   );
   if (!pool) {
     return createUnsupportedTradeSimulations({
@@ -217,8 +221,13 @@ async function createRobinhoodRouteTradeSimulations(input: {
     });
   }
 
-  const reserveToken = bigintFromRecord(pool.liquidityData, "reserveTokenRaw");
-  const reserveQuote = bigintFromRecord(pool.liquidityData, "reserveQuoteRaw");
+  const isV3 = pool.liquidityData.protocol === "UNISWAP_V3";
+  const reserveToken = isV3
+    ? bigintFromRecord(pool.liquidityData, "tokenBalanceRaw")
+    : bigintFromRecord(pool.liquidityData, "reserveTokenRaw");
+  const reserveQuote = isV3
+    ? bigintFromRecord(pool.liquidityData, "quoteBalanceRaw")
+    : bigintFromRecord(pool.liquidityData, "reserveQuoteRaw");
   if (!reserveToken || !reserveQuote || reserveToken <= 0n || reserveQuote <= 0n) {
     return createUnsupportedTradeSimulations({
       chainId: input.chainId,
@@ -229,10 +238,31 @@ async function createRobinhoodRouteTradeSimulations(input: {
 
   const buyQuoteAmount = reserveQuote / 1_000n > 0n ? reserveQuote / 1_000n : 1n;
   const sellTokenAmount = reserveToken / 1_000n > 0n ? reserveToken / 1_000n : 1n;
-  const buyOutput = getAmountOut(buyQuoteAmount, reserveQuote, reserveToken);
-  const sellOutput = getAmountOut(sellTokenAmount, reserveToken, reserveQuote);
-  const buyStaticCall =
-    pool.quoteTokenAddress.toLowerCase() === robinhoodWrappedNativeAddress.toLowerCase()
+
+  // V3 has no constant-product reserves; approximate expected output from the pool's current
+  // spot price (sqrtPriceX96) instead. This ignores price impact/concentrated-liquidity depth,
+  // same spirit as the V2 constant-product estimate — both are baselines for tax-percentage
+  // comparison against the fork simulation's real measured output, not a precise quote.
+  const feeTier = numberFromRecord(pool.liquidityData, "feeTier") ?? undefined;
+  let buyOutput: bigint;
+  let sellOutput: bigint;
+  if (isV3) {
+    const sqrtPriceX96 = bigintFromRecord(pool.liquidityData, "sqrtPriceX96Raw") ?? 0n;
+    const token0 = addressValue(pool.liquidityData.token0);
+    const tokenIsToken0 = token0 !== null && token0 === input.tokenAddress.toLowerCase();
+    buyOutput = getV3SpotAmountOut(buyQuoteAmount, sqrtPriceX96, !tokenIsToken0);
+    sellOutput = getV3SpotAmountOut(sellTokenAmount, sqrtPriceX96, tokenIsToken0);
+  } else {
+    buyOutput = getAmountOut(buyQuoteAmount, reserveQuote, reserveToken);
+    sellOutput = getAmountOut(sellTokenAmount, reserveToken, reserveQuote);
+  }
+  const buyStaticCall = isV3
+    ? {
+        status: "SKIPPED" as const,
+        reason:
+          "Static eth_call pre-check is only implemented for the Uniswap V2 router; V3 relies on the fork simulation result when enabled."
+      }
+    : pool.quoteTokenAddress.toLowerCase() === robinhoodWrappedNativeAddress.toLowerCase()
       ? await staticCallRouterNativeBuy(input.adapter, {
           tokenAddress: input.tokenAddress,
           blockNumber: input.blockNumber,
@@ -257,6 +287,8 @@ async function createRobinhoodRouteTradeSimulations(input: {
           tokenAddress: input.tokenAddress,
           blockNumber: input.blockNumber,
           poolAddress: pool.poolAddress,
+          dex: pool.dex,
+          ...(feeTier !== undefined ? { feeTier } : {}),
           quoteTokenAddress: pool.quoteTokenAddress,
           quoteSymbol: pool.quoteSymbol,
           reserveTokenRaw: reserveToken,
@@ -270,7 +302,9 @@ async function createRobinhoodRouteTradeSimulations(input: {
     chainId: input.chainId,
     tokenAddress: input.tokenAddress,
     blockNumber: input.blockNumber,
-    simulationTool: forkResult?.simulationTool ?? "0.1.0-uniswap-v2-route-quote",
+    simulationTool:
+      forkResult?.simulationTool ??
+      (isV3 ? "0.1.0-uniswap-v3-route-quote" : "0.1.0-uniswap-v2-route-quote"),
     poolAddress: pool.poolAddress,
     dex: pool.dex,
     quoteTokenAddress: pool.quoteTokenAddress,
@@ -521,6 +555,29 @@ function getAmountOut(amountIn: bigint, reserveIn: bigint, reserveOut: bigint): 
   return (amountInWithFee * reserveOut) / (reserveIn * 1000n + amountInWithFee);
 }
 
+const uniswapV3PriceQ192 = 2n ** 192n;
+
+/**
+ * Approximates a Uniswap V3 swap's output from the pool's current spot price alone (ignoring
+ * price impact and concentrated-liquidity depth) — a baseline for tax-percentage comparison
+ * against the fork simulation's real measured output, same role `getAmountOut` plays for V2.
+ * `zeroForOne` is true when the swap direction is token0 -> token1.
+ */
+function getV3SpotAmountOut(amountIn: bigint, sqrtPriceX96: bigint, zeroForOne: boolean): bigint {
+  if (amountIn <= 0n || sqrtPriceX96 <= 0n) {
+    return 0n;
+  }
+
+  const priceX192 = sqrtPriceX96 * sqrtPriceX96;
+  if (priceX192 <= 0n) {
+    return 0n;
+  }
+
+  return zeroForOne
+    ? (amountIn * priceX192) / uniswapV3PriceQ192
+    : (amountIn * uniswapV3PriceQ192) / priceX192;
+}
+
 function readOwnerAddressFromDetectorResults(results: DetectorResult[]): `0x${string}` | null {
   const ownership = results.find((result) => result.detector.id === "ownership-status");
   const owner = ownership?.checks
@@ -704,6 +761,11 @@ export interface ForkTradeSimulatorInput {
   tokenAddress: `0x${string}`;
   blockNumber: bigint;
   poolAddress: `0x${string}`;
+  /** "Uniswap V2" or "Uniswap V3" (per DiscoveredPool.dex) — selects which router/swap ABI the
+   * fork simulator uses. */
+  dex: string;
+  /** Uniswap V3 fee tier for the discovered pool. Required when `dex` is "Uniswap V3". */
+  feeTier?: number;
   quoteTokenAddress: `0x${string}`;
   quoteSymbol: string;
   reserveTokenRaw: bigint;
