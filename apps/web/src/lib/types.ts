@@ -130,6 +130,10 @@ export interface WalletClusterEdge {
   confidence: "low" | "medium" | "high";
   evidence: string;
   source: string;
+  /** % of total supply this address holds, cross-referenced from the persisted top-holders
+   * snapshot. Null/undefined when the address isn't in that snapshot (e.g. it fell outside the
+   * top-N holders tracked) — never estimated. */
+  holdingPct?: number | null;
 }
 
 export interface ContractControls {

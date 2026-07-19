@@ -423,9 +423,65 @@ describe("mapResultToReport", () => {
         address: "0x00000000000000000000000000000000000d31",
         confidence: "high",
         evidence: "Deployer transferred 20% of supply to this address.",
-        source: "erc20-transfer-log-scan"
+        source: "erc20-transfer-log-scan",
+        holdingPct: null
       }
     ]);
+  });
+
+  it("attaches holdingPct to a wallet-cluster edge when the address appears in the top-holders snapshot", () => {
+    const report = mapResultToReport(
+      baseView({
+        detectorChecks: [
+          {
+            id: "check-1",
+            detectorResultId: "result-1",
+            detectorId: "deployer-history",
+            detectorVersion: "0.1.0",
+            code: "WALLET_CLUSTERING_EDGES_FOUND",
+            outcome: "DETECTED",
+            confidence: "HIGH",
+            evidence: [
+              {
+                type: "EXTERNAL_SOURCE",
+                summary: "Related-wallet edges derived from on-chain evidence",
+                data: {
+                  edges: [
+                    {
+                      type: "TRANSFERRED_SUPPLY_TO",
+                      address: "0x00000000000000000000000000000000000d31",
+                      confidence: "HIGH",
+                      evidence: "Deployer transferred 20% of supply to this address.",
+                      source: "erc20-transfer-log-scan"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        holders: {
+          status: "AVAILABLE",
+          message: "Persisted holder snapshots are available for this token.",
+          snapshots: [
+            {
+              chainId: 4663,
+              tokenAddress: ADDRESS,
+              blockNumber: "6942713",
+              topHolders: {
+                holders: [
+                  { address: "0x00000000000000000000000000000000000d31", totalSupplyPct: 18.4 }
+                ]
+              },
+              concentration: { top1Pct: 18.4, top5Pct: 41.7, top10Pct: 63.2 },
+              createdAt: "2026-07-11T00:00:00.000Z"
+            }
+          ]
+        }
+      })
+    );
+
+    expect(report.walletCluster[0]?.holdingPct).toBe(18.4);
   });
 
   it("returns an empty wallet cluster when no clustering check is present", () => {

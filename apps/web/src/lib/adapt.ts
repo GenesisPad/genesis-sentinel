@@ -358,13 +358,36 @@ const WALLET_CLUSTER_EDGE_TYPES = new Set<WalletClusterEdgeType>([
   "TRANSFERRED_SUPPLY_TO",
 ]);
 
+/** Builds an address → % of total supply lookup from the persisted top-holders snapshot, so
+ * wallet-cluster edges can show how much of the supply each connected address actually holds.
+ * Only covers whatever the snapshot tracked (typically the top N holders) — an address outside
+ * that set has no entry here, and callers must treat that as "unknown," not "zero." */
+function buildHolderPctLookup(view: ScanResultView): Map<string, number> {
+  const snapshot = view.holders.snapshots[0];
+  const topHolders = snapshot?.topHolders as { holders?: unknown[] } | undefined;
+  const lookup = new Map<string, number>();
+  if (!Array.isArray(topHolders?.holders)) return lookup;
+
+  for (const holder of topHolders.holders) {
+    if (typeof holder !== "object" || holder === null) continue;
+    const record = holder as Record<string, unknown>;
+    const { address, totalSupplyPct } = record;
+    if (typeof address === "string" && typeof totalSupplyPct === "number") {
+      lookup.set(address.toLowerCase(), totalSupplyPct);
+    }
+  }
+  return lookup;
+}
+
 /** The full related-wallet edge list lives in the WALLET_CLUSTERING_EDGES_FOUND detector
  * check's evidence (deployerHistoryDetector, packages/security-engine) — not reduced anywhere
  * upstream, so this is the one place that has to parse it out of an untyped evidence blob. */
-function extractWalletCluster(checks: ScanResultView["detectorChecks"]): WalletClusterEdge[] {
-  const check = checks.find((c) => c.code === "WALLET_CLUSTERING_EDGES_FOUND");
+function extractWalletCluster(view: ScanResultView): WalletClusterEdge[] {
+  const check = (view.detectorChecks ?? []).find((c) => c.code === "WALLET_CLUSTERING_EDGES_FOUND");
   const rawEdges = check?.evidence[0]?.data.edges;
   if (!Array.isArray(rawEdges)) return [];
+
+  const holderPctByAddress = buildHolderPctLookup(view);
 
   return rawEdges.flatMap((raw): WalletClusterEdge[] => {
     if (typeof raw !== "object" || raw === null) return [];
@@ -388,6 +411,7 @@ function extractWalletCluster(checks: ScanResultView["detectorChecks"]): WalletC
         confidence: confidence.toLowerCase() as "low" | "medium" | "high",
         evidence,
         source,
+        holdingPct: holderPctByAddress.get(address.toLowerCase()) ?? null,
       },
     ];
   });
@@ -505,7 +529,7 @@ export function mapResultToReport(view: ScanResultView): ScanReport {
     simulation: mapSimulations(view.simulations),
     liquidity: mapLiquidity(view),
     holders: mapHolders(view),
-    walletCluster: extractWalletCluster(view.detectorChecks ?? []),
+    walletCluster: extractWalletCluster(view),
     scannerVersion: view.scan.scannerVersion,
     block: view.scan.scanBlockNumber ? Number(view.scan.scanBlockNumber) : null,
     dataSource: `${chainByNumericId(view.scan.chainId)?.label ?? "Chain"} RPC`,

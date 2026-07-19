@@ -179,11 +179,23 @@ export function createBlockscoutExplorerProvider(config: BlockscoutChainConfig):
       // $CASHCAT showed the same pattern): Blockscout tags the `to` address "Launch Factory" via
       // its Open Labels Initiative metadata, and `from.is_contract` is false (a genuine EOA) —
       // this generalizes to any launchpad using the same factory-call pattern.
+      //
+      // EIP-7702 breaks the naive "is_contract === false means EOA" test: a real person's wallet
+      // that has delegated itself a smart-account implementation (e.g. for session keys/batched
+      // txs) reports is_contract: true even though it's still fundamentally the same signer.
+      // Verified against $GEN's real creation transaction: its `from` is the exact same EOA seen
+      // signing a plain (non-7702) transaction elsewhere, but here shows is_contract: true purely
+      // because Blockscout tags it `proxy_type: "eip7702"`. Treating that as "not a real signer"
+      // would have wrongly refused to correct $GEN's deployer (a legacy GenesisPad bonding-curve
+      // launcher, name-tagged "GenesisPad", distinct from the Noxa launcher above — same false-
+      // factory-attribution bug, different launchpad). An EIP-7702-delegated account still counts
+      // as the real signer here.
       const deployerAddress = addressValue(addressRecord.creator_address_hash);
       const txFrom = isRecord(creationTxRecord.from) ? creationTxRecord.from : {};
       const txTo = isRecord(creationTxRecord.to) ? creationTxRecord.to : {};
       const txSenderAddress = addressValue(txFrom.hash);
-      const txSenderIsContract = booleanValue(txFrom.is_contract) ?? false;
+      const txSenderIsContract =
+        (booleanValue(txFrom.is_contract) ?? false) && stringValue(txFrom.proxy_type) !== "eip7702";
       const txDestinationIsContract = booleanValue(txTo.is_contract) ?? false;
       const deployerIsLaunchFactory = Boolean(
         deployerAddress &&

@@ -95,6 +95,53 @@ describe("createBlockscoutExplorerProvider", () => {
     expect(profile?.creationTxSenderAddress).toBe("0xcdfc08a1c1fbafb355645e5ddc32122e5716ca90");
     expect(profile?.deployerAddress).toBe("0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb");
   });
+
+  it("still identifies the real creator when the signer's wallet is EIP-7702-delegated", async () => {
+    // Reproduces $GEN's real creation transaction: launched via a legacy GenesisPad bonding-
+    // curve launcher (name-tagged "GenesisPad" on Blockscout, method createToken — a different
+    // launcher than the Noxa case above). The signer is a genuine human wallet, but Blockscout
+    // reports is_contract: true for it because the wallet has an EIP-7702 delegation
+    // (proxy_type: "eip7702") attached — without accounting for that, the naive is_contract
+    // check wrongly excluded a real signer and left $GEN's deployer pointing at the launcher
+    // contract instead of the actual creator.
+    mockEndpoints({
+      creatorAddressHash: "0x17da64d619235f5fd708258615f6a08cbca6aa94",
+      creationTx: {
+        timestamp: "2026-07-04T16:00:47.000Z",
+        from: {
+          hash: "0x8cfa84924011b19765136baea669ac81fe8bb561",
+          is_contract: true,
+          proxy_type: "eip7702"
+        },
+        to: { hash: "0x513a87182e03090bf18b5c2faec03f127fe3ec99", is_contract: true, name: "GenesisPad" }
+      }
+    });
+
+    const provider = createBlockscoutExplorerProvider(config);
+    const profile = await provider.getTokenProfile({ chainId: 4663, address: TOKEN_ADDRESS });
+
+    expect(profile?.deployerIsLaunchFactory).toBe(true);
+    expect(profile?.creationTxSenderAddress).toBe("0x8cfa84924011b19765136baea669ac81fe8bb561");
+  });
+
+  it("does not treat a genuine contract-to-contract deployment as a launch factory", async () => {
+    // Guards the EIP-7702 relaxation above from over-broadening: a sender that is actually a
+    // contract (no eip7702 proxy_type) must still be excluded — it's not a real human signer.
+    mockEndpoints({
+      creatorAddressHash: "0x2222222222222222222222222222222222222222",
+      creationTx: {
+        timestamp: "2026-01-01T00:00:00.000Z",
+        from: { hash: "0x3333333333333333333333333333333333333333", is_contract: true },
+        to: { hash: "0x2222222222222222222222222222222222222222", is_contract: true }
+      }
+    });
+
+    const provider = createBlockscoutExplorerProvider(config);
+    const profile = await provider.getTokenProfile({ chainId: 4663, address: TOKEN_ADDRESS });
+
+    expect(profile?.deployerIsLaunchFactory).toBe(false);
+    expect(profile?.creationTxSenderAddress).toBeNull();
+  });
 });
 
 describe("createBlockscoutContractSourceProvider", () => {

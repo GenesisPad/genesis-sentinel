@@ -188,6 +188,19 @@ export function WalletClusterGraph({
                 >
                   {shortAddress(edge.address)}
                 </text>
+                {edge.holdingPct != null ? (
+                  <text
+                    x={x}
+                    y={y + (y > CENTER ? NODE_R + 29 : -NODE_R - 22)}
+                    textAnchor="middle"
+                    fontSize={10}
+                    fontWeight={700}
+                    fill={hex}
+                    className="select-none transition-colors duration-200"
+                  >
+                    {edge.holdingPct.toFixed(1)}%
+                  </text>
+                ) : null}
               </a>
             );
           })}
@@ -204,8 +217,15 @@ export function WalletClusterGraph({
         >
           {active ? (
             <>
-              <span className="font-semibold" style={{ color: EDGE_STYLE[active.edge.type].hex }}>
-                {EDGE_STYLE[active.edge.type].label}
+              <span className="inline-flex items-center gap-2">
+                <span className="font-semibold" style={{ color: EDGE_STYLE[active.edge.type].hex }}>
+                  {EDGE_STYLE[active.edge.type].label}
+                </span>
+                {active.edge.holdingPct != null ? (
+                  <span className="font-mono font-bold text-foreground">
+                    {active.edge.holdingPct.toFixed(2)}% of supply
+                  </span>
+                ) : null}
               </span>
               <p className="mt-0.5 leading-snug text-secondary">{active.edge.evidence}</p>
             </>
@@ -234,6 +254,11 @@ export function WalletClusterGraph({
               <span className="inline-flex items-center gap-1.5 font-semibold" style={{ color: EDGE_STYLE[edge.type].hex }}>
                 <span className="size-2 rounded-full" style={{ backgroundColor: EDGE_STYLE[edge.type].hex }} aria-hidden />
                 {EDGE_STYLE[edge.type].label}
+                {edge.holdingPct != null ? (
+                  <span className="font-mono text-xs font-bold text-foreground">
+                    {edge.holdingPct.toFixed(2)}%
+                  </span>
+                ) : null}
               </span>
               <a
                 href={explorerAddressUrl(chainId, edge.address)}
