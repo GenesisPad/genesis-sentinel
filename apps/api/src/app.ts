@@ -246,7 +246,34 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
     return reply.code(ready ? 200 : 503).send(response);
   });
 
-  app.post("/v1/scans", async (request, reply) => {
+  app.post(
+    "/v1/scans",
+    {
+      schema: {
+        description:
+          "Create or resolve a scan for a token. Without an Idempotency-Key header, requests for " +
+          "the same token resolve to the token's most recent scan (200) rather than always queuing " +
+          "a new one (202) — pass a unique Idempotency-Key, or use the Rerun action in the web app, " +
+          "to force a fresh scan.",
+        tags: ["scans"],
+        body: {
+          type: "object",
+          required: ["chainId", "address"],
+          properties: {
+            chainId: { type: "integer", enum: [4663], description: "Robinhood Chain ID." },
+            address: { type: "string", pattern: "^0x[a-fA-F0-9]{40}$" }
+          }
+        },
+        response: {
+          200: { description: "An existing scan was resolved (not newly queued).", type: "object", additionalProperties: true },
+          202: { description: "A new scan was queued.", type: "object", additionalProperties: true },
+          400: { description: "Invalid chain ID or address.", type: "object", additionalProperties: true },
+          403: { description: "The presented API key lacks the scan:write scope.", type: "object", additionalProperties: true },
+          429: { description: "Rate limit exceeded (per-key, or anonymous by IP).", type: "object", additionalProperties: true }
+        }
+      }
+    },
+    async (request, reply) => {
     // Scope check: only applies to authenticated requests. Anonymous requests may still create
     // scans (subject to the stricter anonymous rate limit below) — a presented key just has to
     // actually be authorized for scan:write, not merely valid.
@@ -293,15 +320,44 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
     );
 
     return reply.code(result.created ? 202 : 200).send(result.scan);
-  });
+    }
+  );
 
-  app.get("/v1/scans/recent", async (request) => {
-    const parsed = recentScansQuerySchema.safeParse(request.query);
-    const limit = parsed.success ? parsed.data.limit : 20;
-    return { scans: await scans.getRecentScans(limit) };
-  });
+  app.get(
+    "/v1/scans/recent",
+    {
+      schema: {
+        description: "The public \"recent detections\" feed — most recent scan per token, newest first.",
+        tags: ["scans"],
+        querystring: {
+          type: "object",
+          properties: { limit: { type: "integer", minimum: 1, maximum: 50, default: 20 } }
+        },
+        response: {
+          200: { description: "Recent scans, newest first.", type: "object", additionalProperties: true }
+        }
+      }
+    },
+    async (request) => {
+      const parsed = recentScansQuerySchema.safeParse(request.query);
+      const limit = parsed.success ? parsed.data.limit : 20;
+      return { scans: await scans.getRecentScans(limit) };
+    }
+  );
 
-  app.get("/v1/scans/:scanId", async (request, reply) => {
+  app.get(
+    "/v1/scans/:scanId",
+    {
+      schema: {
+        description: "Poll a scan's current lifecycle state and stage progress. Full fallback for clients not using the SSE events endpoint.",
+        tags: ["scans"],
+        response: {
+          200: { description: "The scan's current state.", type: "object", additionalProperties: true },
+          404: { description: "No scan exists for that scan ID.", type: "object", additionalProperties: true }
+        }
+      }
+    },
+    async (request, reply) => {
     const scanId = (request.params as { scanId?: string }).scanId;
     const scan = scanId ? await scans.getScan(scanId) : undefined;
 
@@ -312,10 +368,23 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       });
     }
 
-    return scan;
-  });
+      return scan;
+    }
+  );
 
-  app.get("/v1/scans/:scanId/result", async (request, reply) => {
+  app.get(
+    "/v1/scans/:scanId/result",
+    {
+      schema: {
+        description: "The persisted scan result: findings, liquidity, holders, simulations, and risk, whatever the scan has reached so far.",
+        tags: ["scans"],
+        response: {
+          200: { description: "The scan's persisted result.", type: "object", additionalProperties: true },
+          404: { description: "No scan result exists for that scan ID.", type: "object", additionalProperties: true }
+        }
+      }
+    },
+    async (request, reply) => {
     const scanId = (request.params as { scanId?: string }).scanId;
     const scan = scanId ? await scans.getScanResult(scanId) : undefined;
 
@@ -326,15 +395,31 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       });
     }
 
-    return scan;
-  });
+      return scan;
+    }
+  );
 
   // Server-Sent Events for scan progress, with polling (GET /v1/scans/:scanId) as a full
   // fallback for clients that can't hold a streaming connection. Event types are derived from
   // the scan's overall ScanState transitions — the only granularity actually persisted; a true
   // per-check "inconclusive" event would need finer-grained state than a scan's top-level
   // ScanState carries, so `scan.stage.inconclusive` is defined but never emitted here.
-  app.get("/v1/scans/:scanId/events", async (request, reply) => {
+  app.get(
+    "/v1/scans/:scanId/events",
+    {
+      schema: {
+        description:
+          "Server-Sent Events stream of scan lifecycle transitions (scan.queued, scan.started, " +
+          "scan.stage.started/completed, scan.completed/partial/failed). Polling GET " +
+          "/v1/scans/:scanId is a complete fallback for clients that can't hold a streaming connection.",
+        tags: ["scans"],
+        produces: ["text/event-stream"],
+        response: {
+          404: { description: "No scan exists for that scan ID.", type: "object", additionalProperties: true }
+        }
+      }
+    },
+    async (request, reply) => {
     const scanId = (request.params as { scanId?: string }).scanId;
     const initial = scanId ? await scans.getScan(scanId) : undefined;
     if (!scanId || !initial) {
@@ -396,13 +481,37 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       void poll();
     }, 1_500);
 
-    if (terminalStates.has(initial.state)) {
-      clearInterval(interval);
-      reply.raw.end();
+      if (terminalStates.has(initial.state)) {
+        clearInterval(interval);
+        reply.raw.end();
+      }
     }
-  });
+  );
 
-  app.get("/v1/tokens/:chainId/:address", async (request, reply) => {
+  const tokenParamsJsonSchema = {
+    type: "object",
+    required: ["chainId", "address"],
+    properties: {
+      chainId: { type: "integer", enum: [4663], description: "Robinhood Chain ID." },
+      address: { type: "string", pattern: "^0x[a-fA-F0-9]{40}$" }
+    }
+  } as const;
+  const tokenNotFoundResponses = {
+    400: { description: "Invalid chain ID or address.", type: "object", additionalProperties: true },
+    404: { description: "No scan has been run for this token yet.", type: "object", additionalProperties: true }
+  } as const;
+
+  app.get(
+    "/v1/tokens/:chainId/:address",
+    {
+      schema: {
+        description: "A token's latest persisted scan result: findings, liquidity, holders, simulations, and risk.",
+        tags: ["tokens"],
+        params: tokenParamsJsonSchema,
+        response: { 200: { description: "The token's latest scan result.", type: "object", additionalProperties: true }, ...tokenNotFoundResponses }
+      }
+    },
+    async (request, reply) => {
     const parsed = tokenParamsSchema.safeParse(request.params);
     if (!parsed.success) {
       return reply.code(400).send({
@@ -419,10 +528,21 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       });
     }
 
-    return result;
-  });
+      return result;
+    }
+  );
 
-  app.get("/v1/tokens/:chainId/:address/liquidity", async (request, reply) => {
+  app.get(
+    "/v1/tokens/:chainId/:address/liquidity",
+    {
+      schema: {
+        description: "The liquidity-discovery slice of a token's latest scan: discovered pools, reserves, and lock/burn status.",
+        tags: ["tokens"],
+        params: tokenParamsJsonSchema,
+        response: { 200: { description: "Liquidity summary.", type: "object", additionalProperties: true }, ...tokenNotFoundResponses }
+      }
+    },
+    async (request, reply) => {
     const parsed = tokenParamsSchema.safeParse(request.params);
     if (!parsed.success) {
       return reply.code(400).send({
@@ -439,10 +559,21 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       });
     }
 
-    return result.liquidity;
-  });
+      return result.liquidity;
+    }
+  );
 
-  app.get("/v1/tokens/:chainId/:address/holders", async (request, reply) => {
+  app.get(
+    "/v1/tokens/:chainId/:address/holders",
+    {
+      schema: {
+        description: "The holder-concentration slice of a token's latest scan: top-holder percentages and related-wallet clustering.",
+        tags: ["tokens"],
+        params: tokenParamsJsonSchema,
+        response: { 200: { description: "Holder concentration summary.", type: "object", additionalProperties: true }, ...tokenNotFoundResponses }
+      }
+    },
+    async (request, reply) => {
     const parsed = tokenParamsSchema.safeParse(request.params);
     if (!parsed.success) {
       return reply.code(400).send({
@@ -459,10 +590,27 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       });
     }
 
-    return result.holders;
-  });
+      return result.holders;
+    }
+  );
 
-  app.get("/v1/tokens/:chainId/:address/deployer", async (request, reply) => {
+  app.get(
+    "/v1/tokens/:chainId/:address/deployer",
+    {
+      schema: {
+        description:
+          "The resolved deployer address for a token plus its deployer-history evidence (other tokens by the same " +
+          "deployer, prior high/critical outcomes) drawn only from Sentinel's own persisted scan history.",
+        tags: ["tokens"],
+        params: tokenParamsJsonSchema,
+        response: {
+          200: { description: "Deployer address and history.", type: "object", additionalProperties: true },
+          ...tokenNotFoundResponses,
+          404: { description: "No scan, or no deployer address resolved yet, for this token.", type: "object", additionalProperties: true }
+        }
+      }
+    },
+    async (request, reply) => {
     const parsed = tokenParamsSchema.safeParse(request.params);
     if (!parsed.success) {
       return reply.code(400).send({
@@ -490,15 +638,26 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       .getDeployerHistory(parsed.data.chainId, result.token.deployerAddress, parsed.data.address)
       .catch(() => null);
 
-    return {
-      chainId: parsed.data.chainId,
-      address: normalizeEvmAddress(parsed.data.address),
-      deployerAddress: result.token.deployerAddress,
-      history
-    };
-  });
+      return {
+        chainId: parsed.data.chainId,
+        address: normalizeEvmAddress(parsed.data.address),
+        deployerAddress: result.token.deployerAddress,
+        history
+      };
+    }
+  );
 
-  app.get("/v1/tokens/:chainId/:address/simulations", async (request, reply) => {
+  app.get(
+    "/v1/tokens/:chainId/:address/simulations",
+    {
+      schema: {
+        description: "The buy/sell/transfer trade-simulation results from a token's latest scan.",
+        tags: ["tokens"],
+        params: tokenParamsJsonSchema,
+        response: { 200: { description: "Simulation runs.", type: "object", additionalProperties: true }, ...tokenNotFoundResponses }
+      }
+    },
+    async (request, reply) => {
     const parsed = tokenParamsSchema.safeParse(request.params);
     if (!parsed.success) {
       return reply.code(400).send({
@@ -515,10 +674,24 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       });
     }
 
-    return { simulations: result.simulations };
-  });
+      return { simulations: result.simulations };
+    }
+  );
 
-  app.get("/v1/tokens/:chainId/:address/findings", async (request, reply) => {
+  app.get(
+    "/v1/tokens/:chainId/:address/findings",
+    {
+      schema: {
+        description: "All persisted security findings for a token's latest scan, most serious first.",
+        tags: ["tokens"],
+        params: tokenParamsJsonSchema,
+        response: {
+          200: { description: "Findings list.", type: "object", additionalProperties: true },
+          400: { description: "Invalid chain ID or address.", type: "object", additionalProperties: true }
+        }
+      }
+    },
+    async (request, reply) => {
     const parsed = tokenParamsSchema.safeParse(request.params);
     if (!parsed.success) {
       return reply.code(400).send({
@@ -527,12 +700,13 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       });
     }
 
-    return {
-      chainId: parsed.data.chainId,
-      address: normalizeEvmAddress(parsed.data.address),
-      findings: await scans.getTokenFindings(parsed.data.chainId, parsed.data.address)
-    };
-  });
+      return {
+        chainId: parsed.data.chainId,
+        address: normalizeEvmAddress(parsed.data.address),
+        findings: await scans.getTokenFindings(parsed.data.chainId, parsed.data.address)
+      };
+    }
+  );
 
   app.get(
     "/v1/risk/:chainId/:address",
@@ -635,7 +809,36 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
   // public developer APIs) but shares the anonymous rate limiter to bound abuse. The plaintext
   // key is returned exactly once, in this response, and is never recoverable afterward — only
   // its hash is stored.
-  app.post("/v1/api-keys", async (request, reply) => {
+  app.post(
+    "/v1/api-keys",
+    {
+      schema: {
+        description:
+          "Create a new API key. The plaintext key is returned exactly once, in this response, and " +
+          "can never be recovered afterward — only its hash is stored. Unauthenticated but rate-limited " +
+          "by IP (shares the anonymous-scan limiter) to bound abuse.",
+        tags: ["api-keys"],
+        body: {
+          type: "object",
+          required: ["name"],
+          properties: {
+            name: { type: "string", minLength: 1, maxLength: 100 },
+            scopes: { type: "array", items: { type: "string", enum: ["scan:read", "scan:write"] } }
+          }
+        },
+        response: {
+          201: {
+            description: "The created key, including the plaintext `key` field (shown only this once).",
+            type: "object",
+            additionalProperties: true
+          },
+          400: { description: "Missing or invalid name/scopes.", type: "object", additionalProperties: true },
+          429: { description: "Too many key-creation requests from this address.", type: "object", additionalProperties: true },
+          503: { description: "API key management is not configured on this instance.", type: "object", additionalProperties: true }
+        }
+      }
+    },
+    async (request, reply) => {
     if (!apiKeys) {
       return reply.code(503).send({
         error: "api_keys_not_configured",
@@ -676,12 +879,60 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       })
       .catch(() => undefined);
 
-    return reply.code(201).send({ ...created, key: generated.plaintext });
-  });
+      return reply.code(201).send({ ...created, key: generated.plaintext });
+    }
+  );
+
+  // Self-lookup only, same constraint as DELETE below: there is no account/ownership model, so
+  // a key can only read its own record via the presented key, never list or look up another.
+  app.get(
+    "/v1/api-keys/me",
+    {
+      schema: {
+        description: "The presented API key's own record: name, prefix, scopes, rate limit, and usage timestamps. Never returns the hash or plaintext.",
+        tags: ["api-keys"],
+        response: {
+          200: { description: "The presented key's record.", type: "object", additionalProperties: true },
+          401: { description: "No API key was presented.", type: "object", additionalProperties: true },
+          503: { description: "API key management is not configured on this instance.", type: "object", additionalProperties: true }
+        }
+      }
+    },
+    async (request, reply) => {
+    if (!apiKeys) {
+      return reply.code(503).send({
+        error: "api_keys_not_configured",
+        message: "API key management is not available on this instance."
+      });
+    }
+
+    if (!request.apiKey) {
+      return reply.code(401).send({
+        error: "missing_api_key",
+        message: "Provide the API key to look up via Authorization: Bearer <key> or X-API-Key."
+      });
+    }
+
+      return request.apiKey;
+    }
+  );
 
   // Self-revocation only — a key revokes itself, since there is no separate account/ownership
   // model yet to authorize revoking a *different* key.
-  app.delete("/v1/api-keys/me", async (request, reply) => {
+  app.delete(
+    "/v1/api-keys/me",
+    {
+      schema: {
+        description: "Revoke the presented API key. There is no ownership model yet, so a key can only revoke itself.",
+        tags: ["api-keys"],
+        response: {
+          200: { description: "The revoked key's record, with revokedAt set.", type: "object", additionalProperties: true },
+          401: { description: "No API key was presented.", type: "object", additionalProperties: true },
+          503: { description: "API key management is not configured on this instance.", type: "object", additionalProperties: true }
+        }
+      }
+    },
+    async (request, reply) => {
     if (!apiKeys) {
       return reply.code(503).send({
         error: "api_keys_not_configured",
@@ -701,8 +952,9 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       .recordAuditEvent({ type: "api_key.revoked", subject: request.apiKey.id })
       .catch(() => undefined);
 
-    return revoked;
-  });
+      return revoked;
+    }
+  );
 
   app.post("/telegram/webhook", async (request, reply) => {
     if (!telegramBot) {

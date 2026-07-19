@@ -402,6 +402,41 @@ describe("api foundation", () => {
     expect(response.body).not.toContain("keyHash");
   });
 
+  it("returns the presented key's own record via GET /v1/api-keys/me, and 401s with no key", async () => {
+    const { repository } = createInMemoryApiKeyRepository();
+    const app = await buildApp({
+      env: loadEnv({ NODE_ENV: "test", LOG_LEVEL: "silent" }),
+      logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
+      scanRepository,
+      scanQueue,
+      apiKeyRepository: repository
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/api-keys",
+      payload: { name: "self-lookup test" }
+    });
+    const { key, id } = created.json<{ key: string; id: string }>();
+
+    const me = await app.inject({
+      method: "GET",
+      url: "/v1/api-keys/me",
+      headers: { authorization: `Bearer ${key}` }
+    });
+    expect(me.statusCode).toBe(200);
+    const meBody = me.json<{ id: string; name: string }>();
+    expect(meBody.id).toBe(id);
+    expect(meBody.name).toBe("self-lookup test");
+    expect(me.body).not.toContain("keyHash");
+
+    const anonymous = await app.inject({ method: "GET", url: "/v1/api-keys/me" });
+    await app.close();
+
+    expect(anonymous.statusCode).toBe(401);
+    expect(anonymous.json()).toMatchObject({ error: "missing_api_key" });
+  });
+
   it("authenticates a valid API key and rejects a revoked one", async () => {
     const { repository } = createInMemoryApiKeyRepository();
     const app = await buildApp({
