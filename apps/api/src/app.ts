@@ -197,6 +197,7 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
   const telegramBot = env.TELEGRAM_BOT_TOKEN
     ? createTelegramBot({
         token: env.TELEGRAM_BOT_TOKEN,
+        webAppUrl: env.WEB_PUBLIC_APP_URL,
         submitScan,
         getScan: (scanId) => scans.getScan(scanId),
         getScanResult: (scanId) => scans.getScanResult(scanId),

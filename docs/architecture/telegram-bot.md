@@ -16,7 +16,9 @@ Stage 12 turns the Telegram boundary into a usable command workflow while keepin
 
 `/scan` and pasted CAs also auto-add the address to the current chat watchlist when Telegram tracking storage is configured. Tracking is per chat, so private chats and group chats do not share CA lists.
 
-Result messages use a dense bot-report layout with the contract address, risk line, market placeholders, tax placeholders, holder summary, top finding, and inline buttons for `Chart`, `Holders`, `Taxes`, and refresh.
+Result messages use a dense bot-report layout: contract address, risk line, honeypot status, buy/sell capability, tax, owner/deployer, source-verified and Dex-paid status, token age, market cap/volume/price, liquidity (with the same market-cap-aware health tier and negligible-liquidity floor as the web app — see below), holder concentration, top findings, and inline buttons for `Chart`, `Holders`, `Taxes`, `Refresh`, and (when `WEB_PUBLIC_APP_URL` is configured) `Full Report`, linking to the richer web report — wallet-cluster graph, every finding, full evidence — a compact Telegram message can't reproduce.
+
+Liquidity-pool selection (pick the pool with the most real liquidity, not just the first one persisted) and health-tier classification (including the absolute-dollar floor below which liquidity is negligible regardless of market cap) live in `@genesis-sentinel/shared` and are used identically by both the web app and this bot, so a bug found and fixed in one surface can't silently persist in the other.
 
 ## Result Language
 

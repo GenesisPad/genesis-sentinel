@@ -13,7 +13,8 @@ import {
   formatTelegramTrackReply,
   formatTelegramUntrackReply,
   parseCommandArgument,
-  parseScanAddress
+  parseScanAddress,
+  telegramFullReportUrl
 } from "./telegram.js";
 
 describe("telegram scan helpers", () => {
@@ -270,6 +271,117 @@ describe("telegram scan helpers", () => {
     expect(reply).not.toContain("KYC");
     expect(reply).not.toContain("Votes");
     expect(reply).not.toContain("Launch MC");
+  });
+
+  it("flags negligible liquidity and paid-dex status, using the highest-liquidity pool not pools[0]", () => {
+    // Reproduces two real bugs found in the web app and ported here for Telegram, which
+    // formats its own report text independently: picking pools[0] instead of the pool with the
+    // most real liquidity (verified against $CASHCAT), and a near-zero-dollar pool reading as
+    // neutral instead of a clear danger signal when there's no market cap to compute a ratio
+    // (verified against $UHOOD).
+    const result: ScanResultView = {
+      scan: {
+        scanId: "scan-2",
+        chainId: 4663,
+        address: "0x0000000000000000000000000000000000000002",
+        state: "COMPLETED",
+        scannerVersion: "0.1.0-foundation",
+        submittedAt: "2026-07-19T00:00:00.000Z",
+        message: "Scan state is COMPLETED."
+      },
+      token: {
+        chainId: 4663,
+        address: "0x0000000000000000000000000000000000000002",
+        name: "Drained Token",
+        symbol: "DRND",
+        decimals: 18,
+        sourceVerified: true,
+        dexPaid: true
+      },
+      detectorChecks: [],
+      findings: [],
+      liquidity: {
+        status: "AVAILABLE",
+        message: "Persisted liquidity pools are available for this token.",
+        pools: [
+          {
+            chainId: 4663,
+            tokenAddress: "0x0000000000000000000000000000000000000002",
+            poolAddress: "0x0000000000000000000000000000000000000010",
+            liquidityData: { totalLiquidityUsd: 0.175, lpBurnedOrLockedPct: 100 }
+          },
+          {
+            chainId: 4663,
+            tokenAddress: "0x0000000000000000000000000000000000000002",
+            poolAddress: "0x0000000000000000000000000000000000000011",
+            liquidityData: { totalLiquidityUsd: 0.00001 }
+          }
+        ]
+      },
+      holders: { status: "UNSUPPORTED", snapshots: [], message: "Holder analysis is not configured yet." },
+      simulations: [],
+      risk: {
+        chainId: 4663,
+        address: "0x0000000000000000000000000000000000000002",
+        scannerVersion: "0.1.0-foundation",
+        status: "UNABLE_TO_ASSESS",
+        level: "UNABLE_TO_ASSESS",
+        score: null,
+        confidence: "LOW",
+        categoryScores: [],
+        findingContributions: [],
+        unableToAssessReasons: [],
+        findingCounts: { INFO: 0, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 },
+        message: "No detector findings were produced for this scan."
+      }
+    };
+
+    const reply = formatTelegramResultReply(result);
+
+    expect(reply).toContain("Health: Low");
+    expect(reply).toContain("Dex: Paid");
+  });
+
+  it("adds a Full Report button linking to the web app when webAppUrl is configured", () => {
+    const result: ScanResultView = {
+      scan: {
+        scanId: "scan-3",
+        chainId: 4663,
+        address: "0x0000000000000000000000000000000000000003",
+        state: "COMPLETED",
+        scannerVersion: "0.1.0-foundation",
+        submittedAt: "2026-07-19T00:00:00.000Z",
+        message: "Scan state is COMPLETED."
+      },
+      token: { chainId: 4663, address: "0x0000000000000000000000000000000000000003" },
+      detectorChecks: [],
+      findings: [],
+      liquidity: { status: "UNSUPPORTED", pools: [], message: "Liquidity discovery is not configured yet." },
+      holders: { status: "UNSUPPORTED", snapshots: [], message: "Holder analysis is not configured yet." },
+      simulations: [],
+      risk: {
+        chainId: 4663,
+        address: "0x0000000000000000000000000000000000000003",
+        scannerVersion: "0.1.0-foundation",
+        status: "UNABLE_TO_ASSESS",
+        level: "UNABLE_TO_ASSESS",
+        score: null,
+        confidence: "LOW",
+        categoryScores: [],
+        findingContributions: [],
+        unableToAssessReasons: [],
+        findingCounts: { INFO: 0, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 },
+        message: "No detector findings were produced for this scan."
+      }
+    };
+
+    const url = telegramFullReportUrl("https://sentinel.genesispad.app/", result);
+    expect(url).toBe(`https://sentinel.genesispad.app/token/robinhood/${result.scan.address}`);
+
+    const keyboard = createTelegramResultKeyboard("shortkey", url);
+    const flat = keyboard.inline_keyboard.flat();
+    const fullReportButton = flat.find((button) => button.text === "Full Report");
+    expect(fullReportButton && "url" in fullReportButton ? fullReportButton.url : undefined).toBe(url);
   });
 
   it("formats Telegram report sections", () => {

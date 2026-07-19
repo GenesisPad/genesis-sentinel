@@ -1,9 +1,12 @@
-import type {
-  CheckOutcome,
-  ScanProgress,
-  ScanResultView,
-  ScanState,
-  SecurityFindingView
+import {
+  liquidityHealthTier,
+  NEGLIGIBLE_LIQUIDITY_USD as SHARED_NEGLIGIBLE_LIQUIDITY_USD,
+  selectPrimaryLiquidityPool,
+  type CheckOutcome,
+  type ScanProgress,
+  type ScanResultView,
+  type ScanState,
+  type SecurityFindingView
 } from "@genesis-sentinel/shared";
 import type { ChainId } from "./chains";
 import { chainByNumericId } from "./chains";
@@ -233,68 +236,14 @@ function mapSimulationCapability(outcome: CheckOutcome | undefined): boolean | n
 // known dead address — the backend has no LP-locker-contract detection yet, so a genuine
 // third-party lock (not burn) still reads as `locked: false` rather than a guess.
 //
-// A fixed 10/20% threshold treats a $50K ultra-low-cap the same as a $50M mid-cap, which isn't
-// how launchpad/DEX liquidity actually reads: smaller caps need deeper *relative* liquidity to
-// resist sniper/whale drainage, while larger caps can be "healthy" at a much lower percentage
-// because their absolute dollar depth is already large. Thresholds below follow this size-aware
-// cheatsheet (quote-side USD as a % of market cap, matching quoteSidePctOfMarketCap):
-//   <$100K   (ultra-low-cap): low <10%,  medium 10-20%,  healthy >=20%
-//   $100K-5M (low-cap):       low <5%,   medium 5-12%,   healthy >=12%
-//   >=$5M    (micro/mid-cap): low <5%,   medium 5-10%,   healthy >=10%
-// The cheatsheet's micro-cap ($5-6M) and mid-cap ($50-60M) brackets share identical thresholds,
-// so they're merged into one ">=$5M" tier; the $100K-200K gap between its ultra-low and low-cap
-// brackets is folded into the low-cap tier (the stricter/lower of the two nearby thresholds).
-const LIQUIDITY_HEALTH_BRACKETS = [
-  { maxMarketCapUsd: 100_000, healthyPct: 20, mediumPct: 10 },
-  { maxMarketCapUsd: 5_000_000, healthyPct: 12, mediumPct: 5 },
-  { maxMarketCapUsd: Infinity, healthyPct: 10, mediumPct: 5 }
-] as const;
-
-// Below this absolute dollar figure, liquidity is negligible no matter what the market cap
-// ratio says — there is no market cap for which $50 of real liquidity is "fine" to trade
-// against. This exists because the ratio-based brackets above require a market cap to compute
-// a percentage; a token with no market cap data (e.g. a rugged/dead pool DexScreener no longer
-// prices) would otherwise report healthTier: null — read by the UI as a neutral/unknown color
-// instead of the obvious red flag a near-zero dollar figure actually is. Verified against a
-// real drained pool ($UHOOD): totalLiquidityUsd $0.175, no market cap data, LP 100% burned —
-// the "LP burned" fact is true and irrelevant once the reserves themselves are gone via a huge
-// sell (burning the LP token only prevents removeLiquidity(); it does nothing to stop a normal
-// swap from draining the reserves).
-export const NEGLIGIBLE_LIQUIDITY_USD = 250;
-
-function liquidityHealthTier(
-  totalUsd: number,
-  pct: number | null,
-  marketCapUsd: number | null
-): "low" | "medium" | "healthy" | null {
-  if (totalUsd < NEGLIGIBLE_LIQUIDITY_USD) return "low";
-  if (pct == null) return null;
-
-  const bracket =
-    marketCapUsd != null
-      ? (LIQUIDITY_HEALTH_BRACKETS.find((b) => marketCapUsd < b.maxMarketCapUsd) ??
-        LIQUIDITY_HEALTH_BRACKETS[LIQUIDITY_HEALTH_BRACKETS.length - 1])
-      : LIQUIDITY_HEALTH_BRACKETS[LIQUIDITY_HEALTH_BRACKETS.length - 1];
-  if (pct >= bracket.healthyPct) return "healthy";
-  if (pct >= bracket.mediumPct) return "medium";
-  return "low";
-}
+// Market-cap-aware health tiering and the negligible-liquidity floor live in
+// @genesis-sentinel/shared (liquidityHealthTier) so the web app and the Telegram bot — which
+// formats its own report text independently — can't drift out of sync on what counts as a
+// dangerously empty pool.
+export const NEGLIGIBLE_LIQUIDITY_USD = SHARED_NEGLIGIBLE_LIQUIDITY_USD;
 
 function mapLiquidity(view: ScanResultView): LiquidityInfo {
-  // Pools are persisted in discovery order, not by liquidity size — a token can have many
-  // near-empty or unused fee-tier pools alongside its real trading pool. Picking pools[0]
-  // blindly showed "$0 liquidity" for tokens whose largest pool wasn't discovered first (e.g.
-  // CASHCAT: pool 0 held $0.0000000000000037 while its real pool held $2.7M). The pool with
-  // the highest totalLiquidityUsd is the one that actually matters to a trader.
-  const pool = view.liquidity.pools.reduce<(typeof view.liquidity.pools)[number] | undefined>(
-    (best, candidate) => {
-      const candidateUsd = candidate.liquidityData?.totalLiquidityUsd;
-      if (typeof candidateUsd !== "number") return best;
-      const bestUsd = best?.liquidityData?.totalLiquidityUsd;
-      return typeof bestUsd !== "number" || candidateUsd > bestUsd ? candidate : best;
-    },
-    undefined
-  );
+  const pool = selectPrimaryLiquidityPool(view.liquidity.pools);
   if (!pool?.liquidityData) {
     return { totalUsd: null, locked: null };
   }

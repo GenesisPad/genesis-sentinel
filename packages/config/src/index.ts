@@ -24,6 +24,10 @@ export const envSchema = z.object({
   API_CORS_ORIGIN: z.string().default("http://localhost:3000"),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(2),
   WEB_PUBLIC_API_BASE_URL: z.url().default("http://localhost:4000"),
+  // The web app's own public URL, used to build "View Full Report" links from the Telegram bot
+  // back to the richer web report (wallet-cluster graph, full findings list, etc.) that a
+  // compact Telegram message can't reproduce.
+  WEB_PUBLIC_APP_URL: z.url().default("https://sentinel.genesispad.app"),
   DATABASE_URL: z.url().default("postgresql://sentinel:sentinel@localhost:5432/genesis_sentinel"),
   REDIS_URL: z.url().default("redis://localhost:6379"),
   ROBINHOOD_RPC_URL: optionalUrl,

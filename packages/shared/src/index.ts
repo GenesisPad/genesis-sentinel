@@ -453,3 +453,75 @@ export function assertRiskScore(score: number): number {
 
   return score;
 }
+
+/**
+ * Pools are persisted in discovery order, not by liquidity size — a token can have many
+ * near-empty or unused fee-tier pools alongside its real trading pool. Picking `pools[0]`
+ * blindly showed "$0 liquidity" for tokens whose largest pool wasn't discovered first (verified
+ * against $CASHCAT: pool 0 held $0.0000000000000037 while its real pool held $2.7M). The pool
+ * with the highest totalLiquidityUsd is the one that actually matters to a trader. Shared so the
+ * web app and the Telegram bot (which reads ScanResultView.liquidity.pools independently) can't
+ * drift — this exact bug existed in both surfaces before this function was extracted.
+ */
+export function selectPrimaryLiquidityPool(pools: LiquidityPoolView[]): LiquidityPoolView | undefined {
+  return pools.reduce<LiquidityPoolView | undefined>((best, candidate) => {
+    const candidateUsd = candidate.liquidityData?.totalLiquidityUsd;
+    if (typeof candidateUsd !== "number") return best;
+    const bestUsd = best?.liquidityData?.totalLiquidityUsd;
+    return typeof bestUsd !== "number" || candidateUsd > bestUsd ? candidate : best;
+  }, undefined);
+}
+
+export type LiquidityHealthTier = "low" | "medium" | "healthy";
+
+// A fixed 10/20% threshold treats a $50K ultra-low-cap the same as a $50M mid-cap, which isn't
+// how launchpad/DEX liquidity actually reads: smaller caps need deeper *relative* liquidity to
+// resist sniper/whale drainage, while larger caps can be "healthy" at a much lower percentage
+// because their absolute dollar depth is already large. Thresholds below follow this size-aware
+// cheatsheet (quote-side USD as a % of market cap):
+//   <$100K   (ultra-low-cap): low <10%,  medium 10-20%,  healthy >=20%
+//   $100K-5M (low-cap):       low <5%,   medium 5-12%,   healthy >=12%
+//   >=$5M    (micro/mid-cap): low <5%,   medium 5-10%,   healthy >=10%
+// The cheatsheet's micro-cap ($5-6M) and mid-cap ($50-60M) brackets share identical thresholds,
+// so they're merged into one ">=$5M" tier; the $100K-200K gap between its ultra-low and low-cap
+// brackets is folded into the low-cap tier (the stricter/lower of the two nearby thresholds).
+const LIQUIDITY_HEALTH_BRACKETS = [
+  { maxMarketCapUsd: 100_000, healthyPct: 20, mediumPct: 10 },
+  { maxMarketCapUsd: 5_000_000, healthyPct: 12, mediumPct: 5 },
+  { maxMarketCapUsd: Infinity, healthyPct: 10, mediumPct: 5 }
+] as const;
+
+// Below this absolute dollar figure, liquidity is negligible no matter what the market cap
+// ratio says — there is no market cap for which $50 of real liquidity is "fine" to trade
+// against. This exists because the ratio-based brackets above require a market cap to compute
+// a percentage; a token with no market cap data (e.g. a rugged/dead pool DexScreener no longer
+// prices) would otherwise report a tier of null — read as neutral/unknown instead of the
+// obvious red flag a near-zero dollar figure actually is. Verified against a real drained pool
+// ($UHOOD): totalLiquidityUsd $0.175, no market cap data, LP 100% burned — the "LP burned" fact
+// is true and irrelevant once the reserves themselves are gone via a huge sell (burning the LP
+// token only prevents removeLiquidity(); it does nothing to stop a normal swap from draining
+// the reserves).
+export const NEGLIGIBLE_LIQUIDITY_USD = 250;
+
+/**
+ * Shared by the web app and the Telegram bot so a liquidity danger signal never exists in only
+ * one surface — this exact rule was fixed once for the web (ADR 0036) and needed porting here
+ * for Telegram to actually match, rather than risking the same false-safety-signal bug in a
+ * second, independently-formatted surface.
+ */
+export function liquidityHealthTier(
+  totalUsd: number,
+  quoteSidePctOfMarketCap: number | null,
+  marketCapUsd: number | null
+): LiquidityHealthTier | null {
+  if (totalUsd < NEGLIGIBLE_LIQUIDITY_USD) return "low";
+  if (quoteSidePctOfMarketCap == null) return null;
+
+  const [, , lastBracket] = LIQUIDITY_HEALTH_BRACKETS;
+  const bracket =
+    (marketCapUsd != null ? LIQUIDITY_HEALTH_BRACKETS.find((b) => marketCapUsd < b.maxMarketCapUsd) : undefined) ??
+    lastBracket;
+  if (quoteSidePctOfMarketCap >= bracket.healthyPct) return "healthy";
+  if (quoteSidePctOfMarketCap >= bracket.mediumPct) return "medium";
+  return "low";
+}

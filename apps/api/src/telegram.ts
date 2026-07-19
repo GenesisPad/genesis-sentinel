@@ -5,7 +5,14 @@ import type {
   TrackedTelegramAddress,
   TrackTelegramAddressInput
 } from "@genesis-sentinel/database";
-import type { ScanProgress, ScanResultView, SecurityFindingView } from "@genesis-sentinel/shared";
+import {
+  liquidityHealthTier,
+  selectPrimaryLiquidityPool,
+  type LiquidityHealthTier,
+  type ScanProgress,
+  type ScanResultView,
+  type SecurityFindingView
+} from "@genesis-sentinel/shared";
 import type { SubmitScanInput } from "./scan-service.js";
 
 export type TelegramSubmitScan = (input: SubmitScanInput) => Promise<ScanProgress>;
@@ -48,6 +55,8 @@ interface TelegramCallbackRegistry {
 
 export function createTelegramBot(options: {
   token: string;
+  /** Base URL of the web app, used to build "Full Report" links. Omit to hide that button. */
+  webAppUrl?: string;
   submitScan: TelegramSubmitScan;
   getScan: TelegramGetScan;
   getScanResult: TelegramGetScanResult;
@@ -215,7 +224,8 @@ export function createTelegramBot(options: {
     await context.reply(formatTelegramResultReply(result), {
       parse_mode: "Markdown",
       reply_markup: createTelegramResultKeyboard(
-        rememberTelegramCallbackScanId(callbackRegistry, result.scan.scanId)
+        rememberTelegramCallbackScanId(callbackRegistry, result.scan.scanId),
+        options.webAppUrl ? telegramFullReportUrl(options.webAppUrl, result) : undefined
       )
     });
   });
@@ -236,7 +246,8 @@ export function createTelegramBot(options: {
     await context.editMessageText(formatTelegramResultReply(result), {
       parse_mode: "Markdown",
       reply_markup: createTelegramResultKeyboard(
-        rememberTelegramCallbackScanId(callbackRegistry, result.scan.scanId)
+        rememberTelegramCallbackScanId(callbackRegistry, result.scan.scanId),
+        options.webAppUrl ? telegramFullReportUrl(options.webAppUrl, result) : undefined
       )
     });
     await context.answerCallbackQuery({ text: "Result refreshed." });
@@ -335,7 +346,8 @@ export function createTelegramBot(options: {
       await input.reply(
         `${prefix}${formatTelegramResultReply(result)}`,
         createTelegramResultKeyboard(
-          rememberTelegramCallbackScanId(callbackRegistry, result.scan.scanId)
+          rememberTelegramCallbackScanId(callbackRegistry, result.scan.scanId),
+          options.webAppUrl ? telegramFullReportUrl(options.webAppUrl, result) : undefined
         )
       );
       return;
@@ -516,6 +528,7 @@ export function formatTelegramResultReply(result: ScanResultView): string {
     ownership ? `Owner: ${ownership}${ownerAddress}` : null,
     result.token.deployerAddress ? `Deployer: \`${shortenAddress(result.token.deployerAddress)}\`` : null,
     sourceVerifiedLine(result),
+    dexPaidLine(result),
     tokenAgeLine(result),
     "",
     marketLine(result),
@@ -533,12 +546,28 @@ export function formatTelegramResultReply(result: ScanResultView): string {
 
   return lines.join("\n");
 }
-export function createTelegramResultKeyboard(callbackScanId: string): InlineKeyboard {
-  return new InlineKeyboard()
+/** `fullReportUrl`, when provided, adds a button linking to the web app's much richer report
+ * (wallet-cluster graph, every finding, evidence) — a compact Telegram message can't reproduce
+ * that, so it needs an explicit way out rather than leaving Telegram users stuck with less
+ * information than the web app has always shown for the same scan. */
+export function createTelegramResultKeyboard(
+  callbackScanId: string,
+  fullReportUrl?: string
+): InlineKeyboard {
+  const keyboard = new InlineKeyboard()
     .text("Chart", `section:chart:${callbackScanId}`)
     .text("Holders", `section:holders:${callbackScanId}`)
     .text("Taxes", `section:taxes:${callbackScanId}`)
     .text("Refresh", `refresh:${callbackScanId}`);
+  return fullReportUrl ? keyboard.row().url("Full Report", fullReportUrl) : keyboard;
+}
+
+/** Robinhood Chain (4663) is the only chain the API implements end-to-end today, matching every
+ * other Robinhood-only assumption already baked into this file's scan submission path — so the
+ * web app's "robinhood" URL segment is safe to hardcode rather than needing a numeric-to-slug
+ * chain registry just for this one link. */
+export function telegramFullReportUrl(webAppUrl: string, result: ScanResultView): string {
+  return `${webAppUrl.replace(/\/+$/u, "")}/token/robinhood/${result.scan.address}`;
 }
 
 export function createTelegramScanKeyboard(callbackScanId: string): InlineKeyboard {
@@ -698,6 +727,11 @@ function sourceVerifiedLine(result: ScanResultView): string | null {
   return `Verified: ${result.token.sourceVerified ? "Yes" : "No"}`;
 }
 
+function dexPaidLine(result: ScanResultView): string | null {
+  if (result.token.dexPaid === undefined) return null;
+  return `Dex: ${result.token.dexPaid ? "Paid" : "Not paid"}`;
+}
+
 function formatCapability(result: ScanResultView, kind: "BUY" | "SELL"): string | null {
   const simulation = result.simulations.find((run) => run.kind === kind);
   if (
@@ -784,9 +818,10 @@ function priceLine(result: ScanResultView): string | null {
   return price ? `Price: ${price}` : null;
 }
 
-function liquidityLine(liquidity: { totalUsd: string; burnedPct: string }): string | null {
+function liquidityLine(liquidity: ReturnType<typeof readLiquidityData>): string | null {
   const values = [
     liquidity.totalUsd ? `Liquidity: ${liquidity.totalUsd}` : null,
+    liquidity.healthLabel ? `Health: ${liquidity.healthLabel}` : null,
     liquidity.burnedPct ? `Burn/Lock: ${liquidity.burnedPct}` : null,
   ].filter((value): value is string => value !== null);
   return values.length > 0 ? values.join(" | ") : null;
@@ -804,8 +839,21 @@ function holdersLine(
   return values.length > 0 ? values.join(" | ") : null;
 }
 
-function readLiquidityData(result: ScanResultView): { totalUsd: string; burnedPct: string } {
-  const pool = result.liquidity.pools[0];
+const LIQUIDITY_HEALTH_LABEL: Record<LiquidityHealthTier, string> = {
+  low: "Low",
+  medium: "Medium",
+  healthy: "Healthy"
+};
+
+function readLiquidityData(
+  result: ScanResultView
+): { totalUsd: string; burnedPct: string; healthLabel: string } {
+  // Uses the same pool-selection and health-tiering rules as the web app
+  // (@genesis-sentinel/shared) so Telegram can't independently drift into the same bugs already
+  // found and fixed there: picking pools[0] blindly instead of the highest-liquidity pool
+  // (verified against $CASHCAT), and a near-zero-dollar pool reading as neutral instead of a
+  // clear danger signal when no market cap exists to compute a ratio (verified against $UHOOD).
+  const pool = selectPrimaryLiquidityPool(result.liquidity.pools);
   const data = pool?.liquidityData;
   const totalUsd = numberFromRecord(data, ["totalLiquidityUsd", "liquidityUsd", "totalUsd"]);
   const burnedPct = numberFromRecord(data, [
@@ -814,10 +862,17 @@ function readLiquidityData(result: ScanResultView): { totalUsd: string; burnedPc
     "burnedPct",
     "lockedPct"
   ]);
+  const marketCapUsd = result.token.marketCapUsd ? Number(result.token.marketCapUsd) : null;
+  const quoteSidePctOfMarketCap =
+    totalUsd != null && marketCapUsd != null && marketCapUsd > 0
+      ? (totalUsd / 2 / marketCapUsd) * 100
+      : null;
+  const healthTier = totalUsd != null ? liquidityHealthTier(totalUsd, quoteSidePctOfMarketCap, marketCapUsd) : null;
 
   return {
     totalUsd: totalUsd != null ? (formatTelegramUsd(totalUsd.toString()) ?? "") : "",
-    burnedPct: burnedPct != null ? `${burnedPct.toFixed(1)}%` : ""
+    burnedPct: burnedPct != null ? `${burnedPct.toFixed(1)}%` : "",
+    healthLabel: healthTier ? LIQUIDITY_HEALTH_LABEL[healthTier] : ""
   };
 }
 
