@@ -861,7 +861,13 @@ const sourceRiskRules: SourceRiskRule[] = [
     recommendation:
       "Review current fee and limit values and whether privileged roles can raise them without a cap.",
     patterns: [
-      /\b(?:setTax|setTaxes|setFees|setBuyFee|setSellFee|buyTax|sellTax|taxFee|marketingFee|liquidityFee)\b/i,
+      // Only setter-shaped function declarations — a bare "buyTax"/"sellTax"/"taxFee" match
+      // false-positives on the extremely common pattern of a local variable or plain state
+      // variable holding a computed/fixed tax amount, with no setter anywhere (verified
+      // against $GEN: `uint256 buyTax = (value * totalTax) / SWAP_DIVISOR;` is a per-call
+      // local variable computing the already-fixed, constructor-capped tax owed on this
+      // transfer, not a mutable control surface).
+      /\bfunction\s+set(?:Tax|Taxes|Fees?|BuyFee|SellFee|BuyTax|SellTax|MarketingFee|LiquidityFee)\s*\(/i,
       // Only setter-shaped names (setMaxWallet/setMaxTx/...) — NOT a bare "maxWallet"/"maxTx"/
       // "maxTransaction" match, which false-positives on read-only getters, immutable variable
       // names, struct fields, and even unrelated identifiers like a custom error's parameter
@@ -896,10 +902,13 @@ const sourceRiskRules: SourceRiskRule[] = [
     description:
       "Verified source code contains low-level .call/.delegatecall invocations with externally influenced targets or calldata, which can allow arbitrary code execution or fund movement outside normal ERC-20 semantics.",
     technicalExplanation:
-      "The detector matched .call(, .delegatecall(, or .staticcall( low-level call syntax in verified source code, outside of standard OpenZeppelin library internals.",
+      "The detector matched .delegatecall( (always flagged — it runs the target's code inside this contract's own storage context, regardless of arguments), or .call( carrying real calldata (able to invoke any function on the target). A .call{value: x}(\"\") with empty calldata is excluded: it can only trigger the target's receive()/fallback(), never an arbitrary function — it's the ETH-send idiom Solidity's own docs recommend over .transfer()/.send(), not an arbitrary-execution risk. Verified against a real false positive ($GEN): a fixed, constructor-only recipient list paid via .call{value: share}(\"\") was being flagged identically to a genuine arbitrary-calldata call.",
     recommendation:
       "Inspect whether the call target and calldata are attacker- or admin-controlled, and whether the call is reachable by a privileged role or by any user.",
-    patterns: [/\.\s*(?:delegatecall|call)\s*(?:\{[^}]*\})?\s*\(/]
+    patterns: [
+      /\.\s*delegatecall\s*(?:\{[^}]*\})?\s*\(/,
+      /\.\s*call\s*(?:\{[^}]*\})?\s*\((?!\s*(?:""|'')\s*\))/
+    ]
   }
 ];
 

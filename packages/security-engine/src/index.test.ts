@@ -418,6 +418,109 @@ describe("source-code risk detector", () => {
     expect(result.findings.map((finding) => finding.code)).not.toContain("SOURCE_TAX_OR_LIMIT_CONTROL");
   });
 
+  it("does not flag a local buyTax/sellTax variable computing an already-fixed, capped tax as a control surface", async () => {
+    // Reproduces a real false positive verified against a live deployed token ($GEN):
+    // buyTax/sellTax are per-call local variables computing the tax owed on this transfer from
+    // an immutable, constructor-capped totalTax (MAX_TOTAL_TAX_BPS = 500, i.e. 5%, enforced at
+    // construction) — there is no setter for totalTax anywhere. The old bare-word pattern
+    // treated the mere presence of "buyTax"/"sellTax" identifiers as evidence of an adjustable
+    // fee, when they're just the computed withholding amount.
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        contractName: "GenesisToken",
+        compilerVersion: "v0.8.20",
+        language: "solidity",
+        sourceFiles: [
+          {
+            filename: "GenesisToken.sol",
+            sourceCode: `
+              contract GenesisToken {
+                uint16 public totalTax;
+                uint16 public constant MAX_TOTAL_TAX_BPS = 500;
+
+                constructor(uint16 totalTax_) {
+                  totalTax = totalTax_;
+                }
+
+                function _update(address from, address to, uint256 value) internal {
+                  uint256 buyTax = (value * totalTax) / 10000;
+                  uint256 sellTax = (value * totalTax) / 10000;
+                }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    expect(result.findings.map((finding) => finding.code)).not.toContain("SOURCE_TAX_OR_LIMIT_CONTROL");
+  });
+
+  it("does not flag a fixed-recipient ETH-only .call as an arbitrary external call", async () => {
+    // Reproduces a real false positive verified against $GEN: taxRecipients is set once in the
+    // constructor with no setter, and each recipient is paid via .call{value: share}("") — empty
+    // calldata, so the target's fallback/receive is the most that can ever run; there is no
+    // arbitrary-function-invocation risk. .delegatecall is still always flagged.
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        contractName: "GenesisToken",
+        compilerVersion: "v0.8.20",
+        language: "solidity",
+        sourceFiles: [
+          {
+            filename: "GenesisToken.sol",
+            sourceCode: `
+              contract GenesisToken {
+                address[] public taxRecipients;
+
+                function _distribute(uint256 ethBalance) internal {
+                  for (uint i = 0; i < taxRecipients.length; i++) {
+                    (bool success, ) = taxRecipients[i].call{value: ethBalance}("");
+                  }
+                }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    expect(result.findings.map((finding) => finding.code)).not.toContain("SOURCE_ARBITRARY_EXTERNAL_CALL");
+  });
+
+  it("still flags .call with real calldata and .delegatecall as arbitrary external calls", async () => {
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [
+          {
+            filename: "Risky.sol",
+            sourceCode: `
+              contract Risky {
+                function proxyCall(address target, bytes calldata data) external {
+                  (bool ok, ) = target.call(data);
+                }
+                function forward(address impl, bytes calldata data) external {
+                  (bool ok, ) = impl.delegatecall(data);
+                }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    expect(result.findings.map((finding) => finding.code)).toContain("SOURCE_ARBITRARY_EXTERNAL_CALL");
+  });
+
   it("detects ownership recovery and forced-transfer surfaces in verified source", async () => {
     const result = await sourceCodeRiskDetector.run(
       {
