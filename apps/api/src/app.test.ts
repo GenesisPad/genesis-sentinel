@@ -584,19 +584,18 @@ describe("api foundation", () => {
 
     expect(liquidity.statusCode).toBe(200);
     expect(securitySummary.statusCode, securitySummary.body).toBe(200);
-    expect(securitySummary.json<TokenSecuritySummaryView>()).toMatchObject({
-      product: "Genesis Sentinel",
-      fullAnalysisUrl: `https://sentinel.genesispad.app/token/4663/${address}`,
-      devCluster: {
-        walletCount: 0,
-        knownHoldingPct: null,
-        unknownHoldingWalletCount: 0,
-        wallets: []
-      },
-      signals: expect.arrayContaining([
-        expect.objectContaining({ id: "honeypot", label: "Honeypot", answer: "UNKNOWN" })
-      ])
+    const summary = securitySummary.json<TokenSecuritySummaryView>();
+    expect(summary.product).toBe("Genesis Sentinel");
+    expect(summary.fullAnalysisUrl).toBe(`https://sentinel.genesispad.app/token/4663/${address}`);
+    expect(summary.devCluster).toMatchObject({
+      walletCount: 0,
+      knownHoldingPct: null,
+      unknownHoldingWalletCount: 0,
+      wallets: []
     });
+    expect(summary.signals).toContainEqual(
+      expect.objectContaining({ id: "honeypot", label: "Honeypot", answer: "UNKNOWN" })
+    );
     expect(securitySummary.body).not.toContain(["Quick", "Intel"].join(" "));
     expect(holders.statusCode).toBe(200);
     expect(simulations.statusCode).toBe(200);

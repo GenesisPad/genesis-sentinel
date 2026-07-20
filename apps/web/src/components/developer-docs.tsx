@@ -450,14 +450,18 @@ export function DeveloperDocs() {
               title="Request"
               code={active.sample}
               copied={copied === `${active.id}-curl`}
-              onCopy={() => copy(active.sample, `${active.id}-curl`)}
+              onCopy={() => {
+                void copy(active.sample, `${active.id}-curl`);
+              }}
             />
             <CodeBlock
               id={`${active.id}-response`}
               title="Response Shape"
               code={active.response}
               copied={copied === `${active.id}-response`}
-              onCopy={() => copy(active.response, `${active.id}-response`)}
+              onCopy={() => {
+                void copy(active.response, `${active.id}-response`);
+              }}
             />
           </div>
         </div>

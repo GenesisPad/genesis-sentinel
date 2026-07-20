@@ -302,7 +302,9 @@ export function AdminApiKeys() {
             type="button"
             className="w-full"
             disabled={!canSubmit || status === "submitting"}
-            onClick={submit}
+            onClick={() => {
+              void submit();
+            }}
           >
             {status === "submitting" ? (
               <Loader2 className="size-4 animate-spin" aria-hidden="true" />
@@ -332,7 +334,14 @@ export function AdminApiKeys() {
                   <p className="text-sm font-bold text-foreground">{createdKey.name}</p>
                   <p className="mt-1 font-mono text-xs text-muted">Prefix: {createdKey.prefix}</p>
                 </div>
-                <Button type="button" size="sm" variant="secondary" onClick={copyKey}>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    void copyKey();
+                  }}
+                >
                   {copied ? (
                     <Check className="size-4" aria-hidden="true" />
                   ) : (
