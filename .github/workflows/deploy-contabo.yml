@@ -25,10 +25,11 @@ jobs:
           CONTABO_HOST: ${{ secrets.CONTABO_HOST }}
           CONTABO_USER: ${{ secrets.CONTABO_USER }}
           CONTABO_SSH_KEY: ${{ secrets.CONTABO_SSH_KEY }}
+          API_ADMIN_SECRET: ${{ secrets.API_ADMIN_SECRET }}
         run: |
           set -e
           missing=0
-          for key in CONTABO_HOST CONTABO_USER CONTABO_SSH_KEY; do
+          for key in CONTABO_HOST CONTABO_USER CONTABO_SSH_KEY API_ADMIN_SECRET; do
             if [ -z "${!key}" ]; then
               echo "Missing GitHub secret: $key"
               missing=1
@@ -41,6 +42,8 @@ jobs:
 
       - name: Deploy on server
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          API_ADMIN_SECRET: ${{ secrets.API_ADMIN_SECRET }}
         with:
           host: ${{ secrets.CONTABO_HOST }}
           username: ${{ secrets.CONTABO_USER }}
@@ -48,6 +51,7 @@ jobs:
           port: ${{ secrets.CONTABO_PORT || '22' }}
           timeout: 30s
           command_timeout: 30m
+          envs: API_ADMIN_SECRET
           script: |
             set -e
 
@@ -79,6 +83,7 @@ jobs:
             API_CORS_ORIGIN=https://sentinel.genesispad.app
             API_RATE_LIMIT_MAX=120
             API_RATE_LIMIT_TIME_WINDOW=1 minute
+            API_ADMIN_SECRET=
             WORKER_CONCURRENCY=2
             NEXT_PUBLIC_API_BASE_URL=/v1
             NEXT_PUBLIC_SITE_URL=https://sentinel.genesispad.app
@@ -100,12 +105,20 @@ jobs:
               exit 1
             fi
 
-            for key in NODE_ENV API_HOST API_PORT API_CORS_ORIGIN DATABASE_URL REDIS_URL ROBINHOOD_RPC_URL NEXT_PUBLIC_API_BASE_URL NEXT_PUBLIC_SITE_URL; do
+            if [ -n "${API_ADMIN_SECRET:-}" ]; then
+              if grep -q "^API_ADMIN_SECRET=" "$ENV_FILE"; then
+                sed -i "s|^API_ADMIN_SECRET=.*|API_ADMIN_SECRET=${API_ADMIN_SECRET}|" "$ENV_FILE"
+              else
+                printf '\nAPI_ADMIN_SECRET=%s\n' "$API_ADMIN_SECRET" >> "$ENV_FILE"
+              fi
+            fi
+
+            for key in NODE_ENV API_HOST API_PORT API_CORS_ORIGIN API_ADMIN_SECRET DATABASE_URL REDIS_URL ROBINHOOD_RPC_URL NEXT_PUBLIC_API_BASE_URL NEXT_PUBLIC_SITE_URL; do
               require_env_key "$key"
             done
 
-            if grep -Eq '^(DATABASE_URL|REDIS_URL|ROBINHOOD_RPC_URL)=$' "$ENV_FILE"; then
-              echo "DATABASE_URL, REDIS_URL, and ROBINHOOD_RPC_URL must be populated in $ENV_FILE"
+            if grep -Eq '^(API_ADMIN_SECRET|DATABASE_URL|REDIS_URL|ROBINHOOD_RPC_URL)=$' "$ENV_FILE"; then
+              echo "API_ADMIN_SECRET, DATABASE_URL, REDIS_URL, and ROBINHOOD_RPC_URL must be populated in $ENV_FILE"
               exit 1
             fi
 

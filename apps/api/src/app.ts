@@ -111,7 +111,8 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
 
   await app.register(cors, {
     origin: corsOrigin,
-    methods: ["GET", "POST"]
+    methods: ["GET", "POST", "DELETE"],
+    allowedHeaders: ["content-type", "authorization", "x-api-key", "x-admin-secret", "idempotency-key"]
   });
 
   await app.register(rateLimit, {
