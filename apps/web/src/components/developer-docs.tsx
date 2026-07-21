@@ -14,7 +14,7 @@ import {
   Link as LinkIcon,
   Radar,
   ShieldCheck,
-  UsersRound,
+  UsersRound
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -48,8 +48,10 @@ const ENDPOINTS: EndpointDoc[] = [
     method: "GET",
     path: "/v1/tokens/{chainId}/{address}/security-summary",
     group: "Partner integration",
-    summary: "Plain-language Yes, No, and Unknown signals for DexScreener, DexTools, wallets, and bots.",
-    useWhen: "Use this as the primary partner endpoint. It includes Honeypot, obfuscated address, cooldown, dev cluster, and fullAnalysisUrl.",
+    summary:
+      "Plain-language Yes, No, and Unknown signals for DexScreener, DexTools, wallets, and bots.",
+    useWhen:
+      "Use this as the primary partner endpoint. It includes Honeypot, buy/sell tax, obfuscated address, cooldown, dev cluster, and fullAnalysisUrl.",
     auth: PUBLIC_READ_AUTH,
     sample: `curl ${BASE_URL}/v1/tokens/4663/${EXAMPLE_ADDRESS}/security-summary`,
     response: `{
@@ -71,8 +73,18 @@ const ENDPOINTS: EndpointDoc[] = [
       }
     ]
   },
+  "taxes": {
+    "status": "AVAILABLE",
+    "buyTaxBps": 300,
+    "buyTaxPct": 3,
+    "sellTaxBps": 1250,
+    "sellTaxPct": 12.5,
+    "source": "SIMULATION"
+  },
   "signals": [
     { "id": "honeypot", "label": "Honeypot", "answer": "NO" },
+    { "id": "buy_tax", "label": "Buy tax", "answer": "YES", "value": "3%" },
+    { "id": "sell_tax", "label": "Sell tax", "answer": "YES", "value": "12.5%" },
     { "id": "obfuscated_address", "label": "Hidden or obfuscated addresses", "answer": "NO" },
     { "id": "trading_cooldown", "label": "Trading cooldown", "answer": "YES" },
     { "id": "dev_cluster", "label": "Dev cluster", "answer": "YES", "value": "14.82% across 3 linked wallet(s)" }
@@ -86,7 +98,8 @@ const ENDPOINTS: EndpointDoc[] = [
     path: "/v1/scans",
     group: "Scan lifecycle",
     summary: "Queues a fresh scan or resolves an existing scan for the same idempotency key.",
-    useWhen: "Use when your integration needs Genesis Sentinel to scan a token that has no current result.",
+    useWhen:
+      "Use when your integration needs Genesis Sentinel to scan a token that has no current result.",
     auth: "No API key required. Anonymous requests use the public scan-write limit. If a key is presented for scan creation, it must include scan:write.",
     sample: `curl -X POST ${BASE_URL}/v1/scans \\
   -H "content-type: application/json" \\
@@ -260,7 +273,8 @@ const ENDPOINTS: EndpointDoc[] = [
     path: "/v1/api-keys",
     group: "Risk and auth",
     summary: "Creates an API key and returns the plaintext key exactly once.",
-    useWhen: "Public callers can create read keys. Admins can generate partner keys with custom limits using X-Admin-Secret.",
+    useWhen:
+      "Public callers can create read keys. Admins can generate partner keys with custom limits using X-Admin-Secret.",
     auth: "Unauthenticated for default scan:read keys. Custom scopes or limits require X-Admin-Secret.",
     sample: `curl -X POST ${BASE_URL}/v1/api-keys \\
   -H "content-type: application/json" \\
@@ -280,6 +294,8 @@ const GROUPS = ["Partner integration", "Scan lifecycle", "Token slices", "Risk a
 
 const SIGNALS = [
   ["honeypot", "Honeypot"],
+  ["buy_tax", "Buy tax"],
+  ["sell_tax", "Sell tax"],
   ["can_block_wallets", "Can block wallets"],
   ["hidden_owner_controls", "Hidden owner/admin controls"],
   ["obfuscated_address", "Hidden or obfuscated addresses"],
@@ -326,7 +342,8 @@ export function DeveloperDocs() {
           </h1>
           <p className="mt-4 max-w-3xl text-base leading-7 text-secondary">
             Start with the security summary endpoint. It returns regular-person labels, stable IDs,
-            direct evidence codes, dev-cluster holdings, and a full-analysis URL for partner buttons.
+            direct evidence codes, dev-cluster holdings, and a full-analysis URL for partner
+            buttons.
           </p>
           <div className="mt-6 flex flex-wrap gap-2.5">
             <a
@@ -366,25 +383,50 @@ export function DeveloperDocs() {
       </section>
 
       <section className="grid gap-6 border-b border-border py-9 lg:grid-cols-4">
-        <GuideStep icon={FileJson} title="1. Read summary" text="Request the latest plain-language token verdict." />
-        <GuideStep icon={LinkIcon} title="2. Attach button" text="Use `fullAnalysisUrl` for View full analysis." />
-        <GuideStep icon={UsersRound} title="3. Show cluster" text="Display dev cluster percent and wallet count." />
-        <GuideStep icon={Activity} title="4. Refresh safely" text="Queue scans only when your cache is stale or missing." />
+        <GuideStep
+          icon={FileJson}
+          title="1. Read summary"
+          text="Request the latest plain-language token verdict."
+        />
+        <GuideStep
+          icon={LinkIcon}
+          title="2. Attach button"
+          text="Use `fullAnalysisUrl` for View full analysis."
+        />
+        <GuideStep
+          icon={UsersRound}
+          title="3. Show cluster"
+          text="Display dev cluster percent and wallet count."
+        />
+        <GuideStep
+          icon={Activity}
+          title="4. Refresh safely"
+          text="Queue scans only when your cache is stale or missing."
+        />
       </section>
 
       <section className="grid gap-6 border-b border-border py-9 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div>
           <h2 className="font-display text-2xl font-bold">Recommended Partner Setup</h2>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            DexScreener does not need to create an account or send a key to start. Public
-            endpoints work anonymously under public limits. An admin-issued read key is only for
-            sustained production volume, and a separate write key is only needed if the partner
-            will queue missing scans.
+            DexScreener does not need to create an account or send a key to start. Public endpoints
+            work anonymously under public limits. An admin-issued read key is only for sustained
+            production volume, and a separate write key is only needed if the partner will queue
+            missing scans.
           </p>
           <div className="mt-5 grid gap-3 md:grid-cols-3">
-            <PartnerRule title="Public first" text="No key required for `security-summary`, risk, token slices, or scan polling." />
-            <PartnerRule title="Read key" text="Optional high-limit `scan:read` key for sustained production traffic." />
-            <PartnerRule title="Write key" text="Optional, lower limit, `scan:write`, used only for `POST /v1/scans`." />
+            <PartnerRule
+              title="Public first"
+              text="No key required for `security-summary`, risk, token slices, or scan polling."
+            />
+            <PartnerRule
+              title="Read key"
+              text="Optional high-limit `scan:read` key for sustained production traffic."
+            />
+            <PartnerRule
+              title="Write key"
+              text="Optional, lower limit, `scan:write`, used only for `POST /v1/scans`."
+            />
           </div>
         </div>
         <div className="rounded-xl border border-border bg-surface-deep p-5">
@@ -398,7 +440,10 @@ export function DeveloperDocs() {
         </div>
       </section>
 
-      <section id="endpoint-explorer" className="grid gap-7 py-9 lg:grid-cols-[320px_minmax(0,1fr)]">
+      <section
+        id="endpoint-explorer"
+        className="grid gap-7 py-9 lg:grid-cols-[320px_minmax(0,1fr)]"
+      >
         <aside className="lg:sticky lg:top-5 lg:self-start">
           <h2 className="font-display text-2xl font-bold">Endpoint Explorer</h2>
           <p className="mt-2 text-sm leading-6 text-muted">
@@ -407,7 +452,9 @@ export function DeveloperDocs() {
           <div className="mt-5 flex flex-col gap-5">
             {endpointsByGroup.map(({ group, endpoints }) => (
               <div key={group}>
-                <div className="mb-2 text-xs font-bold uppercase tracking-wide text-faint">{group}</div>
+                <div className="mb-2 text-xs font-bold uppercase tracking-wide text-faint">
+                  {group}
+                </div>
                 <div className="flex flex-col gap-1.5">
                   {endpoints.map((endpoint) => (
                     <button
@@ -471,8 +518,8 @@ export function DeveloperDocs() {
         <div>
           <h2 className="font-display text-2xl font-bold">Security Summary Signals</h2>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-muted">
-            Every signal has a stable `id`, a display `label`, an `answer`, confidence, source,
-            and evidence codes. Treat `UNKNOWN` as missing or unavailable evidence, not safety.
+            Every signal has a stable `id`, a display `label`, an `answer`, confidence, source, and
+            evidence codes. Treat `UNKNOWN` as missing or unavailable evidence, not safety.
           </p>
           <div className="mt-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
             {SIGNALS.map(([id, label]) => (
@@ -519,15 +566,7 @@ function RateFact({ label, value }: { label: string; value: string }) {
   );
 }
 
-function GuideStep({
-  icon: Icon,
-  title,
-  text,
-}: {
-  icon: LucideIcon;
-  title: string;
-  text: string;
-}) {
+function GuideStep({ icon: Icon, title, text }: { icon: LucideIcon; title: string; text: string }) {
   return (
     <div className="rounded-xl border border-border bg-surface-deep p-4">
       <Icon className="size-5 text-primary" aria-hidden />
@@ -551,15 +590,7 @@ function MethodBadge({ method }: { method: Method }) {
   );
 }
 
-function InfoPanel({
-  title,
-  text,
-  icon: Icon,
-}: {
-  title: string;
-  text: string;
-  icon: LucideIcon;
-}) {
+function InfoPanel({ title, text, icon: Icon }: { title: string; text: string; icon: LucideIcon }) {
   return (
     <div className="border-b border-border p-5 lg:border-r lg:last:border-r-0">
       <div className="flex items-center gap-2 text-sm font-bold text-foreground">
@@ -576,7 +607,7 @@ function CodeBlock({
   title,
   code,
   copied,
-  onCopy,
+  onCopy
 }: {
   id: string;
   title: string;

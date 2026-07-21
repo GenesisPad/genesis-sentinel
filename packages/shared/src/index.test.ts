@@ -191,7 +191,16 @@ describe("buildTokenSecuritySummary", () => {
           kind: "SELL",
           outcome: "PASSED",
           input: {},
-          result: { isHoneypot: false },
+          result: { isHoneypot: false, sellTaxBps: 1_250 },
+          simulationTool: "test",
+          createdAt: "2026-07-20T00:01:00.000Z"
+        },
+        {
+          id: "simulation-2",
+          kind: "BUY",
+          outcome: "PASSED",
+          input: {},
+          result: { buyTaxBps: 300 },
           simulationTool: "test",
           createdAt: "2026-07-20T00:01:00.000Z"
         }
@@ -231,6 +240,13 @@ describe("buildTokenSecuritySummary", () => {
       knownHoldingPct: 5.75,
       unknownHoldingWalletCount: 0
     });
+    expect(summary.taxes).toMatchObject({
+      status: "AVAILABLE",
+      buyTaxBps: 300,
+      buyTaxPct: 3,
+      sellTaxBps: 1250,
+      sellTaxPct: 12.5
+    });
     expect(JSON.stringify(summary)).not.toContain(["Quick", "Intel"].join(" "));
     expect(summary.signals.find((signal) => signal.id === "can_block_wallets")).toMatchObject({
       label: "Can block wallets",
@@ -239,6 +255,17 @@ describe("buildTokenSecuritySummary", () => {
     expect(summary.signals.find((signal) => signal.id === "honeypot")).toMatchObject({
       label: "Honeypot",
       answer: "NO"
+    });
+    expect(summary.signals.find((signal) => signal.id === "buy_tax")).toMatchObject({
+      label: "Buy tax",
+      answer: "YES",
+      value: "3%"
+    });
+    expect(summary.signals.find((signal) => signal.id === "sell_tax")).toMatchObject({
+      label: "Sell tax",
+      answer: "YES",
+      severity: "WARN",
+      value: "12.5%"
     });
     expect(summary.signals.find((signal) => signal.id === "can_create_more_tokens")).toMatchObject({
       label: "Can create more tokens",

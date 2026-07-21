@@ -37,13 +37,7 @@ export type RiskCategory =
   | "DISTRIBUTION_RISK"
   | "REPUTATION_RISK";
 
-export type RiskLevel =
-  | "LOW"
-  | "MODERATE"
-  | "ELEVATED"
-  | "HIGH"
-  | "CRITICAL"
-  | "UNABLE_TO_ASSESS";
+export type RiskLevel = "LOW" | "MODERATE" | "ELEVATED" | "HIGH" | "CRITICAL" | "UNABLE_TO_ASSESS";
 
 export type OwnershipStatus = "RENOUNCED" | "ACTIVE" | "UNKNOWN";
 
@@ -380,11 +374,7 @@ export type SecuritySignalAnswer = "YES" | "NO" | "UNKNOWN";
 export type SecuritySignalSeverity = "GOOD" | "INFO" | "WARN" | "HIGH" | "CRITICAL";
 
 export type SecuritySignalSource =
-  | "DETECTOR"
-  | "SIMULATION"
-  | "TOKEN_PROFILE"
-  | "MISSING_DATA"
-  | "NOT_IMPLEMENTED";
+  "DETECTOR" | "SIMULATION" | "TOKEN_PROFILE" | "MISSING_DATA" | "NOT_IMPLEMENTED";
 
 export interface SecuritySummarySignal {
   id: string;
@@ -413,6 +403,15 @@ export interface DevClusterSummaryView {
   wallets: DevClusterWalletView[];
 }
 
+export interface TaxSummaryView {
+  status: "AVAILABLE" | "UNKNOWN";
+  buyTaxBps: number | null;
+  buyTaxPct: number | null;
+  sellTaxBps: number | null;
+  sellTaxPct: number | null;
+  source: "SIMULATION";
+}
+
 export interface TokenSecuritySummaryView {
   chainId: number;
   address: `0x${string}`;
@@ -424,6 +423,7 @@ export interface TokenSecuritySummaryView {
   issueCount: number;
   fullAnalysisUrl?: string;
   devCluster: DevClusterSummaryView;
+  taxes: TaxSummaryView;
   signals: SecuritySummarySignal[];
 }
 
@@ -455,7 +455,10 @@ const FINDING_CODES = {
 const CHECK_CODES = {
   blacklist: ["BLACKLIST_SELECTORS_PRESENT"],
   blacklistSourceAbsent: ["SOURCE_BLACKLIST_CONTROL_ABSENT"],
-  hiddenOwnerAbsent: ["SOURCE_OWNERSHIP_RECOVERY_SURFACE_ABSENT", "SOURCE_PRIVILEGED_ROLE_CONTROL_ABSENT"],
+  hiddenOwnerAbsent: [
+    "SOURCE_OWNERSHIP_RECOVERY_SURFACE_ABSENT",
+    "SOURCE_PRIVILEGED_ROLE_CONTROL_ABSENT"
+  ],
   obfuscatedAddress: ["SOURCE_OBFUSCATED_ADDRESS_DETECTED"],
   obfuscatedAddressAbsent: ["SOURCE_OBFUSCATED_ADDRESS_ABSENT"],
   suspiciousAbsent: [
@@ -481,8 +484,13 @@ export function buildTokenSecuritySummary(
 ): TokenSecuritySummaryView {
   const context = createSecuritySignalContext(result);
   const highIssueSeverities = new Set<FindingSeverity>(["HIGH", "CRITICAL"]);
-  const fullAnalysisUrl = buildFullAnalysisUrl(options.webAppUrl, result.token.chainId, result.token.address);
+  const fullAnalysisUrl = buildFullAnalysisUrl(
+    options.webAppUrl,
+    result.token.chainId,
+    result.token.address
+  );
   const devCluster = buildDevClusterSummary(result);
+  const taxes = buildTaxSummary(result);
 
   const summary: TokenSecuritySummaryView = {
     chainId: result.token.chainId,
@@ -492,13 +500,16 @@ export function buildTokenSecuritySummary(
     scannedAt: result.scan.completedAt ?? result.scan.submittedAt,
     product: "Genesis Sentinel",
     risk: result.risk,
-    issueCount: result.findings.filter((finding) => highIssueSeverities.has(finding.severity)).length,
+    issueCount: result.findings.filter((finding) => highIssueSeverities.has(finding.severity))
+      .length,
     devCluster,
+    taxes,
     signals: [
       detectorSignal(context, {
         id: "can_block_wallets",
         label: "Can block wallets",
-        description: "Whether the contract appears able to block specific wallets from transferring or selling.",
+        description:
+          "Whether the contract appears able to block specific wallets from transferring or selling.",
         yesFindings: FINDING_CODES.blacklist,
         detectedChecks: CHECK_CODES.blacklist,
         noChecks: [...CHECK_CODES.blacklist, ...CHECK_CODES.blacklistSourceAbsent]
@@ -506,14 +517,16 @@ export function buildTokenSecuritySummary(
       detectorSignal(context, {
         id: "hidden_owner_controls",
         label: "Hidden owner/admin controls",
-        description: "Whether source analysis found owner recovery, privileged roles, or similar hidden admin control paths.",
+        description:
+          "Whether source analysis found owner recovery, privileged roles, or similar hidden admin control paths.",
         yesFindings: FINDING_CODES.hiddenOwner,
         noChecks: CHECK_CODES.hiddenOwnerAbsent
       }),
       detectorSignal(context, {
         id: "obfuscated_address",
         label: "Hidden or obfuscated addresses",
-        description: "Whether verified source code reconstructs or masks address constants instead of declaring them plainly.",
+        description:
+          "Whether verified source code reconstructs or masks address constants instead of declaring them plainly.",
         yesFindings: FINDING_CODES.obfuscatedAddress,
         detectedChecks: CHECK_CODES.obfuscatedAddress,
         noChecks: CHECK_CODES.obfuscatedAddressAbsent
@@ -526,6 +539,18 @@ export function buildTokenSecuritySummary(
         noChecks: CHECK_CODES.suspiciousAbsent
       }),
       honeypotSignal(result),
+      taxSignal(
+        "buy_tax",
+        "Buy tax",
+        "Measured buy-side token tax from trade simulation.",
+        taxes.buyTaxBps
+      ),
+      taxSignal(
+        "sell_tax",
+        "Sell tax",
+        "Measured sell-side token tax from trade simulation.",
+        taxes.sellTaxBps
+      ),
       detectorSignal(context, {
         id: "proxy_contract",
         label: "Proxy contract",
@@ -553,7 +578,8 @@ export function buildTokenSecuritySummary(
       detectorSignal(context, {
         id: "trading_cooldown",
         label: "Trading cooldown",
-        description: "Whether cooldown, transfer-delay, anti-bot, or anti-snipe controls were detected.",
+        description:
+          "Whether cooldown, transfer-delay, anti-bot, or anti-snipe controls were detected.",
         yesFindings: FINDING_CODES.cooldown,
         detectedChecks: CHECK_CODES.cooldown,
         noChecks: CHECK_CODES.cooldown
@@ -562,7 +588,8 @@ export function buildTokenSecuritySummary(
       detectorSignal(context, {
         id: "has_whitelist",
         label: "Whitelist or exempt wallets",
-        description: "Whether fee, limit, or trading exemptions for selected wallets were detected.",
+        description:
+          "Whether fee, limit, or trading exemptions for selected wallets were detected.",
         yesFindings: FINDING_CODES.whitelist,
         detectedChecks: CHECK_CODES.whitelist,
         noChecks: CHECK_CODES.whitelist
@@ -627,7 +654,9 @@ function detectorSignal(
     };
   }
 
-  const noEvidenceCodes = (input.noChecks ?? []).filter((code) => hasCheck(context, "PASSED", code));
+  const noEvidenceCodes = (input.noChecks ?? []).filter((code) =>
+    hasCheck(context, "PASSED", code)
+  );
   if (noEvidenceCodes.length > 0) {
     return {
       id: input.id,
@@ -666,6 +695,72 @@ function honeypotSignal(result: ScanResultView): SecuritySummarySignal {
     description: "Whether a sell simulation indicates buyers may be unable to sell.",
     evidenceCodes: [simulation.kind, simulation.outcome]
   };
+}
+
+function buildTaxSummary(result: ScanResultView): TaxSummaryView {
+  const buyTaxBps =
+    simulationNumber(result, "BUY", "buyTaxBps") ?? simulationNumber(result, "BUY", "taxBps");
+  const sellTaxBps =
+    simulationNumber(result, "SELL", "sellTaxBps") ?? simulationNumber(result, "SELL", "taxBps");
+
+  return {
+    status: buyTaxBps === null && sellTaxBps === null ? "UNKNOWN" : "AVAILABLE",
+    buyTaxBps,
+    buyTaxPct: bpsToPctNumber(buyTaxBps),
+    sellTaxBps,
+    sellTaxPct: bpsToPctNumber(sellTaxBps),
+    source: "SIMULATION"
+  };
+}
+
+function taxSignal(
+  id: string,
+  label: string,
+  description: string,
+  taxBps: number | null
+): SecuritySummarySignal {
+  if (taxBps === null) {
+    return unknownSignal(id, label, description, "MISSING_DATA");
+  }
+
+  return {
+    id,
+    label,
+    answer: taxBps > 0 ? "YES" : "NO",
+    severity: taxSeverity(taxBps),
+    confidence: "HIGH",
+    source: "SIMULATION",
+    description,
+    evidenceCodes: ["SIMULATION_TAX_BPS"],
+    value: formatTaxPct(taxBps)
+  };
+}
+
+function simulationNumber(
+  result: ScanResultView,
+  kind: SimulationKind,
+  field: string
+): number | null {
+  const run = result.simulations.find((simulation) => simulation.kind === kind);
+  const value = run?.result?.[field];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function bpsToPctNumber(value: number | null): number | null {
+  return value === null ? null : Math.round((value / 100) * 100) / 100;
+}
+
+function formatTaxPct(value: number): string {
+  return `${bpsToPctNumber(value)
+    ?.toFixed(2)
+    .replace(/\.?0+$/u, "")}%`;
+}
+
+function taxSeverity(value: number): SecuritySignalSeverity {
+  if (value >= 2_000) return "HIGH";
+  if (value >= 500) return "WARN";
+  if (value > 0) return "INFO";
+  return "GOOD";
 }
 
 function ownershipSignal(result: ScanResultView): SecuritySummarySignal {
@@ -770,7 +865,8 @@ function devClusterSignal(cluster: DevClusterSummaryView): SecuritySummarySignal
       severity: "GOOD",
       confidence: "MEDIUM",
       source: "DETECTOR",
-      description: "Known supply held by the deployer wallet and wallets linked to it by on-chain evidence.",
+      description:
+        "Known supply held by the deployer wallet and wallets linked to it by on-chain evidence.",
       evidenceCodes: ["WALLET_CLUSTERING_EDGES_ABSENT"]
     };
   }
@@ -785,7 +881,8 @@ function devClusterSignal(cluster: DevClusterSummaryView): SecuritySummarySignal
     severity,
     confidence: cluster.unknownHoldingWalletCount > 0 ? "MEDIUM" : "HIGH",
     source: "DETECTOR",
-    description: "Known supply held by the deployer wallet and wallets linked to it by on-chain evidence.",
+    description:
+      "Known supply held by the deployer wallet and wallets linked to it by on-chain evidence.",
     evidenceCodes: ["WALLET_CLUSTERING_EDGES_FOUND"],
     value:
       knownPct == null
@@ -848,7 +945,9 @@ function buildDevClusterSummary(result: ScanResultView): DevClusterSummaryView {
     const aPct = a.holdingPct ?? -1;
     return bPct - aPct;
   });
-  const knownValues = wallets.flatMap((wallet) => (wallet.holdingPct == null ? [] : [wallet.holdingPct]));
+  const knownValues = wallets.flatMap((wallet) =>
+    wallet.holdingPct == null ? [] : [wallet.holdingPct]
+  );
   const knownHoldingPct =
     knownValues.length > 0 ? knownValues.reduce((total, pct) => total + pct, 0) : null;
 
@@ -1051,7 +1150,9 @@ export function assertRiskScore(score: number): number {
  * web app and the Telegram bot (which reads ScanResultView.liquidity.pools independently) can't
  * drift — this exact bug existed in both surfaces before this function was extracted.
  */
-export function selectPrimaryLiquidityPool(pools: LiquidityPoolView[]): LiquidityPoolView | undefined {
+export function selectPrimaryLiquidityPool(
+  pools: LiquidityPoolView[]
+): LiquidityPoolView | undefined {
   return pools.reduce<LiquidityPoolView | undefined>((best, candidate) => {
     const candidateUsd = candidate.liquidityData?.totalLiquidityUsd;
     if (typeof candidateUsd !== "number") return best;
@@ -1107,8 +1208,9 @@ export function liquidityHealthTier(
 
   const [, , lastBracket] = LIQUIDITY_HEALTH_BRACKETS;
   const bracket =
-    (marketCapUsd != null ? LIQUIDITY_HEALTH_BRACKETS.find((b) => marketCapUsd < b.maxMarketCapUsd) : undefined) ??
-    lastBracket;
+    (marketCapUsd != null
+      ? LIQUIDITY_HEALTH_BRACKETS.find((b) => marketCapUsd < b.maxMarketCapUsd)
+      : undefined) ?? lastBracket;
   if (quoteSidePctOfMarketCap >= bracket.healthyPct) return "healthy";
   if (quoteSidePctOfMarketCap >= bracket.mediumPct) return "medium";
   return "low";

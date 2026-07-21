@@ -412,7 +412,11 @@ describe("api foundation", () => {
   it("requires the admin secret for custom API-key scopes or limits", async () => {
     const { repository } = createInMemoryApiKeyRepository();
     const app = await buildApp({
-      env: loadEnv({ NODE_ENV: "test", LOG_LEVEL: "silent", API_ADMIN_SECRET: "admin-secret-for-tests" }),
+      env: loadEnv({
+        NODE_ENV: "test",
+        LOG_LEVEL: "silent",
+        API_ADMIN_SECRET: "admin-secret-for-tests"
+      }),
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
       scanQueue,
@@ -592,6 +596,13 @@ describe("api foundation", () => {
       knownHoldingPct: null,
       unknownHoldingWalletCount: 0,
       wallets: []
+    });
+    expect(summary.taxes).toMatchObject({
+      status: "UNKNOWN",
+      buyTaxBps: null,
+      buyTaxPct: null,
+      sellTaxBps: null,
+      sellTaxPct: null
     });
     expect(summary.signals).toContainEqual(
       expect.objectContaining({ id: "honeypot", label: "Honeypot", answer: "UNKNOWN" })
