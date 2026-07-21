@@ -40,6 +40,15 @@ export function TradingSimulation({ sim }: { sim: TradeSimulation }) {
         >
           {sim.isHoneypot ? "Honeypot: Yes" : "Honeypot: No"}
         </div>
+      ) : (sim.canBuy || sim.canSell) && sim.evidenceLevel === "route-quote-only" ? (
+        <div className="flex items-start gap-2 rounded-lg border border-border bg-surface-deep px-3.5 py-2.5 text-sm text-muted">
+          <HelpCircle className="mt-0.5 size-4 shrink-0 text-faint" aria-hidden />
+          <span>
+            <span className="font-bold text-foreground">Honeypot: Unknown.</span> Can buy / can sell below only
+            confirm a trade route exists in the pool, not that a real buy or sell went through — no forked trade
+            has run yet, so a honeypot can&rsquo;t be ruled out.
+          </span>
+        </div>
       ) : null}
 
       {visibleResults.length > 0 ? (

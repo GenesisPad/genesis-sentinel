@@ -165,7 +165,7 @@ function TraderSections({ report }: { report: ScanReport }) {
       </Section>
 
       <Section id="holders" title="Holder concentration" subtitle="Excluding pools">
-        <div className="max-w-xl"><HolderConcentration holders={report.holders} /></div>
+        <div className="max-w-xl"><HolderConcentration holders={report.holders} decimals={report.token.decimals} /></div>
       </Section>
 
       <Section id="wallet-cluster" title="Connected wallets" subtitle="Real, evidenced wallet relationships — never inferred from timing coincidence.">
@@ -208,7 +208,7 @@ function TechnicalSections({ report }: { report: ScanReport }) {
       </Section>
 
       <Section id="holders" title="Holder analysis" subtitle="Excluding pools">
-        <div className="max-w-xl"><HolderConcentration holders={report.holders} /></div>
+        <div className="max-w-xl"><HolderConcentration holders={report.holders} decimals={report.token.decimals} /></div>
       </Section>
 
       <Section id="wallet-cluster" title="Connected wallets" subtitle="Real, evidenced wallet relationships — never inferred from timing coincidence.">

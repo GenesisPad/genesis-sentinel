@@ -168,6 +168,10 @@ export interface HolderConcentration extends Record<string, unknown> {
   top20Pct: number;
   top1Address: `0x${string}` | null;
   deployerPct: number | null;
+  /** The deployer's exact current token balance, from the same holder row used for
+   * `deployerPct`. Null only when the deployer address itself is unknown, not when the
+   * balance is zero. */
+  deployerBalanceRaw: string | null;
   ownerPct: number | null;
   liquidityPoolPct: number;
   burnedPct: number;

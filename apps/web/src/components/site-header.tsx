@@ -1,4 +1,7 @@
+"use client";
 import Link from "next/link";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { Menu, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const NAV = [
@@ -32,8 +35,63 @@ export function SiteHeader() {
         <Button variant="secondary" size="sm" className="hidden sm:inline-flex">
           Sign In
         </Button>
-        <Button size="sm">Sign Up</Button>
+        <Button size="sm" className="hidden sm:inline-flex">
+          Sign Up
+        </Button>
+        <MobileNav />
       </div>
     </header>
+  );
+}
+
+function MobileNav() {
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type="button"
+          aria-label="Open menu"
+          className="group flex size-11 shrink-0 items-center justify-center rounded-xl border border-border-strong bg-surface text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 md:hidden"
+        >
+          <Menu className="size-5 group-data-[state=open]:hidden" aria-hidden />
+          <X className="hidden size-5 group-data-[state=open]:block" aria-hidden />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align="end"
+          sideOffset={10}
+          className="z-40 w-56 rounded-xl border border-border-strong bg-surface-deep p-1.5 shadow-xl"
+        >
+          {NAV.map((n) => (
+            <DropdownMenu.Item key={n.href} asChild>
+              <Link
+                href={n.href}
+                className="flex cursor-pointer items-center rounded-lg px-3 py-2.5 text-sm font-semibold text-foreground outline-none data-[highlighted]:bg-[#161a12]"
+              >
+                {n.label}
+              </Link>
+            </DropdownMenu.Item>
+          ))}
+          <DropdownMenu.Separator className="my-1.5 h-px bg-border" />
+          <DropdownMenu.Item asChild>
+            <button
+              type="button"
+              className="flex w-full cursor-pointer items-center rounded-lg px-3 py-2.5 text-left text-sm font-semibold text-secondary outline-none data-[highlighted]:bg-[#161a12]"
+            >
+              Sign In
+            </button>
+          </DropdownMenu.Item>
+          <DropdownMenu.Item asChild>
+            <button
+              type="button"
+              className="flex w-full cursor-pointer items-center rounded-lg px-3 py-2.5 text-left text-sm font-bold text-primary outline-none data-[highlighted]:bg-[#161a12]"
+            >
+              Sign Up
+            </button>
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }

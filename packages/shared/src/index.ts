@@ -403,6 +403,11 @@ export interface DevClusterSummaryView {
   wallets: DevClusterWalletView[];
 }
 
+export interface DeployerBalanceView {
+  amountRaw: string | null;
+  pctOfSupply: number | null;
+}
+
 export interface TaxSummaryView {
   status: "AVAILABLE" | "UNKNOWN";
   buyTaxBps: number | null;
@@ -423,6 +428,7 @@ export interface TokenSecuritySummaryView {
   issueCount: number;
   fullAnalysisUrl?: string;
   devCluster: DevClusterSummaryView;
+  deployerBalance: DeployerBalanceView | null;
   taxes: TaxSummaryView;
   signals: SecuritySummarySignal[];
 }
@@ -490,6 +496,7 @@ export function buildTokenSecuritySummary(
     result.token.address
   );
   const devCluster = buildDevClusterSummary(result);
+  const deployerBalance = buildDeployerBalance(result);
   const taxes = buildTaxSummary(result);
 
   const summary: TokenSecuritySummaryView = {
@@ -503,6 +510,7 @@ export function buildTokenSecuritySummary(
     issueCount: result.findings.filter((finding) => highIssueSeverities.has(finding.severity))
       .length,
     devCluster,
+    deployerBalance,
     taxes,
     signals: [
       detectorSignal(context, {
@@ -956,6 +964,22 @@ function buildDevClusterSummary(result: ScanResultView): DevClusterSummaryView {
     knownHoldingPct,
     unknownHoldingWalletCount: wallets.filter((wallet) => wallet.holdingPct == null).length,
     wallets
+  };
+}
+
+function buildDeployerBalance(result: ScanResultView): DeployerBalanceView | null {
+  const deployerAddress = result.token.deployerAddress;
+  if (!deployerAddress) return null;
+
+  const snapshot = result.holders.snapshots[0];
+  const concentration = snapshot?.concentration as
+    | { deployerPct?: number | null; deployerBalanceRaw?: string | null }
+    | undefined;
+  if (!concentration) return null;
+
+  return {
+    amountRaw: typeof concentration.deployerBalanceRaw === "string" ? concentration.deployerBalanceRaw : null,
+    pctOfSupply: typeof concentration.deployerPct === "number" ? concentration.deployerPct : null
   };
 }
 

@@ -2,7 +2,7 @@
 import { AlertTriangle, ShieldAlert } from "lucide-react";
 import type { Finding } from "@/lib/types";
 import { SEVERITY_STYLES } from "@/lib/risk";
-import { shortAddress } from "@/lib/utils";
+import { cn, shortAddress } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import {
   Accordion,
@@ -34,7 +34,7 @@ export function FindingCard({ finding, showEvidence }: { finding: Finding; showE
             </span>
           </AccordionTrigger>
           <AccordionContent className="border-t border-border px-4 pb-5 pl-[52px]">
-            <dl className="grid grid-cols-1 gap-x-7 gap-y-4 pt-4 sm:grid-cols-2">
+            <dl className="grid min-w-0 grid-cols-1 gap-x-7 gap-y-4 pt-4 sm:grid-cols-2">
               <Field label="Why this matters" full>
                 {finding.detail}
               </Field>
@@ -64,13 +64,13 @@ export function FindingCard({ finding, showEvidence }: { finding: Finding; showE
                 </Field>
               ) : null}
               {finding.recommendation ? (
-                <div className="sm:col-span-2 rounded-lg border border-border bg-surface p-3">
+                <div className="min-w-0 rounded-lg border border-border bg-surface p-3 sm:col-span-2">
                   <dt className="mb-1 text-[11px] font-bold uppercase tracking-wider text-muted">Recommendation</dt>
                   <dd className="text-sm leading-relaxed text-secondary">{finding.recommendation}</dd>
                 </div>
               ) : null}
               {showEvidence && finding.evidence ? (
-                <div className="sm:col-span-2">
+                <div className="min-w-0 sm:col-span-2">
                   <dt className="mb-1.5 text-[11px] font-bold uppercase tracking-wider text-muted">
                     Evidence · Detector {finding.detectorId} {finding.detectorVersion}
                   </dt>
@@ -99,9 +99,11 @@ function Field({
   mono?: boolean;
 }) {
   return (
-    <div className={full ? "sm:col-span-2" : undefined}>
+    <div className={cn("min-w-0", full ? "sm:col-span-2" : undefined)}>
       <dt className="mb-1 text-[11px] font-bold uppercase tracking-wider text-muted">{label}</dt>
-      <dd className={mono ? "font-mono text-sm text-secondary" : "text-sm leading-relaxed text-secondary"}>{children}</dd>
+      <dd className={cn(mono ? "font-mono text-sm text-secondary" : "text-sm leading-relaxed text-secondary", "break-words")}>
+        {children}
+      </dd>
     </div>
   );
 }

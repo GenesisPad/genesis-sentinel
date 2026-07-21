@@ -113,7 +113,7 @@ export function ResultSummary({ report, onFresh, freshBusy = false }: { report: 
               <h3 className="mb-3.5 font-display text-base font-semibold">
                 Holder concentration <span className="text-xs font-normal text-faint">(excluding pools)</span>
               </h3>
-              <HolderConcentration holders={report.holders} />
+              <HolderConcentration holders={report.holders} decimals={report.token.decimals} />
             </CardContent>
           </Card>
         </div>

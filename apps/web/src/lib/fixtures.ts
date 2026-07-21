@@ -162,6 +162,7 @@ export function buildFixtureReport(chainId: ChainId, address: string): ScanRepor
       maxSellTaxBps: 10000,
       maxWalletBps: 200,
       isHoneypot: false,
+      evidenceLevel: "forked",
       canBuy: true,
       canSell: true,
       results: [

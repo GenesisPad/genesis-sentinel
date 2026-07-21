@@ -83,6 +83,10 @@ export interface TradeSimulation {
   canBuy: boolean | null;
   /** True only once a real sell simulation has succeeded — never assumed. */
   canSell: boolean | null;
+  /** "forked" = a real buy/sell was executed on a chain snapshot (strong evidence).
+   * "route-quote-only" = canBuy/canSell reflect pool-reserve math only, not an executed trade —
+   * this is why isHoneypot can stay null even when both read Yes. */
+  evidenceLevel: "forked" | "route-quote-only" | "unavailable";
   results: Array<{
     label: string;
     status: "passed" | "failed" | "inconclusive";
@@ -115,6 +119,8 @@ export interface HolderInfo {
   devClusterPct?: number | null;
   devClusterWalletCount?: number;
   devClusterUnknownHoldingWalletCount?: number;
+  /** Deployer's current token balance: exact amount plus percentage of total supply. */
+  deployerBalance?: { amountRaw: string; pct: number | null };
 }
 
 export type WalletClusterEdgeType =

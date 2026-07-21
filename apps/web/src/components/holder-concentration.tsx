@@ -1,6 +1,6 @@
 import type { HolderInfo } from "@/lib/types";
 
-export function HolderConcentration({ holders }: { holders: HolderInfo }) {
+export function HolderConcentration({ holders, decimals }: { holders: HolderInfo; decimals?: number | null }) {
   const rows = [
     { label: "Top 1 holder", pct: holders.top1Pct, grad: "linear-gradient(90deg,#8a5a2b,#c07a2e)" },
     { label: "Top 5 holders", pct: holders.top5Pct, grad: "linear-gradient(90deg,#c07a2e,#f5a623)" },
@@ -12,6 +12,19 @@ export function HolderConcentration({ holders }: { holders: HolderInfo }) {
         <div className="flex items-center justify-between rounded-lg border border-border bg-surface-deep px-3.5 py-2.5 text-sm">
           <span className="font-semibold text-secondary">Known holders</span>
           <span className="font-bold text-foreground">{holders.holderCount.toLocaleString()}</span>
+        </div>
+      ) : null}
+      {holders.deployerBalance ? (
+        <div className="flex items-center justify-between rounded-lg border border-border bg-surface-deep px-3.5 py-2.5 text-sm">
+          <span className="font-semibold text-secondary">Deployer balance</span>
+          <span className="text-right">
+            <span className="block font-mono font-bold text-foreground">
+              {formatTokenAmount(holders.deployerBalance.amountRaw, decimals)}
+            </span>
+            {holders.deployerBalance.pct != null ? (
+              <span className="block text-xs text-muted">{holders.deployerBalance.pct.toFixed(2)}% of supply</span>
+            ) : null}
+          </span>
         </div>
       ) : null}
       {holders.devClusterWalletCount !== undefined && holders.devClusterWalletCount > 0 ? (
@@ -59,4 +72,18 @@ export function HolderConcentration({ holders }: { holders: HolderInfo }) {
       ) : null}
     </div>
   );
+}
+
+function formatTokenAmount(amountRaw: string, decimals?: number | null): string {
+  let value: number;
+  try {
+    value = Number(BigInt(amountRaw)) / 10 ** (decimals ?? 0);
+  } catch {
+    return amountRaw;
+  }
+  if (!Number.isFinite(value)) return amountRaw;
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(2)}K`;
+  return value.toLocaleString("en-US", { maximumFractionDigits: 2 });
 }

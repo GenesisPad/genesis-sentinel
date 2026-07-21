@@ -20,7 +20,7 @@ export function ChainSelector() {
         <button
           type="button"
           aria-label="Select chain"
-          className="flex h-full items-center gap-2 whitespace-nowrap rounded-xl border border-border-strong bg-surface px-4 text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+          className="flex h-11 w-full items-center gap-2 whitespace-nowrap rounded-xl border border-border-strong bg-surface px-4 text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 sm:h-full sm:w-auto"
         >
           <span className="size-2 rounded-full" style={{ backgroundColor: active.color }} aria-hidden />
           {active.label}

@@ -376,10 +376,11 @@ async function discoverBlockscoutHolderConcentration(
     const sum = enrichedRows.slice(0, n).reduce((acc, row) => acc + BigInt(row.balanceRaw), 0n);
     return Number((sum * 10_000n) / total) / 100;
   };
-  const deployerPct = normalizedDeployer
-    ? (enrichedRows.find((row) => row.address.toLowerCase() === normalizedDeployer)
-        ?.totalSupplyPct ?? 0)
-    : null;
+  const deployerRow = normalizedDeployer
+    ? enrichedRows.find((row) => row.address.toLowerCase() === normalizedDeployer)
+    : undefined;
+  const deployerPct = normalizedDeployer ? (deployerRow?.totalSupplyPct ?? 0) : null;
+  const deployerBalanceRaw = deployerRow?.balanceRaw ?? (normalizedDeployer ? "0" : null);
   const ownerPct = normalizedOwner
     ? (enrichedRows.find((row) => row.address.toLowerCase() === normalizedOwner)?.totalSupplyPct ??
       0)
@@ -409,6 +410,7 @@ async function discoverBlockscoutHolderConcentration(
     top20Pct,
     top1Address: distributionRows[0]?.address ?? null,
     deployerPct,
+    deployerBalanceRaw,
     ownerPct,
     liquidityPoolPct,
     burnedPct,

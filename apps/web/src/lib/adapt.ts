@@ -215,6 +215,7 @@ function mapSimulations(view: ScanResultView["simulations"]): TradeSimulation {
     isHoneypot,
     canBuy: mapSimulationCapability(buy?.outcome),
     canSell: mapSimulationCapability(sell?.outcome),
+    evidenceLevel: simulationEvidenceLevel(buy, sell),
     buyTaxBps: numberFromResult(buy?.result, "buyTaxBps"),
     sellTaxBps: numberFromResult(sell?.result, "sellTaxBps"),
     transferTaxBps: numberFromResult(transfer?.result, "transferTaxBps"),
@@ -230,6 +231,19 @@ function mapSimulationCapability(outcome: CheckOutcome | undefined): boolean | n
   if (outcome === "PASSED") return true;
   if (outcome === "DETECTED" || outcome === "FAILED") return false;
   return null;
+}
+
+/** The worker tags every simulation's `input.simulationTool` with a "...-route-quote" suffix
+ * (V2 or V3) when no forked buy/sell ran — see apps/worker scan-worker.ts `common.simulationTool`.
+ * Reading it back here is how the UI knows canBuy/canSell reflect pool math rather than an
+ * executed trade, without duplicating worker constants. */
+function simulationEvidenceLevel(
+  buy: ScanResultView["simulations"][number] | undefined,
+  sell: ScanResultView["simulations"][number] | undefined
+): TradeSimulation["evidenceLevel"] {
+  const tool = (buy?.input?.simulationTool ?? sell?.input?.simulationTool) as string | undefined;
+  if (!tool) return "unavailable";
+  return tool.includes("route-quote") ? "route-quote-only" : "forked";
 }
 
 // Only Uniswap V2 pools discovered against wrapped native ETH on Robinhood Chain are
@@ -278,7 +292,14 @@ function mapHolders(view: ScanResultView, devCluster: DevClusterInfo): HolderInf
   const holderView = view.holders;
   const snapshot = holderView.snapshots[0];
   const concentration = snapshot?.concentration as
-    { top1Pct?: number; top5Pct?: number; top10Pct?: number } | undefined;
+    | {
+        top1Pct?: number;
+        top5Pct?: number;
+        top10Pct?: number;
+        deployerPct?: number | null;
+        deployerBalanceRaw?: string | null;
+      }
+    | undefined;
   const topHolders = snapshot?.topHolders as { holders?: unknown[] } | undefined;
   const clusteredWithDeployer = Array.isArray(topHolders?.holders)
     ? topHolders.holders.filter(
@@ -298,7 +319,10 @@ function mapHolders(view: ScanResultView, devCluster: DevClusterInfo): HolderInf
     ...(clusteredWithDeployer ? { clusteredWithDeployer } : {}),
     devClusterPct: devCluster.knownHoldingPct,
     devClusterWalletCount: devCluster.walletCount,
-    devClusterUnknownHoldingWalletCount: devCluster.unknownHoldingWalletCount
+    devClusterUnknownHoldingWalletCount: devCluster.unknownHoldingWalletCount,
+    ...(concentration?.deployerBalanceRaw != null
+      ? { deployerBalance: { amountRaw: concentration.deployerBalanceRaw, pct: concentration.deployerPct ?? null } }
+      : {})
   };
 }
 
