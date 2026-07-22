@@ -331,7 +331,7 @@ export function DeveloperDocs() {
 
   return (
     <main className="mx-auto max-w-[1360px] px-5 pb-16 pt-8 sm:px-7">
-      <section className="grid gap-8 border-b border-border pb-9 lg:grid-cols-[minmax(0,1fr)_360px]">
+      <section className="grid min-w-0 gap-8 border-b border-border pb-9 [&>*]:min-w-0 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div>
           <div className="inline-flex items-center gap-2 rounded-lg border border-primary/25 bg-primary/10 px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-primary">
             <ShieldCheck className="size-3.5" aria-hidden />
@@ -382,7 +382,7 @@ export function DeveloperDocs() {
         </div>
       </section>
 
-      <section className="grid gap-6 border-b border-border py-9 lg:grid-cols-4">
+      <section className="grid min-w-0 gap-6 border-b border-border py-9 [&>*]:min-w-0 lg:grid-cols-4">
         <GuideStep
           icon={FileJson}
           title="1. Read summary"
@@ -405,7 +405,7 @@ export function DeveloperDocs() {
         />
       </section>
 
-      <section className="grid gap-6 border-b border-border py-9 lg:grid-cols-[minmax(0,1fr)_380px]">
+      <section className="grid min-w-0 gap-6 border-b border-border py-9 [&>*]:min-w-0 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div>
           <h2 className="font-display text-2xl font-bold">Recommended Partner Setup</h2>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-muted">
@@ -442,9 +442,9 @@ export function DeveloperDocs() {
 
       <section
         id="endpoint-explorer"
-        className="grid gap-7 py-9 lg:grid-cols-[320px_minmax(0,1fr)]"
+        className="grid min-w-0 gap-7 py-9 [&>*]:min-w-0 lg:grid-cols-[320px_minmax(0,1fr)]"
       >
-        <aside className="lg:sticky lg:top-5 lg:self-start">
+        <aside className="lg:sticky lg:top-24 lg:self-start">
           <h2 className="font-display text-2xl font-bold">Endpoint Explorer</h2>
           <p className="mt-2 text-sm leading-6 text-muted">
             Pick an endpoint to see when to use it, auth rules, cURL, and response shape.
@@ -514,7 +514,7 @@ export function DeveloperDocs() {
         </div>
       </section>
 
-      <section className="grid gap-6 border-t border-border pt-9 lg:grid-cols-[minmax(0,1fr)_360px]">
+      <section className="grid min-w-0 gap-6 border-t border-border pt-9 [&>*]:min-w-0 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div>
           <h2 className="font-display text-2xl font-bold">Security Summary Signals</h2>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-muted">

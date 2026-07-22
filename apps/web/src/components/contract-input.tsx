@@ -105,11 +105,11 @@ export function ContractInput({
       </label>
       <div
         className={cn(
-          "flex items-stretch gap-2.5 rounded-2xl border bg-surface-deep p-2 transition-[border-color,box-shadow] duration-150",
+          "flex flex-col items-stretch gap-2.5 rounded-2xl border bg-surface-deep p-2 transition-[border-color,box-shadow] duration-150 sm:flex-row",
           border,
         )}
       >
-        <div className="flex min-w-0 flex-1 items-center gap-3 px-3">
+        <div className="flex min-h-12 min-w-0 flex-1 items-center gap-3 px-3">
           <LeadingIcon state={state} />
           <Input
             id="contract-input"
@@ -139,7 +139,7 @@ export function ContractInput({
         <div className="hidden shrink-0 sm:block">
           <ChainSelector />
         </div>
-        <Button onClick={submit} disabled={busy} className="shrink-0 px-6" size="lg">
+        <Button onClick={submit} disabled={busy} className="w-full shrink-0 px-6 sm:w-auto" size="lg">
           <Search className="size-[18px]" aria-hidden />
           {busy ? "Scanning…" : "Scan Token"}
         </Button>

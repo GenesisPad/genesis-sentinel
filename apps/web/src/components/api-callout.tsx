@@ -25,10 +25,10 @@ export function ApiCallout() {
           ))}
         </ul>
         <Link
-          href="/api"
+          href="/docs"
           className="inline-flex items-center gap-2 rounded-xl border border-border-strong bg-surface px-5 py-3 text-sm font-bold transition-colors hover:border-muted"
         >
-          View API Documentation <ArrowRight className="size-4" aria-hidden />
+          View Developer Docs <ArrowRight className="size-4" aria-hidden />
         </Link>
       </div>
     </section>

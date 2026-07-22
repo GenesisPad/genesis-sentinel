@@ -1,11 +1,5 @@
-import { DeveloperDocs } from "@/components/developer-docs";
-
-export const metadata = {
-  title: "API Documentation",
-  description:
-    "Genesis Sentinel API documentation for token security summaries, scan lifecycle, risk snapshots, holder data, and partner integrations."
-};
+import { redirect } from "next/navigation";
 
 export default function ApiPage() {
-  return <DeveloperDocs />;
+  redirect("/docs");
 }

@@ -5,7 +5,6 @@ import { isSupportedChain, CHAINS } from "@/lib/chains";
 import { normalizeAddress } from "@/lib/validate";
 import { riskFromScore } from "@/lib/risk";
 import { TokenReportView } from "@/components/token-report-view";
-import { SiteFooter } from "@/components/site-footer";
 import type { ScanReport } from "@/lib/types";
 import { shortAddress } from "@/lib/utils";
 
@@ -61,7 +60,6 @@ export default async function TokenPage({ params }: Params) {
   return (
     <>
       <TokenReportView chainId={report.token.chainId} address={report.token.address} initialData={report} />
-      <SiteFooter />
     </>
   );
 }

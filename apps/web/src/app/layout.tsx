@@ -3,6 +3,7 @@ import { JetBrains_Mono, Manrope, Space_Grotesk } from "next/font/google";
 import { Providers } from "./providers";
 import { SiteHeader } from "@/components/site-header";
 import { AnalyticsVisitTracker } from "@/components/analytics-visit-tracker";
+import { SiteFooter } from "@/components/site-footer";
 import "./globals.css";
 
 const manrope = Manrope({ subsets: ["latin"], variable: "--font-manrope", display: "swap" });
@@ -37,14 +38,15 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${manrope.variable} ${spaceGrotesk.variable} ${jetbrainsMono.variable}`}>
-      <body>
-        <a href="#main" className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-primary focus:px-4 focus:py-2 focus:text-primary-foreground">
+      <body className="flex min-h-screen flex-col">
+        <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[70] focus:rounded-lg focus:bg-primary focus:px-4 focus:py-2 focus:text-primary-foreground">
           Skip to content
         </a>
         <Providers>
           <AnalyticsVisitTracker />
           <SiteHeader />
-          <div id="main">{children}</div>
+          <div id="main" className="flex-1">{children}</div>
+          <SiteFooter />
         </Providers>
       </body>
     </html>
