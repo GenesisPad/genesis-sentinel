@@ -16,6 +16,7 @@ import {
   poolReserveIntegrityDetector,
   ownershipRolesAbiDetector,
   ownershipStatusDetector,
+  roleMembershipDetector,
   runFoundationDetectors,
   scoreFindings,
   selectorPatternDetectors,
@@ -1049,6 +1050,70 @@ describe("ownership/roles ABI detector", () => {
 
     expect(result.findings).toEqual([]);
     expect(result.checks[0]).toMatchObject({ code: "OWNERSHIP_ROLE_ABI_ABSENT", outcome: "PASSED" });
+  });
+});
+
+describe("role membership detector", () => {
+  it("reports unverifiable when the contract does not support role enumeration", async () => {
+    const result = await roleMembershipDetector.run(
+      { supportsEnumeration: false, roleHolderCounts: {} },
+      context
+    );
+
+    expect(result.findings).toEqual([]);
+    expect(result.checks[0]).toMatchObject({
+      code: "ROLE_MEMBERSHIP_UNVERIFIABLE",
+      outcome: "DATA_UNAVAILABLE"
+    });
+  });
+
+  it("confirms no privileged role is held when every checked count reads zero", async () => {
+    const result = await roleMembershipDetector.run(
+      {
+        supportsEnumeration: true,
+        roleHolderCounts: { DEFAULT_ADMIN_ROLE: 0, MINTER_ROLE: 0 }
+      },
+      context
+    );
+
+    expect(result.findings[0]).toMatchObject({
+      code: "ACCESS_CONTROL_ROLES_UNHELD",
+      severity: "INFO",
+      confidence: "HIGH"
+    });
+  });
+
+  it("flags a live-confirmed active role holder at high severity", async () => {
+    const result = await roleMembershipDetector.run(
+      {
+        supportsEnumeration: true,
+        roleHolderCounts: { DEFAULT_ADMIN_ROLE: 1, MINTER_ROLE: 0 }
+      },
+      context
+    );
+
+    expect(result.findings[0]).toMatchObject({
+      code: "ACCESS_CONTROL_ROLE_HELD",
+      severity: "HIGH",
+      confidence: "HIGH"
+    });
+    expect(result.findings[0]?.description).toContain("DEFAULT_ADMIN_ROLE (1 holder)");
+  });
+
+  it("stays silent rather than guessing when every enumerable read failed", async () => {
+    const result = await roleMembershipDetector.run(
+      {
+        supportsEnumeration: true,
+        roleHolderCounts: { DEFAULT_ADMIN_ROLE: null }
+      },
+      context
+    );
+
+    expect(result.findings).toEqual([]);
+    expect(result.checks[0]).toMatchObject({
+      code: "ROLE_MEMBERSHIP_UNVERIFIABLE",
+      outcome: "DATA_UNAVAILABLE"
+    });
   });
 });
 

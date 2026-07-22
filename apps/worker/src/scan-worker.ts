@@ -20,6 +20,7 @@ import type {
   SimulationResult
 } from "@genesis-sentinel/security-engine";
 import {
+  abiFunctionNames,
   createUnsupportedHolderAnalysis,
   createUnsupportedLiquidityDiscovery,
   createUnsupportedTradeSimulations,
@@ -30,6 +31,7 @@ import {
   liveTradingStateDetector,
   ownershipRolesAbiDetector,
   poolReserveIntegrityDetector,
+  roleMembershipDetector,
   runFoundationDetectors,
   scoreFindings,
   sourceCodeRiskDetector,
@@ -86,6 +88,56 @@ async function readBoolCandidate(
     }
   }
   return null;
+}
+
+const roleMemberCountAbi = parseAbi(["function getRoleMemberCount(bytes32 role) view returns (uint256)"]);
+const wellKnownAccessControlRoleNames = ["DEFAULT_ADMIN_ROLE", "MINTER_ROLE", "PAUSER_ROLE"];
+
+/**
+ * Reads live getRoleMemberCount() results for each well-known AccessControl role whose bytes32
+ * id getter is present in the ABI — but only when the contract also implements
+ * AccessControlEnumerable (getRoleMemberCount itself present). Without enumeration, the only
+ * alternative is hasRole(role, candidateAddress) against guessed addresses, which can find a
+ * match by luck but can never prove absence — so unenumerable contracts are left unverifiable
+ * here rather than clearing a finding on a check that couldn't actually rule anything out.
+ */
+async function readRoleMembership(
+  adapter: ChainAdapter,
+  address: `0x${string}`,
+  abi: unknown,
+  blockNumber: bigint
+): Promise<{ supportsEnumeration: boolean; roleHolderCounts: Record<string, number | null> }> {
+  const functionNames = abiFunctionNames(abi);
+  const supportsEnumeration = functionNames.has("getRoleMemberCount");
+  if (!supportsEnumeration) {
+    return { supportsEnumeration: false, roleHolderCounts: {} };
+  }
+
+  const roleHolderCounts: Record<string, number | null> = {};
+  for (const roleName of wellKnownAccessControlRoleNames) {
+    if (!functionNames.has(roleName)) continue;
+    try {
+      const roleGetterAbi = parseAbi([`function ${roleName}() view returns (bytes32)`]);
+      const roleId = await adapter.readContract<`0x${string}`>({
+        address,
+        abi: roleGetterAbi,
+        functionName: roleName,
+        blockNumber
+      });
+      const count = await adapter.readContract<bigint>({
+        address,
+        abi: roleMemberCountAbi,
+        functionName: "getRoleMemberCount",
+        args: [roleId],
+        blockNumber
+      });
+      roleHolderCounts[roleName] = typeof count === "bigint" ? Number(count) : null;
+    } catch {
+      roleHolderCounts[roleName] = null;
+    }
+  }
+
+  return { supportsEnumeration, roleHolderCounts };
 }
 
 function createHolderConcentrationDetectorResult(input: {
@@ -1287,6 +1339,10 @@ export async function processScanJob(
       sourceProfile,
       detectorRunContext
     );
+    const roleMembershipResult = await roleMembershipDetector.run(
+      await readRoleMembership(adapter, target.address, sourceProfile.abi, blockNumber),
+      detectorRunContext
+    );
     const liveTradingStateResult = await liveTradingStateDetector.run(
       {
         readPausedState: () => readBoolCandidate(adapter, target.address, ["paused"], blockNumber),
@@ -1415,6 +1471,7 @@ export async function processScanJob(
     detectorResults.push(
       sourceDetectorResult,
       ownershipRolesResult,
+      roleMembershipResult,
       liveTradingStateResult,
       genesispadLaunchResult,
       deployerHistoryResult,

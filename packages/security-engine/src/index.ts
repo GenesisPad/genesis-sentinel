@@ -1210,7 +1210,7 @@ export const sourceCodeRiskDetector: SecurityDetector<ContractSourceDetectorInpu
   }
 };
 
-function abiFunctionNames(abi: unknown): Set<string> {
+export function abiFunctionNames(abi: unknown): Set<string> {
   if (!Array.isArray(abi)) {
     return new Set();
   }
@@ -1331,6 +1331,138 @@ export const ownershipRolesAbiDetector: SecurityDetector<ContractSourceDetectorI
         }
       ],
       findings
+    };
+  }
+};
+
+export interface RoleMembershipDetectorInput {
+  /**
+   * True when the contract implements AccessControlEnumerable (`getRoleMemberCount` is present
+   * in the ABI). Without it, only `hasRole(role, candidateAddress)` checks against specific
+   * guessed addresses are possible — not holding a role by chance-picked candidates is not proof
+   * no one else holds it, so enumeration is required to prove anything either way.
+   */
+  supportsEnumeration: boolean;
+  /**
+   * Live `getRoleMemberCount()` result per declared role name (e.g. "DEFAULT_ADMIN_ROLE",
+   * "MINTER_ROLE", "PAUSER_ROLE") that was actually checkable, or null if that specific read
+   * failed. Only present when `supportsEnumeration` is true.
+   */
+  roleHolderCounts: Record<string, number | null>;
+}
+
+/**
+ * Corroborates or contradicts `ACCESS_CONTROL_ROLE_SURFACE` (which only proves the ABI shape
+ * exists, not that anyone holds it) by reading live `getRoleMemberCount()` results, the same way
+ * `ownershipStatusDetector` reads `owner()` live instead of just detecting the function exists.
+ * Only produces a finding when enumeration actually proved an answer — an unreadable or
+ * non-enumerable contract stays silent here rather than guessing.
+ */
+export const roleMembershipDetector: SecurityDetector<RoleMembershipDetectorInput> = {
+  metadata: {
+    id: "role-membership",
+    version: detectorVersion,
+    name: "AccessControl role membership",
+    description:
+      "Reads live getRoleMemberCount() results via AccessControlEnumerable to confirm whether a declared privileged role is actually held by anyone."
+  },
+
+  async run(input, context) {
+    await Promise.resolve();
+    const evidence: FindingEvidence = {
+      type: "FUNCTION",
+      summary: "getRoleMemberCount() read results per declared role",
+      address: context.address,
+      data: {
+        supportsEnumeration: input.supportsEnumeration,
+        roleHolderCounts: input.roleHolderCounts
+      }
+    };
+    if (context.blockNumber !== undefined) {
+      evidence.blockNumber = context.blockNumber;
+    }
+
+    const readableCounts = Object.entries(input.roleHolderCounts).filter(
+      (entry): entry is [string, number] => entry[1] !== null
+    );
+
+    if (!input.supportsEnumeration || readableCounts.length === 0) {
+      return {
+        detector: this.metadata,
+        checks: [
+          {
+            code: "ROLE_MEMBERSHIP_UNVERIFIABLE",
+            outcome: "DATA_UNAVAILABLE",
+            confidence: "LOW",
+            evidence: [evidence]
+          }
+        ],
+        findings: []
+      };
+    }
+
+    const heldRoles = readableCounts.filter(([, count]) => count > 0);
+
+    if (heldRoles.length === 0) {
+      return {
+        detector: this.metadata,
+        checks: [
+          {
+            code: "ROLE_MEMBERSHIP_EMPTY",
+            outcome: "PASSED",
+            confidence: "HIGH",
+            evidence: [evidence]
+          }
+        ],
+        findings: [
+          createFinding({
+            code: "ACCESS_CONTROL_ROLES_UNHELD",
+            detector: this.metadata,
+            title: "Declared privileged roles are currently held by no one",
+            severity: "INFO",
+            category: "CONTRACT_CONTROL",
+            confidence: "HIGH",
+            description: `getRoleMemberCount() returned 0 for every declared role checked (${readableCounts
+              .map(([name]) => name)
+              .join(", ")}), read live via AccessControlEnumerable at the scan block.`,
+            technicalExplanation:
+              "The contract implements AccessControlEnumerable, which allows every role's holder count to be enumerated directly on-chain rather than inferred from ABI presence alone. A zero count for every checked role is direct proof no address currently holds them.",
+            evidence: [evidence],
+            recommendation:
+              "This can change at any time if the role is later granted to an address — a renounced or empty role today does not guarantee it stays that way."
+          })
+        ]
+      };
+    }
+
+    return {
+      detector: this.metadata,
+      checks: [
+        {
+          code: "ROLE_MEMBERSHIP_ACTIVE",
+          outcome: "DETECTED",
+          confidence: "HIGH",
+          evidence: [evidence]
+        }
+      ],
+      findings: [
+        createFinding({
+          code: "ACCESS_CONTROL_ROLE_HELD",
+          detector: this.metadata,
+          title: "A declared privileged role is actively held",
+          severity: "HIGH",
+          category: "CONTRACT_CONTROL",
+          confidence: "HIGH",
+          description: `getRoleMemberCount() confirmed at least one address currently holds: ${heldRoles
+            .map(([name, count]) => `${name} (${count} holder${count === 1 ? "" : "s"})`)
+            .join(", ")}.`,
+          technicalExplanation:
+            "Role holder counts were read live via AccessControlEnumerable's getRoleMemberCount() at the scan block, not inferred from ABI presence alone.",
+          evidence: [evidence],
+          recommendation:
+            "Identify the specific holder addresses for each held role and confirm whether that privileged control is acceptable."
+        })
+      ]
     };
   }
 };
