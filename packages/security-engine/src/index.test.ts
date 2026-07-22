@@ -902,6 +902,143 @@ describe("source-code risk detector", () => {
     ).toMatchObject({ severity: "HIGH" });
   });
 
+  it("narrows but does not clear a tax setter that enforces an upper bound", async () => {
+    // A capped setter is still a live, owner-controlled control surface — just bounded rather
+    // than unbounded — so this must stay at MEDIUM with an added explanatory note, never fully
+    // clear to INFO the way a provably-inert surface can.
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [
+          {
+            filename: "CappedTax.sol",
+            sourceCode: `
+              contract CappedTax {
+                function setBuyTax(uint256 newTax) external onlyOwner {
+                  require(newTax <= 500, "tax too high");
+                  buyTax = newTax;
+                }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    const finding = result.findings.find((f) => f.code === "SOURCE_TAX_OR_LIMIT_CONTROL");
+    expect(finding).toMatchObject({ severity: "MEDIUM" });
+    expect(finding?.technicalExplanation).toContain("upper bound");
+    expect(finding?.technicalExplanation).toContain("newTax");
+    expect(finding?.technicalExplanation).not.toContain("Verified benign");
+  });
+
+  it("does not narrow a tax setter with no enforced bound", async () => {
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [
+          {
+            filename: "UnboundedTax.sol",
+            sourceCode: `
+              contract UnboundedTax {
+                function setBuyTax(uint256 newTax) external onlyOwner {
+                  buyTax = newTax;
+                }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    const finding = result.findings.find((f) => f.code === "SOURCE_TAX_OR_LIMIT_CONTROL");
+    expect(finding).toMatchObject({ severity: "MEDIUM" });
+    expect(finding?.technicalExplanation).not.toContain("upper bound");
+  });
+
+  it("downgrades a trading toggle that can never be set back to false", async () => {
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [
+          {
+            filename: "OneWayTrading.sol",
+            sourceCode: `
+              contract OneWayTrading {
+                bool public tradingOpen;
+                function enableTrading() external onlyOwner {
+                  tradingOpen = true;
+                }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    const finding = result.findings.find((f) => f.code === "SOURCE_TRADING_TOGGLE");
+    expect(finding).toMatchObject({ severity: "INFO" });
+    expect(finding?.technicalExplanation).toContain("Verified benign");
+  });
+
+  it("does not downgrade a trading toggle that can be set back to false", async () => {
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [
+          {
+            filename: "ReclosableTrading.sol",
+            sourceCode: `
+              contract ReclosableTrading {
+                bool public tradingOpen;
+                function enableTrading() external onlyOwner { tradingOpen = true; }
+                function pauseTrading() external onlyOwner { tradingOpen = false; }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    expect(
+      result.findings.find((f) => f.code === "SOURCE_TRADING_TOGGLE")
+    ).toMatchObject({ severity: "HIGH" });
+  });
+
+  it("does not downgrade a trading-open identifier never confirmed as an assignable toggle", async () => {
+    // Guards against clearing on the absence of a re-close alone — positive evidence the
+    // identifier is actually assigned true somewhere is also required.
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [
+          {
+            filename: "Ambiguous.sol",
+            sourceCode: `
+              contract Ambiguous {
+                event Launched(uint256 launched);
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    expect(
+      result.findings.find((f) => f.code === "SOURCE_TRADING_TOGGLE")
+    ).toMatchObject({ severity: "HIGH" });
+  });
+
   it("detects router/pair replacement and arbitrary low-level external calls", async () => {
     const result = await sourceCodeRiskDetector.run(
       {

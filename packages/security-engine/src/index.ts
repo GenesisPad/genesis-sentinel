@@ -767,7 +767,18 @@ export const selectorPatternDetectors: SecurityDetector<BytecodeDetectorInput>[]
  */
 interface SourceRiskPattern {
   regex: RegExp;
-  classifyMatch?: (source: string, matchIndex: number, matchedText: string) => { note: string } | null;
+  /**
+   * `downgrade` defaults to true: the match clears toward INFO once every match on the rule is
+   * confirmed benign. Set `downgrade: false` for a classifier that only narrows the finding
+   * (e.g. discovering the exact cap a setter enforces) without proving the risk is gone — a
+   * bounded setter is still a live, owner-controlled control surface, just a less severe one, so
+   * it must never fully clear the way an immutable variable or a one-time-only setter can.
+   */
+  classifyMatch?: (
+    source: string,
+    matchIndex: number,
+    matchedText: string
+  ) => { note: string; downgrade?: boolean } | null;
 }
 
 interface SourceRiskRule {
@@ -887,6 +898,101 @@ function classifyOneTimeSetterGuard(source: string, matchIndex: number): { note:
   };
 }
 
+/**
+ * Finds an upper-bound guard (`require(param <= ceiling)` or `if (param > ceiling) revert`) on
+ * the matched setter's own parameter — narrows, but does not clear, the finding: a capped setter
+ * is still a live, owner-controlled control surface, just bounded rather than unbounded, so this
+ * is reported as context (`downgrade: false`) rather than a proof the risk is gone. Deciding
+ * whether a given ceiling is an acceptable tax/limit is a business judgment for the reader, not
+ * something this scanner can determine on its own.
+ */
+function classifyBoundedSetter(source: string, matchIndex: number): { note: string; downgrade: false } | null {
+  const body = extractFunctionBodyAt(source, matchIndex);
+  if (!body) return null;
+
+  const signatureMatch = /function\s+\w+\s*\(([^)]*)\)/.exec(source.slice(matchIndex));
+  const paramList = signatureMatch?.[1];
+  if (!paramList) return null;
+
+  const params = paramList
+    .split(",")
+    .map((param) => param.trim().split(/\s+/).pop())
+    .filter((name): name is string => Boolean(name));
+
+  for (const param of params) {
+    const escapedParam = escapeRegExp(param);
+    const boundPattern = new RegExp(
+      `require\\s*\\(\\s*${escapedParam}\\s*<=?\\s*([\\w.]+)|if\\s*\\(\\s*${escapedParam}\\s*>=?\\s*([\\w.]+)\\s*\\)\\s*revert`
+    );
+    const boundMatch = boundPattern.exec(body);
+    if (boundMatch) {
+      const ceiling = boundMatch[1] ?? boundMatch[2];
+      return {
+        note: `the matched setter enforces an upper bound on \`${param}\` (compared against \`${ceiling}\`), so it cannot be raised past a fixed ceiling — review whether that ceiling is acceptable`,
+        downgrade: false
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Finds the enclosing constructor's brace-balanced body span, so a `= false` assignment inside
+ * it (the token's initial state) can be told apart from one in an ordinary function (a live
+ * capability to re-close trading after it has been opened).
+ */
+function extractConstructorBody(source: string): { start: number; end: number } | null {
+  const match = /\bconstructor\s*\([^)]*\)[^{]*\{/.exec(source);
+  if (!match) return null;
+
+  const braceStart = match.index + match[0].length - 1;
+  let depth = 0;
+  for (let i = braceStart; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}") {
+      depth--;
+      if (depth === 0) return { start: braceStart, end: i + 1 };
+    }
+  }
+  return null;
+}
+
+/**
+ * Confirms a matched trading-toggle boolean is never assigned `false` anywhere outside its
+ * initial declaration or constructor — i.e. no function in this source can re-close trading once
+ * it has been opened. Requires positive evidence the identifier is actually assigned `true`
+ * somewhere too, so an unrelated identifier that merely shares the keyword (not a real
+ * assignable toggle) is never cleared on the absence of a re-close alone.
+ */
+function classifyOneWayTradingToggle(
+  source: string,
+  _matchIndex: number,
+  matchedText: string
+): { note: string } | null {
+  const escapedName = escapeRegExp(matchedText);
+  const falseAssignPattern = new RegExp(`\\b${escapedName}\\s*=\\s*false\\b`, "g");
+  const constructorBody = extractConstructorBody(source);
+
+  let match: RegExpExecArray | null;
+  while ((match = falseAssignPattern.exec(source))) {
+    const stmtStart = Math.max(source.lastIndexOf(";", match.index), source.lastIndexOf("{", match.index)) + 1;
+    const statement = source.slice(stmtStart, match.index);
+    const isDeclarationInitializer = /^\s*bool\b/.test(statement);
+    const isInsideConstructor =
+      constructorBody !== null && match.index >= constructorBody.start && match.index < constructorBody.end;
+    if (!isDeclarationInitializer && !isInsideConstructor) {
+      return null;
+    }
+  }
+
+  const trueAssignPattern = new RegExp(`\\b${escapedName}\\s*=\\s*true\\b`);
+  if (!trueAssignPattern.test(source)) return null;
+
+  return {
+    note: `no function in this source ever assigns \`${matchedText}\` back to false outside its initial declaration/constructor, so once opened trading cannot be re-closed by this variable`
+  };
+}
+
 const sourceRiskRules: SourceRiskRule[] = [
   {
     code: "SOURCE_BLACKLIST_CONTROL",
@@ -945,7 +1051,12 @@ const sourceRiskRules: SourceRiskRule[] = [
     recommendation:
       "Verify current trading state and whether the owner/admin can disable trading after launch.",
     patterns: [
-      { regex: /\b(?:tradingOpen|tradingEnabled|tradingActive|openTrading|enableTrading|swapEnabled|limitsInEffect|launched)\b/i },
+      {
+        regex: /\b(?:tradingOpen|tradingEnabled|tradingActive|openTrading|enableTrading|swapEnabled|limitsInEffect|launched)\b/i,
+        classifyMatch: classifyOneWayTradingToggle
+      },
+      // A require() referencing these terms only shows a gate exists — it says nothing about
+      // whether the underlying boolean can later be set back to false, so it is never cleared.
       { regex: /\brequire\s*\([^;]*(?:trading|launched|swapEnabled|limitsInEffect)[^;]*\)/i }
     ]
   },
@@ -1064,7 +1175,10 @@ const sourceRiskRules: SourceRiskRule[] = [
       // against $GEN: `uint256 buyTax = (value * totalTax) / SWAP_DIVISOR;` is a per-call
       // local variable computing the already-fixed, constructor-capped tax owed on this
       // transfer, not a mutable control surface).
-      { regex: /\bfunction\s+set(?:Tax|Taxes|Fees?|BuyFee|SellFee|BuyTax|SellTax|MarketingFee|LiquidityFee)\s*\(/i },
+      {
+        regex: /\bfunction\s+set(?:Tax|Taxes|Fees?|BuyFee|SellFee|BuyTax|SellTax|MarketingFee|LiquidityFee)\s*\(/i,
+        classifyMatch: classifyBoundedSetter
+      },
       // Only setter-shaped names (setMaxWallet/setMaxTx/...) — NOT a bare "maxWallet"/"maxTx"/
       // "maxTransaction" match, which false-positives on read-only getters, immutable variable
       // names, struct fields, and even unrelated identifiers like a custom error's parameter
@@ -1165,12 +1279,20 @@ export const sourceCodeRiskDetector: SecurityDetector<ContractSourceDetectorInpu
       const allMatchesBenign = matches.length > 0 && matches.every((m) => m.benignNote);
       const severity = allMatchesBenign ? "INFO" : rule.severity;
       const confidence = allMatchesBenign ? "MEDIUM" : rule.confidence;
+      // Context notes (downgrade: false) narrow a finding — e.g. the exact cap a setter
+      // enforces — without claiming the risk is gone, so they surface even when the finding
+      // stays at full severity.
+      const contextNotes = matches
+        .map((m) => m.contextNote)
+        .filter((note, i, all): note is string => Boolean(note) && all.indexOf(note) === i);
       const technicalExplanation = allMatchesBenign
         ? `${rule.technicalExplanation} Verified benign: ${matches
             .map((m) => m.benignNote)
             .filter((note, i, all) => all.indexOf(note) === i)
             .join("; ")}.`
-        : rule.technicalExplanation;
+        : contextNotes.length > 0
+          ? `${rule.technicalExplanation} ${contextNotes.join(" ")}`
+          : rule.technicalExplanation;
 
       const evidence = createSourceEvidence(context, input, {
         ruleCode: rule.code,
@@ -2959,7 +3081,13 @@ function createSourceEvidence(
 }
 
 function matchSourceRule(sourceFiles: ContractSourceFile[], rule: SourceRiskRule) {
-  const matches: Array<{ filename: string; pattern: string; snippet: string; benignNote?: string }> = [];
+  const matches: Array<{
+    filename: string;
+    pattern: string;
+    snippet: string;
+    benignNote?: string;
+    contextNote?: string;
+  }> = [];
   for (const file of sourceFiles) {
     const source = stripInterfaceBlocks(stripSolidityComments(file.sourceCode));
     for (const { regex, classifyMatch } of rule.patterns) {
@@ -2970,7 +3098,11 @@ function matchSourceRule(sourceFiles: ContractSourceFile[], rule: SourceRiskRule
           filename: file.filename,
           pattern: regex.source,
           snippet: sourceSnippet(source, match.index),
-          ...(classification ? { benignNote: classification.note } : {})
+          ...(classification?.downgrade === false
+            ? { contextNote: classification.note }
+            : classification
+              ? { benignNote: classification.note }
+              : {})
         });
       }
     }
