@@ -1,15 +1,22 @@
 "use client";
 import Link from "next/link";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { Menu, X } from "lucide-react";
+import { ExternalLink, Menu, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const NAV = [
   { label: "Explore", href: "/explore" },
   { label: "API", href: "/api" },
   { label: "Docs", href: "/docs" },
-  { label: "Pricing", href: "/pricing" },
-  { label: "Blog", href: "/blog" },
+];
+
+/** /pricing and /blog never had pages behind them — replaced with real destinations in the
+ * wider GenesisPad ecosystem rather than links that 404. */
+const ECOSYSTEM_NAV = [
+  { label: "GenesisPad", href: "https://genesispad.app" },
+  { label: "Launchpad", href: "https://launch.genesispad.app" },
+  { label: "Locker", href: "https://locker.genesispad.app" },
+  { label: "Buybot", href: "https://t.me/genesis_buybot" },
 ];
 
 export function SiteHeader() {
@@ -28,6 +35,18 @@ export function SiteHeader() {
           <Link key={n.href} href={n.href} className="text-[15px] font-semibold text-secondary transition-colors hover:text-foreground">
             {n.label}
           </Link>
+        ))}
+        {ECOSYSTEM_NAV.map((n) => (
+          <a
+            key={n.href}
+            href={n.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-[14px] font-semibold text-muted transition-colors hover:text-foreground"
+          >
+            {n.label}
+            <ExternalLink className="size-3" aria-hidden />
+          </a>
         ))}
       </nav>
 
@@ -71,6 +90,20 @@ function MobileNav() {
               >
                 {n.label}
               </Link>
+            </DropdownMenu.Item>
+          ))}
+          <DropdownMenu.Separator className="my-1.5 h-px bg-border" />
+          {ECOSYSTEM_NAV.map((n) => (
+            <DropdownMenu.Item key={n.href} asChild>
+              <a
+                href={n.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex cursor-pointer items-center justify-between rounded-lg px-3 py-2.5 text-sm font-semibold text-foreground outline-none data-[highlighted]:bg-[#161a12]"
+              >
+                {n.label}
+                <ExternalLink className="size-3.5 text-faint" aria-hidden />
+              </a>
             </DropdownMenu.Item>
           ))}
           <DropdownMenu.Separator className="my-1.5 h-px bg-border" />

@@ -8,11 +8,28 @@ const STATUS = {
   inconclusive: { hex: "#f5a623", Icon: HelpCircle },
 } as const;
 
+/** Thresholds match the Telegram bot's punitive-tax marker, so the same tax reads the same
+ * severity everywhere rather than looking neutral in one surface and alarming in another. */
+const ELEVATED_TAX_BPS = 500; // 5%
+const PUNITIVE_TAX_BPS = 1500; // 15%
+
+function taxColor(bps: number): string {
+  if (bps >= PUNITIVE_TAX_BPS) return "#f0483e";
+  if (bps >= ELEVATED_TAX_BPS) return "#f5a623";
+  return "#37d67a";
+}
+
 export function TradingSimulation({ sim }: { sim: TradeSimulation }) {
   const stats = [
-    sim.buyTaxBps != null ? { label: "Buy Tax", value: bpsToPct(sim.buyTaxBps), hex: "#f4f6f4" } : null,
-    sim.sellTaxBps != null ? { label: "Sell Tax", value: bpsToPct(sim.sellTaxBps), hex: "#f5a623" } : null,
-    sim.transferTaxBps != null ? { label: "Transfer Tax", value: bpsToPct(sim.transferTaxBps), hex: "#f4f6f4" } : null,
+    sim.buyTaxBps != null
+      ? { label: "Buy Tax", value: bpsToPct(sim.buyTaxBps), hex: taxColor(sim.buyTaxBps) }
+      : null,
+    sim.sellTaxBps != null
+      ? { label: "Sell Tax", value: bpsToPct(sim.sellTaxBps), hex: taxColor(sim.sellTaxBps) }
+      : null,
+    sim.transferTaxBps != null
+      ? { label: "Transfer Tax", value: bpsToPct(sim.transferTaxBps), hex: taxColor(sim.transferTaxBps) }
+      : null,
     sim.maxSellTaxBps != null ? { label: "Max Sell Tax", value: bpsToPct(sim.maxSellTaxBps), hex: "#f0483e" } : null,
     sim.maxWalletBps != null ? { label: "Max Wallet", value: bpsToPct(sim.maxWalletBps), hex: "#f4f6f4" } : null,
   ].filter((stat): stat is { label: string; value: string; hex: string } => stat !== null);

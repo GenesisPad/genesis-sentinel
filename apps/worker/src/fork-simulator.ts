@@ -215,7 +215,16 @@ async function runGanacheForkTradeSimulation(
       };
     }
 
-    const buyTaxBps = taxBps(input.expectedBuyTokenOutRaw, buyReceived);
+    // The fork always buys with config.nativeAmountWei, which routinely differs from
+    // input.buyQuoteAmountRaw — the worker's separate route-probe amount used for the
+    // route-quote tier's own baseline. Comparing the fork's real output against a baseline
+    // computed for a different input amount produced nonsense taxes (seen live: a healthy
+    // token reading ~79% buy tax) whenever the two amounts diverged, since AMM output isn't
+    // linear. The expected output must be computed for the same amount the fork actually spent.
+    const expectedForkBuyOut = isV3
+      ? await expectedV3BuyOut(publicClient, input, config.nativeAmountWei)
+      : getAmountOut(config.nativeAmountWei, input.reserveQuoteRaw, input.reserveTokenRaw);
+    const buyTaxBps = calculateTaxBps(expectedForkBuyOut, buyReceived);
 
     // Small wallet-to-wallet transfer test against a second, freshly generated fork-only
     // account — measures transfer tax and whether transfers are blocked outright, distinct
@@ -329,7 +338,7 @@ async function runTransferTest(
 
     return {
       succeeded: received > 0n,
-      taxBps: taxBps(input.amount, received),
+      taxBps: calculateTaxBps(input.amount, received),
       txHash
     };
   } catch {
@@ -429,7 +438,7 @@ async function runSellTest(
 
     return {
       succeeded: received > 0n,
-      taxBps: taxBps(expectedOut, received),
+      taxBps: calculateTaxBps(expectedOut, received),
       received,
       txHash,
       gasUsed: receipt.gasUsed.toString()
@@ -461,6 +470,32 @@ async function expectedSellOutAfterBuy(
   const reserveQuote = tokenIsToken0 ? reserves[1] : reserves[0];
 
   return getAmountOut(amountIn, reserveToken, reserveQuote);
+}
+
+/** V3 counterpart to the V2 constant-product buy estimate — reads the pool's live pre-buy spot
+ * price instead of reserves, since V3 has no constant-product reserves to read. */
+async function expectedV3BuyOut(
+  publicClient: ReturnType<typeof createPublicClient>,
+  input: ForkTradeSimulatorInput,
+  amountIn: bigint
+): Promise<bigint> {
+  const [slot0, token0] = await Promise.all([
+    publicClient.readContract({
+      address: input.poolAddress,
+      abi: v3PoolAbi,
+      functionName: "slot0"
+    }),
+    publicClient.readContract({
+      address: input.poolAddress,
+      abi: v3PoolAbi,
+      functionName: "token0"
+    })
+  ]);
+  const tokenIsToken0 = token0.toLowerCase() === input.tokenAddress.toLowerCase();
+
+  // Buying spends the quote token to receive the token being scanned, so the swap direction is
+  // the reverse of expectedV3SellOut's token-for-quote direction.
+  return getV3SpotAmountOut(amountIn, slot0[0], !tokenIsToken0);
 }
 
 /** V3 counterpart to expectedSellOutAfterBuy — reads the pool's live post-buy spot price
@@ -496,7 +531,7 @@ function getAmountOut(amountIn: bigint, reserveIn: bigint, reserveOut: bigint): 
   return (amountInWithFee * reserveOut) / (reserveIn * 1000n + amountInWithFee);
 }
 
-function taxBps(expected: bigint, actual: bigint): number | null {
+export function calculateTaxBps(expected: bigint, actual: bigint): number | null {
   if (expected <= 0n || actual >= expected) {
     return expected > 0n ? 0 : null;
   }

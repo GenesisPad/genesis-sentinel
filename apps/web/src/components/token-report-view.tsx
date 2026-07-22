@@ -1,6 +1,7 @@
 "use client";
 import Link from "next/link";
-import { AlertTriangle, ArrowLeft, ChevronRight, RefreshCcw } from "lucide-react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { AlertTriangle, ArrowLeft, ChevronRight, List, RefreshCcw } from "lucide-react";
 import type { ScanReport } from "@/lib/types";
 import { useTokenReport } from "@/hooks/use-token-report";
 import type { ChainId } from "@/lib/chains";
@@ -110,6 +111,10 @@ export function TokenReportView({
         </div>
       ) : null}
 
+      <div className="mt-4 lg:hidden">
+        <MobileSectionNav sections={sections} />
+      </div>
+
       <div className="mt-6 grid gap-6 lg:grid-cols-[220px_1fr]">
         <aside className="hidden lg:block">
           <nav className="sticky top-5 flex flex-col gap-0.5" aria-label="Report sections">
@@ -126,6 +131,44 @@ export function TokenReportView({
         </div>
       </div>
     </main>
+  );
+}
+
+/** The sticky sidebar nav is hidden below `lg` since there's no room for it — this dropdown
+ * is the only way to jump straight to a section on mobile instead of scrolling past all of them. */
+function MobileSectionNav({ sections }: { sections: { id: string; label: string }[] }) {
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type="button"
+          className="inline-flex w-full items-center justify-between gap-2 rounded-xl border border-border-strong bg-surface-deep px-4 py-2.5 text-sm font-semibold text-foreground"
+        >
+          <span className="inline-flex items-center gap-2">
+            <List className="size-4" aria-hidden />
+            Jump to section
+          </span>
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align="start"
+          sideOffset={6}
+          className="z-40 max-h-[60vh] w-[calc(100vw-2.5rem)] overflow-y-auto rounded-xl border border-border-strong bg-surface-deep p-1.5 shadow-xl"
+        >
+          {sections.map((s) => (
+            <DropdownMenu.Item key={s.id} asChild>
+              <a
+                href={`#${s.id}`}
+                className="flex cursor-pointer items-center rounded-lg px-3 py-2.5 text-sm font-semibold text-foreground outline-none data-[highlighted]:bg-[#161a12]"
+              >
+                {s.label}
+              </a>
+            </DropdownMenu.Item>
+          ))}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }
 
