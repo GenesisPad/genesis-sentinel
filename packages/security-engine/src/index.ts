@@ -1630,6 +1630,506 @@ export const deployerHistoryDetector: SecurityDetector<DeployerHistoryDetectorIn
   }
 };
 
+export interface LedgerAccountReconciliation {
+  address: `0x${string}`;
+  /** Raw balance at `fromBlock`. */
+  balanceBefore: string;
+  /** Raw balance at `toBlock`. */
+  balanceAfter: string;
+  /** Sum of raw Transfer amounts received by this address within the window. */
+  transferredIn: string;
+  /** Sum of raw Transfer amounts sent by this address within the window. */
+  transferredOut: string;
+}
+
+export interface LedgerReconciliation {
+  fromBlock: string;
+  toBlock: string;
+  accounts: LedgerAccountReconciliation[];
+  totalSupplyBefore: string | null;
+  totalSupplyAfter: string | null;
+}
+
+export interface LedgerIntegrityDetectorInput {
+  readReconciliation(): Promise<LedgerReconciliation | null>;
+}
+
+interface LedgerDiscrepancy {
+  address: `0x${string}`;
+  expectedRaw: string;
+  actualRaw: string;
+  differenceRaw: string;
+  direction: "DECREASE" | "INCREASE";
+}
+
+/**
+ * ERC-20 requires every balance change to emit a Transfer event, so a holder's balance must
+ * always satisfy `after == before + transfersIn - transfersOut`. This detector reconciles that
+ * identity over a bounded block window and reports any account where it does not hold.
+ *
+ * A violation is arithmetic proof — not a heuristic — that the contract rewrites balances
+ * outside the ERC-20 interface. It is the only check that catches "out-of-band balance
+ * deletion" rugs, where the token behaves perfectly during buy/sell simulation and the operator
+ * later deletes victims' balances in a separate transaction; no trade simulation can observe
+ * that, because at simulation time nothing is wrong.
+ */
+export const ledgerIntegrityDetector: SecurityDetector<LedgerIntegrityDetectorInput> = {
+  metadata: {
+    id: "ledger-integrity",
+    version: detectorVersion,
+    name: "Ledger integrity",
+    description:
+      "Reconciles observed balance changes against emitted Transfer events to detect balances rewritten outside the ERC-20 interface."
+  },
+
+  async run(input, context) {
+    const reconciliation = await input.readReconciliation();
+    const evidence: FindingEvidence = {
+      type: "HOLDER_DATA",
+      summary: "Balance-vs-Transfer-event reconciliation over a bounded block window",
+      address: context.address,
+      data: { reconciliation }
+    };
+    if (context.blockNumber !== undefined) {
+      evidence.blockNumber = context.blockNumber;
+    }
+
+    if (!reconciliation || reconciliation.accounts.length === 0) {
+      return {
+        detector: this.metadata,
+        checks: [
+          {
+            code: "LEDGER_INTEGRITY_UNAVAILABLE",
+            outcome: "DATA_UNAVAILABLE",
+            confidence: "LOW",
+            evidence: [evidence]
+          }
+        ],
+        findings: []
+      };
+    }
+
+    const discrepancies: LedgerDiscrepancy[] = [];
+    let reconciledAccounts = 0;
+    for (const account of reconciliation.accounts) {
+      const before = parseRawAmount(account.balanceBefore);
+      const after = parseRawAmount(account.balanceAfter);
+      const received = parseRawAmount(account.transferredIn);
+      const sent = parseRawAmount(account.transferredOut);
+      if (before === null || after === null || received === null || sent === null) {
+        continue;
+      }
+
+      reconciledAccounts += 1;
+      const expected = before + received - sent;
+      if (expected === after) continue;
+
+      const difference = after - expected;
+      discrepancies.push({
+        address: account.address,
+        expectedRaw: expected.toString(),
+        actualRaw: after.toString(),
+        differenceRaw: difference.toString(),
+        direction: difference < 0n ? "DECREASE" : "INCREASE"
+      });
+    }
+
+    if (reconciledAccounts === 0) {
+      return {
+        detector: this.metadata,
+        checks: [
+          {
+            code: "LEDGER_INTEGRITY_UNAVAILABLE",
+            outcome: "DATA_UNAVAILABLE",
+            confidence: "LOW",
+            evidence: [evidence]
+          }
+        ],
+        findings: []
+      };
+    }
+
+    const deletions = discrepancies.filter((entry) => entry.direction === "DECREASE");
+    const inflations = discrepancies.filter((entry) => entry.direction === "INCREASE");
+    const findings: SecurityFinding[] = [];
+    const discrepancyEvidence: FindingEvidence = {
+      ...evidence,
+      summary: "Accounts whose balance change is not explained by any Transfer event",
+      data: { reconciliation, discrepancies }
+    };
+
+    if (deletions.length > 0) {
+      findings.push(
+        createFinding({
+          code: "LEDGER_BALANCE_DELETED",
+          detector: this.metadata,
+          title: "Token deletes holder balances without emitting Transfer events",
+          severity: "CRITICAL",
+          category: "CONTRACT_CONTROL",
+          confidence: "HIGH",
+          description: `${deletions.length} holder balance${deletions.length === 1 ? "" : "s"} decreased with no corresponding Transfer event. The contract can remove tokens from any wallet at will, and holders cannot see it happen on a block explorer.`,
+          technicalExplanation:
+            "ERC-20 requires every balance change to emit Transfer, so balanceAfter must equal balanceBefore + transfersIn - transfersOut. These accounts ended below that value, proving the contract writes its balance mapping outside the ERC-20 interface.",
+          evidence: [discrepancyEvidence],
+          recommendation:
+            "Treat this token as unsafe to hold at any size. Balances can be zeroed at the operator's discretion, and buy/sell simulation cannot protect against it because the deletion happens in a separate transaction."
+        })
+      );
+    }
+
+    if (inflations.length > 0) {
+      findings.push(
+        createFinding({
+          code: "LEDGER_BALANCE_INFLATED",
+          detector: this.metadata,
+          title: "Token increases balances without emitting Transfer events",
+          severity: "HIGH",
+          category: "CONTRACT_CONTROL",
+          confidence: "HIGH",
+          description: `${inflations.length} holder balance${inflations.length === 1 ? "" : "s"} increased with no corresponding Transfer event, indicating a hidden mint or rebase that is invisible to explorers and holders.`,
+          technicalExplanation:
+            "These accounts ended above balanceBefore + transfersIn - transfersOut, so the contract credited tokens without emitting Transfer.",
+          evidence: [discrepancyEvidence],
+          recommendation:
+            "Do not rely on displayed supply or holder distribution for this token; balances can be created silently, which can be used to drain a pool."
+        })
+      );
+    }
+
+    const supplyBefore = parseRawAmount(reconciliation.totalSupplyBefore);
+    const supplyAfter = parseRawAmount(reconciliation.totalSupplyAfter);
+    if (deletions.length > 0 && supplyBefore !== null && supplyAfter !== null && supplyBefore === supplyAfter) {
+      findings.push(
+        createFinding({
+          code: "LEDGER_SUPPLY_MISMATCH",
+          detector: this.metadata,
+          title: "Deleted balances were never removed from total supply",
+          severity: "HIGH",
+          category: "CONTRACT_CONTROL",
+          confidence: "HIGH",
+          description:
+            "Holder balances were deleted while totalSupply stayed unchanged, so the token's own accounting does not balance.",
+          technicalExplanation:
+            "A legitimate burn decrements totalSupply and emits Transfer to the zero address. Here balances fell with neither, so the reported supply overstates the tokens that actually exist.",
+          evidence: [discrepancyEvidence],
+          recommendation:
+            "Treat every supply-derived figure for this token (market cap, holder percentages, circulating supply) as unreliable."
+        })
+      );
+    }
+
+    return {
+      detector: this.metadata,
+      checks: [
+        {
+          code: discrepancies.length > 0 ? "LEDGER_INTEGRITY_VIOLATED" : "LEDGER_INTEGRITY_CONSISTENT",
+          outcome: discrepancies.length > 0 ? "DETECTED" : "PASSED",
+          confidence: "HIGH",
+          evidence: [discrepancies.length > 0 ? discrepancyEvidence : evidence]
+        }
+      ],
+      findings
+    };
+  }
+};
+
+export interface PoolReserveSample {
+  poolAddress: `0x${string}`;
+  protocol?: string;
+  /** Reserve the pool itself reports (getReserves / cached state). */
+  reportedTokenReserveRaw: string;
+  /** Real balanceOf(pool) for the scanned token. */
+  actualTokenBalanceRaw: string;
+}
+
+export interface PoolReserveIntegrityDetectorInput {
+  readPoolReserves(): Promise<PoolReserveSample[] | null>;
+}
+
+/**
+ * Cross-checks what a pool claims to hold against what the token contract says the pool
+ * actually holds. A constant-product pool prices trades off its cached reserves, so if the real
+ * balance is far below the cached reserve the displayed price and depth are fiction and the
+ * pool can be drained by a tiny swap.
+ *
+ * Small, short-lived gaps are normal: a Uniswap V2 pair's reserves legitimately lag a direct
+ * transfer until the next sync(), and fee-on-transfer tokens drift slightly. Only order-of-
+ * magnitude gaps are treated as critical.
+ */
+export const poolReserveIntegrityDetector: SecurityDetector<PoolReserveIntegrityDetectorInput> = {
+  metadata: {
+    id: "pool-reserve-integrity",
+    version: detectorVersion,
+    name: "Pool reserve integrity",
+    description:
+      "Compares pool-reported reserves against real token balances held by the pool to detect a desynced or pre-drained pool."
+  },
+
+  async run(input, context) {
+    const samples = await input.readPoolReserves();
+    const evidence: FindingEvidence = {
+      type: "LIQUIDITY_DATA",
+      summary: "Pool-reported reserves vs real token balance held by the pool",
+      address: context.address,
+      data: { samples }
+    };
+    if (context.blockNumber !== undefined) {
+      evidence.blockNumber = context.blockNumber;
+    }
+
+    if (!samples || samples.length === 0) {
+      return {
+        detector: this.metadata,
+        checks: [
+          {
+            code: "POOL_RESERVE_INTEGRITY_UNAVAILABLE",
+            outcome: "DATA_UNAVAILABLE",
+            confidence: "LOW",
+            evidence: [evidence]
+          }
+        ],
+        findings: []
+      };
+    }
+
+    const mismatches: Array<{
+      poolAddress: `0x${string}`;
+      reportedRaw: string;
+      actualRaw: string;
+      /** How many times larger the reported reserve is than the real balance. */
+      overstatementFactor: number | null;
+    }> = [];
+    let comparedPools = 0;
+
+    for (const sample of samples) {
+      const reported = parseRawAmount(sample.reportedTokenReserveRaw);
+      const actual = parseRawAmount(sample.actualTokenBalanceRaw);
+      if (reported === null || actual === null || reported <= 0n) continue;
+      comparedPools += 1;
+
+      if (actual === 0n) {
+        mismatches.push({
+          poolAddress: sample.poolAddress,
+          reportedRaw: reported.toString(),
+          actualRaw: "0",
+          overstatementFactor: null
+        });
+        continue;
+      }
+
+      // Ratio in basis points keeps precision without converting huge reserves to float.
+      const ratioBps = Number((reported * 10_000n) / actual) / 10_000;
+      if (ratioBps > POOL_RESERVE_TOLERANCE_RATIO) {
+        mismatches.push({
+          poolAddress: sample.poolAddress,
+          reportedRaw: reported.toString(),
+          actualRaw: actual.toString(),
+          overstatementFactor: ratioBps
+        });
+      }
+    }
+
+    if (comparedPools === 0) {
+      return {
+        detector: this.metadata,
+        checks: [
+          {
+            code: "POOL_RESERVE_INTEGRITY_UNAVAILABLE",
+            outcome: "DATA_UNAVAILABLE",
+            confidence: "LOW",
+            evidence: [evidence]
+          }
+        ],
+        findings: []
+      };
+    }
+
+    const findings: SecurityFinding[] = [];
+    const mismatchEvidence: FindingEvidence = {
+      ...evidence,
+      summary: "Pools whose reported reserves exceed the tokens they actually hold",
+      data: { samples, mismatches }
+    };
+    const severe = mismatches.filter(
+      (entry) => entry.overstatementFactor === null || entry.overstatementFactor >= POOL_RESERVE_CRITICAL_RATIO
+    );
+
+    if (severe.length > 0) {
+      findings.push(
+        createFinding({
+          code: "POOL_RESERVE_DESYNC_CRITICAL",
+          detector: this.metadata,
+          title: "Pool holds far fewer tokens than its reserves claim",
+          severity: "CRITICAL",
+          category: "LIQUIDITY_SAFETY",
+          confidence: "HIGH",
+          description:
+            "At least one pool reports token reserves that are orders of magnitude larger than the tokens it actually holds, so the price and depth shown to traders are not real.",
+          technicalExplanation:
+            "A constant-product pool prices swaps from its cached reserves. When the real balance is far below the cached reserve, a very small sell can extract nearly the entire paired asset, which is the setup used to drain a pool.",
+          evidence: [mismatchEvidence],
+          recommendation:
+            "Do not trade against this pool. The quoted liquidity does not exist and the pool is positioned to be drained."
+        })
+      );
+    } else if (mismatches.length > 0) {
+      findings.push(
+        createFinding({
+          code: "POOL_RESERVE_DESYNC",
+          detector: this.metadata,
+          title: "Pool reserves do not match the pool's real token balance",
+          severity: "MEDIUM",
+          category: "LIQUIDITY_SAFETY",
+          confidence: "MEDIUM",
+          description:
+            "A pool's reported reserves exceed the tokens it actually holds by more than normal rounding, so quoted prices may be stale or slightly overstated.",
+          technicalExplanation:
+            "Reserves can legitimately lag a direct transfer until the next sync(), and fee-on-transfer tokens drift, so a modest gap is not proof of manipulation on its own.",
+          evidence: [mismatchEvidence],
+          recommendation:
+            "Re-scan before trading. If the gap widens or persists, treat the quoted liquidity as unreliable."
+        })
+      );
+    }
+
+    return {
+      detector: this.metadata,
+      checks: [
+        {
+          code: mismatches.length > 0 ? "POOL_RESERVE_DESYNC_DETECTED" : "POOL_RESERVES_CONSISTENT",
+          outcome: mismatches.length > 0 ? "DETECTED" : "PASSED",
+          confidence: mismatches.length > 0 ? "HIGH" : "MEDIUM",
+          evidence: [mismatches.length > 0 ? mismatchEvidence : evidence]
+        }
+      ],
+      findings
+    };
+  }
+};
+
+/** Reported reserves above this multiple of the real balance are reported at all. */
+const POOL_RESERVE_TOLERANCE_RATIO = 1.05;
+/** Reported reserves above this multiple are treated as a staged drain, not drift. */
+const POOL_RESERVE_CRITICAL_RATIO = 10;
+
+/** Router/factory selectors a plain ERC-20 has no reason to embed or call. */
+const dexInteractionSelectors = {
+  poolControl: [
+    { selector: "c45a0155", label: "factory()" },
+    { selector: "c9c65396", label: "createPair(address,address)" },
+    { selector: "f305d719", label: "addLiquidityETH(...)" },
+    { selector: "e8e33700", label: "addLiquidity(...)" },
+    { selector: "baa2abde", label: "removeLiquidity(...)" },
+    { selector: "02751cec", label: "removeLiquidityETH(...)" }
+  ],
+  swap: [
+    { selector: "791ac947", label: "swapExactTokensForETHSupportingFeeOnTransferTokens(...)" },
+    { selector: "b6f9de95", label: "swapExactETHForTokensSupportingFeeOnTransferTokens(...)" },
+    { selector: "38ed1739", label: "swapExactTokensForTokens(...)" },
+    { selector: "18cbafe5", label: "swapExactTokensForETH(...)" }
+  ]
+} as const;
+
+/**
+ * Reports DEX router/factory call surfaces embedded in a token's own bytecode. Like the other
+ * selector-surface detectors, this describes what the contract is wired to do and does not
+ * claim exploitability.
+ *
+ * Swap selectors alone are common in tax tokens that auto-swap fees, so they are reported at
+ * MEDIUM. Pool-control selectors (createPair / addLiquidity / removeLiquidity) are a much
+ * stronger signal: a token that can create or modify its own pool can also desync or drain it.
+ */
+export const dexInteractionSurfaceDetector: SecurityDetector<BytecodeDetectorInput> = {
+  metadata: {
+    id: "dex-interaction-surface",
+    version: detectorVersion,
+    name: "DEX interaction surface",
+    description:
+      "Detects DEX router and factory call surfaces embedded in the token's own bytecode."
+  },
+
+  async run(input, context) {
+    await Promise.resolve();
+    const bytecode = input.bytecode.toLowerCase();
+    const found = (group: readonly { selector: string; label: string }[]) =>
+      group.filter((entry) => bytecode.includes(entry.selector)).map((entry) => entry.label);
+
+    const poolControl = found(dexInteractionSelectors.poolControl);
+    const swap = found(dexInteractionSelectors.swap);
+    const evidence: FindingEvidence = {
+      type: "BYTECODE",
+      summary: "DEX router/factory selectors present in token bytecode",
+      address: context.address,
+      data: { poolControlSurfaces: poolControl, swapSurfaces: swap }
+    };
+    if (context.blockNumber !== undefined) {
+      evidence.blockNumber = context.blockNumber;
+    }
+
+    const findings: SecurityFinding[] = [];
+    if (poolControl.length > 0) {
+      findings.push(
+        createFinding({
+          code: "TOKEN_POOL_CONTROL_SURFACE",
+          detector: this.metadata,
+          title: "Token bytecode can create or modify its own liquidity pool",
+          severity: "HIGH",
+          category: "LIQUIDITY_SAFETY",
+          confidence: "MEDIUM",
+          description:
+            "The token embeds DEX factory or liquidity-management selectors, so the contract itself is wired to create pairs or add and remove liquidity.",
+          technicalExplanation: `Pool-control selectors found in bytecode: ${poolControl.join(", ")}. A standard ERC-20 never needs to call a factory or router.`,
+          evidence: [evidence],
+          recommendation:
+            "Confirm who can trigger these paths. A token that manages its own pool can move or withdraw liquidity independently of the LP holders."
+        })
+      );
+    }
+    if (swap.length > 0) {
+      findings.push(
+        createFinding({
+          code: "TOKEN_ROUTER_SWAP_SURFACE",
+          detector: this.metadata,
+          title: "Token bytecode calls a DEX router to swap",
+          severity: "MEDIUM",
+          category: "CONTRACT_CONTROL",
+          confidence: "MEDIUM",
+          description:
+            "The token embeds router swap selectors, typically used to auto-swap collected fees. This is common in fee-taking tokens but means the contract trades on its own behalf.",
+          technicalExplanation: `Router swap selectors found in bytecode: ${swap.join(", ")}.`,
+          evidence: [evidence],
+          recommendation:
+            "Check the fee rate and where swapped proceeds are sent; this path routes value out of the contract during ordinary transfers."
+        })
+      );
+    }
+
+    return {
+      detector: this.metadata,
+      checks: [
+        {
+          code: findings.length > 0 ? "DEX_INTERACTION_SURFACE_PRESENT" : "DEX_INTERACTION_SURFACE_ABSENT",
+          outcome: findings.length > 0 ? "DETECTED" : "PASSED",
+          confidence: "MEDIUM",
+          evidence: [evidence]
+        }
+      ],
+      findings
+    };
+  }
+};
+
+function parseRawAmount(value: string | null | undefined): bigint | null {
+  if (typeof value !== "string" || !/^-?\d+$/u.test(value)) {
+    return null;
+  }
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
+
 export function createEmptyDetectorResult(metadata: DetectorMetadata): DetectorResult {
   return {
     detector: metadata,

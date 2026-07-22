@@ -119,6 +119,16 @@ export async function findSupplyTransfersFrom(
       if (log.topics.length < 3 || !toTopic) continue;
 
       const toAddress = topicToAddress(toTopic);
+      // Supply sent to a burn/zero address, or back into the token contract itself, is supply
+      // the deployer gave UP — the opposite of retained control. Counting it as a "connected
+      // wallet" would inflate the dev cluster with tokens nobody can ever sell.
+      if (
+        burnOrZeroAddresses.has(toAddress.toLowerCase()) ||
+        toAddress.toLowerCase() === input.tokenAddress.toLowerCase()
+      ) {
+        continue;
+      }
+
       let amount: bigint;
       try {
         amount = BigInt(log.data);

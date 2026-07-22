@@ -381,6 +381,11 @@ function extractWalletCluster(view: ScanResultView): WalletClusterEdge[] {
       return [];
     }
 
+    // The worker reads each clustered wallet's balance directly on-chain, so prefer that over
+    // the top-holder snapshot, which only covers wallets large enough to make the top N.
+    const directHoldingPct =
+      typeof record.holdingPct === "number" ? record.holdingPct : null;
+
     return [
       {
         type: type as WalletClusterEdgeType,
@@ -388,24 +393,34 @@ function extractWalletCluster(view: ScanResultView): WalletClusterEdge[] {
         confidence: confidence.toLowerCase() as "low" | "medium" | "high",
         evidence,
         source,
-        holdingPct: holderPctByAddress.get(address.toLowerCase()) ?? null,
+        holdingPct: directHoldingPct ?? holderPctByAddress.get(address.toLowerCase()) ?? null,
+        ...(typeof record.balanceRaw === "string" ? { balanceRaw: record.balanceRaw } : {}),
       },
     ];
   });
 }
 
+/** Supply sent here is given up, not controlled, so it never counts toward the dev cluster. */
+const BURN_OR_ZERO_ADDRESSES = new Set([
+  "0x0000000000000000000000000000000000000000",
+  "0x000000000000000000000000000000000000dead",
+]);
+
 function buildDevClusterSummary(view: ScanResultView, edges: WalletClusterEdge[]): DevClusterInfo {
   const holderPctByAddress = buildHolderPctLookup(view);
   const wallets = new Map<string, number | null>();
+  const isBurned = (key: string) =>
+    BURN_OR_ZERO_ADDRESSES.has(key) || key === view.token.address.toLowerCase();
 
   if (view.token.deployerAddress) {
     const key = view.token.deployerAddress.toLowerCase();
-    wallets.set(key, holderPctByAddress.get(key) ?? null);
+    if (!isBurned(key)) wallets.set(key, holderPctByAddress.get(key) ?? null);
   }
 
   for (const edge of edges) {
     if (edge.type !== "DEPLOYED_BY" && edge.type !== "TRANSFERRED_SUPPLY_TO") continue;
     const key = edge.address.toLowerCase();
+    if (isBurned(key)) continue;
     wallets.set(key, edge.holdingPct ?? holderPctByAddress.get(key) ?? null);
   }
 

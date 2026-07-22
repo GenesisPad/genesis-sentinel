@@ -143,6 +143,8 @@ export interface WalletClusterEdge {
    * snapshot. Null/undefined when the address isn't in that snapshot (e.g. it fell outside the
    * top-N holders tracked) — never estimated. */
   holdingPct?: number | null;
+  /** Raw token balance read on-chain for this wallet, when the scan captured one. */
+  balanceRaw?: string;
 }
 
 export interface DevClusterInfo {

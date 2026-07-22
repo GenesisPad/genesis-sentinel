@@ -1,5 +1,5 @@
-import { encodeFunctionData, parseAbi } from "viem";
-import type { ChainAdapter } from "@genesis-sentinel/chain-adapters";
+import { encodeFunctionData, parseAbi, parseAbiItem, toEventSelector } from "viem";
+import type { ChainAdapter, ChainLog } from "@genesis-sentinel/chain-adapters";
 import { hashBytecode } from "@genesis-sentinel/database";
 import type { ScanRepository } from "@genesis-sentinel/database";
 import type { ScanJobData } from "@genesis-sentinel/queue";
@@ -25,11 +25,17 @@ import {
   createUnsupportedTradeSimulations,
   deployerHistoryDetector,
   genesispadLaunchDetector,
+  dexInteractionSurfaceDetector,
+  ledgerIntegrityDetector,
   liveTradingStateDetector,
   ownershipRolesAbiDetector,
+  poolReserveIntegrityDetector,
   runFoundationDetectors,
   scoreFindings,
-  sourceCodeRiskDetector
+  sourceCodeRiskDetector,
+  type LedgerAccountReconciliation,
+  type LedgerReconciliation,
+  type PoolReserveSample
 } from "@genesis-sentinel/security-engine";
 import { scannerVersion } from "@genesis-sentinel/shared";
 import type { BytecodeReuseView, RelatedWalletEdge } from "@genesis-sentinel/shared";
@@ -750,7 +756,251 @@ async function buildRelatedWalletEdges(input: {
     }
   }
 
-  return edges;
+  return enrichEdgesWithBalances(edges, {
+    adapter: input.adapter,
+    tokenAddress: input.tokenAddress,
+    blockNumber: input.blockNumber,
+    totalSupply: input.totalSupply
+  });
+}
+
+const erc20BalanceOfAbi = parseAbi([
+  "function balanceOf(address account) view returns (uint256)"
+]);
+const erc20TotalSupplyAbi = parseAbi(["function totalSupply() view returns (uint256)"]);
+
+function topicToAddress(topic: `0x${string}`): `0x${string}` {
+  return `0x${topic.slice(-40)}`.toLowerCase() as `0x${string}`;
+}
+
+/** How many top holders are reconciled. Each costs two balanceOf reads. */
+const ledgerReconciliationAccountLimit = 12;
+/**
+ * Block window reconciled, ending at the scan block. Bounded deliberately: one getLogs call has
+ * to cover it, and this detector is aimed at tokens that are actively deleting balances now.
+ * A deletion older than this window is outside the search and is not reported — the scan says
+ * nothing about it rather than implying the ledger was clean.
+ */
+const ledgerReconciliationWindowBlocks = 20_000n;
+const transferEventTopic = toEventSelector(
+  parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)")
+);
+
+/**
+ * Builds the balance-vs-Transfer-event reconciliation for a set of holders. ERC-20 requires
+ * every balance change to emit Transfer, so `after` must equal `before + in - out`; anything
+ * else means the contract writes balances outside the ERC-20 interface.
+ */
+async function readLedgerReconciliation(
+  adapter: ChainAdapter,
+  tokenAddress: `0x${string}`,
+  input: { accounts: `0x${string}`[]; blockNumber: bigint }
+): Promise<LedgerReconciliation | null> {
+  if (input.accounts.length === 0) return null;
+  const fromBlock =
+    input.blockNumber > ledgerReconciliationWindowBlocks
+      ? input.blockNumber - ledgerReconciliationWindowBlocks
+      : 0n;
+  const toBlock = input.blockNumber;
+  if (toBlock <= fromBlock) return null;
+
+  let logs: ChainLog[];
+  try {
+    logs = await adapter.getLogs({
+      address: tokenAddress,
+      fromBlock: fromBlock + 1n,
+      toBlock,
+      topics: [transferEventTopic]
+    });
+  } catch {
+    return null;
+  }
+
+  const tracked = new Map<string, { in: bigint; out: bigint }>();
+  for (const account of input.accounts) {
+    tracked.set(account.toLowerCase(), { in: 0n, out: 0n });
+  }
+
+  for (const log of logs) {
+    const fromTopic = log.topics[1];
+    const toTopic = log.topics[2];
+    if (!fromTopic || !toTopic) continue;
+    let amount: bigint;
+    try {
+      amount = BigInt(log.data);
+    } catch {
+      continue;
+    }
+    const sender = tracked.get(topicToAddress(fromTopic).toLowerCase());
+    if (sender) sender.out += amount;
+    const recipient = tracked.get(topicToAddress(toTopic).toLowerCase());
+    if (recipient) recipient.in += amount;
+  }
+
+  const readBalance = async (account: `0x${string}`, at: bigint): Promise<bigint | null> => {
+    try {
+      const balance = await adapter.readContract<bigint>({
+        address: tokenAddress,
+        abi: erc20BalanceOfAbi,
+        functionName: "balanceOf",
+        args: [account],
+        blockNumber: at
+      });
+      return typeof balance === "bigint" ? balance : null;
+    } catch {
+      return null;
+    }
+  };
+  const readSupply = async (at: bigint): Promise<string | null> => {
+    try {
+      const supply = await adapter.readContract<bigint>({
+        address: tokenAddress,
+        abi: erc20TotalSupplyAbi,
+        functionName: "totalSupply",
+        blockNumber: at
+      });
+      return typeof supply === "bigint" ? supply.toString() : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const accounts: LedgerAccountReconciliation[] = [];
+  for (const account of input.accounts) {
+    const [before, after] = await Promise.all([
+      readBalance(account, fromBlock),
+      readBalance(account, toBlock)
+    ]);
+    // A failed read cannot be distinguished from a zero balance, so skip rather than invent a
+    // discrepancy out of an RPC error.
+    if (before === null || after === null) continue;
+    const movement = tracked.get(account.toLowerCase()) ?? { in: 0n, out: 0n };
+    accounts.push({
+      address: account,
+      balanceBefore: before.toString(),
+      balanceAfter: after.toString(),
+      transferredIn: movement.in.toString(),
+      transferredOut: movement.out.toString()
+    });
+  }
+
+  if (accounts.length === 0) return null;
+  const [totalSupplyBefore, totalSupplyAfter] = await Promise.all([
+    readSupply(fromBlock),
+    readSupply(toBlock)
+  ]);
+
+  return {
+    fromBlock: fromBlock.toString(),
+    toBlock: toBlock.toString(),
+    accounts,
+    totalSupplyBefore,
+    totalSupplyAfter
+  };
+}
+
+/**
+ * Pairs each discovered pool's self-reported token reserve with the real balance the token
+ * contract says that pool holds. A pool whose reported reserve far exceeds its real balance is
+ * quoting a price backed by tokens that are not there.
+ */
+async function readPoolReserveSamples(
+  adapter: ChainAdapter,
+  tokenAddress: `0x${string}`,
+  pools: DiscoveredPool[] | null,
+  blockNumber: bigint
+): Promise<PoolReserveSample[] | null> {
+  if (!pools || pools.length === 0) return null;
+
+  const samples: PoolReserveSample[] = [];
+  for (const pool of pools) {
+    const isV3 = pool.liquidityData.protocol === "UNISWAP_V3";
+    const reported = isV3
+      ? bigintFromRecord(pool.liquidityData, "tokenBalanceRaw")
+      : bigintFromRecord(pool.liquidityData, "reserveTokenRaw");
+    if (reported === null || reported <= 0n) continue;
+
+    let actual: bigint;
+    try {
+      actual = await adapter.readContract<bigint>({
+        address: tokenAddress,
+        abi: erc20BalanceOfAbi,
+        functionName: "balanceOf",
+        args: [pool.poolAddress],
+        blockNumber
+      });
+    } catch {
+      continue;
+    }
+    if (typeof actual !== "bigint") continue;
+
+    samples.push({
+      poolAddress: pool.poolAddress,
+      ...(typeof pool.liquidityData.protocol === "string"
+        ? { protocol: pool.liquidityData.protocol }
+        : {}),
+      reportedTokenReserveRaw: reported.toString(),
+      actualTokenBalanceRaw: actual.toString()
+    });
+  }
+
+  return samples.length > 0 ? samples : null;
+}
+
+/**
+ * Reads each clustered wallet's real token balance on-chain at the scan block, so the dev
+ * cluster can report what every connected address actually holds. The holder snapshot only
+ * covers the top N holders, so without this a connected wallet outside that set reports
+ * "unknown" rather than its real (often small but non-zero) balance. A failed read leaves the
+ * balance absent rather than defaulting to zero, so an RPC error never understates the cluster.
+ */
+async function enrichEdgesWithBalances(
+  edges: RelatedWalletEdge[],
+  input: {
+    adapter: ChainAdapter;
+    tokenAddress: `0x${string}`;
+    blockNumber: bigint;
+    totalSupply: string | null;
+  }
+): Promise<RelatedWalletEdge[]> {
+  let total: bigint | null = null;
+  if (input.totalSupply) {
+    try {
+      total = BigInt(input.totalSupply);
+    } catch {
+      total = null;
+    }
+  }
+
+  const balanceByAddress = new Map<string, bigint>();
+  for (const address of new Set(edges.map((edge) => edge.address.toLowerCase()))) {
+    try {
+      const balance = await input.adapter.readContract<bigint>({
+        address: input.tokenAddress,
+        abi: erc20BalanceOfAbi,
+        functionName: "balanceOf",
+        args: [address],
+        blockNumber: input.blockNumber
+      });
+      if (typeof balance === "bigint") {
+        balanceByAddress.set(address, balance);
+      }
+    } catch {
+      /* leave this wallet's balance unknown rather than claiming it holds nothing */
+    }
+  }
+
+  return edges.map((edge) => {
+    const balance = balanceByAddress.get(edge.address.toLowerCase());
+    if (balance === undefined) return edge;
+    return {
+      ...edge,
+      balanceRaw: balance.toString(),
+      ...(total !== null && total > 0n
+        ? { holdingPct: Number((balance * 10_000n) / total) / 100 }
+        : {})
+    };
+  });
 }
 
 /**
@@ -1071,12 +1321,25 @@ export async function processScanJob(
       { deployerHistory, bytecodeReuse, relatedWalletEdges },
       detectorRunContext
     );
+    const dexInteractionResult = await dexInteractionSurfaceDetector.run(
+      { bytecode },
+      detectorRunContext
+    );
+    const poolReserveResult = await poolReserveIntegrityDetector.run(
+      {
+        readPoolReserves: () =>
+          readPoolReserveSamples(adapter, target.address, discoveredPools, blockNumber)
+      },
+      detectorRunContext
+    );
     detectorResults.push(
       sourceDetectorResult,
       ownershipRolesResult,
       liveTradingStateResult,
       genesispadLaunchResult,
-      deployerHistoryResult
+      deployerHistoryResult,
+      dexInteractionResult,
+      poolReserveResult
     );
     const detectorCompletedAt = now();
     for (const result of detectorResults) {
@@ -1215,6 +1478,28 @@ export async function processScanJob(
       await dependencies.scans.recordDetectorResult({
         scanId: target.scanId,
         result: holderDetectorResult,
+        startedAt: now(),
+        completedAt: now()
+      });
+
+      // Runs here rather than with the contract detectors because it reconciles real holder
+      // balances, which only exist once the holder snapshot has been taken.
+      const ledgerIntegrityResult = await ledgerIntegrityDetector.run(
+        {
+          readReconciliation: () =>
+            readLedgerReconciliation(adapter, target.address, {
+              accounts: holderSnapshot.topHolders
+                .slice(0, ledgerReconciliationAccountLimit)
+                .map((holder) => holder.address),
+              blockNumber
+            })
+        },
+        detectorRunContext
+      );
+      holderDetectorResults.push(ledgerIntegrityResult);
+      await dependencies.scans.recordDetectorResult({
+        scanId: target.scanId,
+        result: ledgerIntegrityResult,
         startedAt: now(),
         completedAt: now()
       });

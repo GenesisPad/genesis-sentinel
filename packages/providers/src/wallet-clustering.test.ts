@@ -244,3 +244,55 @@ describe("findPreviousOwnerFromRenouncement", () => {
     expect(result).toBeNull();
   });
 });
+
+describe("findSupplyTransfersFrom burn handling", () => {
+  const transferEvent = parseAbiItem(
+    "event Transfer(address indexed from, address indexed to, uint256 value)"
+  );
+  const burnLog = (to: `0x${string}`) => ({
+    address: tokenAddress,
+    blockNumber: 10n,
+    transactionHash: null,
+    logIndex: 0,
+    topics: encodeEventTopics({
+      abi: [transferEvent],
+      eventName: "Transfer",
+      args: { from: deployerAddress, to }
+    }),
+    data: encodeAbiParameters([{ type: "uint256" }], [50n])
+  });
+
+  it("ignores supply the deployer burned instead of counting it as a connected wallet", async () => {
+    const adapter = stubAdapter(() => [
+      burnLog("0x000000000000000000000000000000000000dead"),
+      burnLog("0x0000000000000000000000000000000000000000")
+    ]);
+
+    const edges = await findSupplyTransfersFrom(adapter, {
+      tokenAddress,
+      fromAddress: deployerAddress,
+      roleLabel: "deployer",
+      fromBlock: 0n,
+      toBlock: 100n,
+      totalSupply: "100"
+    });
+
+    // Burned supply is unsellable, so it is the opposite of retained control.
+    expect(edges).toEqual([]);
+  });
+
+  it("ignores supply sent back into the token contract itself", async () => {
+    const adapter = stubAdapter(() => [burnLog(tokenAddress)]);
+
+    const edges = await findSupplyTransfersFrom(adapter, {
+      tokenAddress,
+      fromAddress: deployerAddress,
+      roleLabel: "deployer",
+      fromBlock: 0n,
+      toBlock: 100n,
+      totalSupply: "100"
+    });
+
+    expect(edges).toEqual([]);
+  });
+});

@@ -8,9 +8,12 @@ import {
   createEmptyDetectorResult,
   dangerousOpcodeDetector,
   deployerHistoryDetector,
+  dexInteractionSurfaceDetector,
   eip1967ProxyDetector,
   genesispadLaunchDetector,
+  ledgerIntegrityDetector,
   liveTradingStateDetector,
+  poolReserveIntegrityDetector,
   ownershipRolesAbiDetector,
   ownershipStatusDetector,
   runFoundationDetectors,
@@ -1317,5 +1320,186 @@ describe("holder analysis foundation", () => {
       snapshots: []
     });
     expect(analysis.reason.toLowerCase()).not.toContain("safe");
+  });
+});
+
+describe("ledger integrity detector", () => {
+  // Real numbers from the uhood rug on Robinhood Chain: the victim bought 96,167.004477578
+  // tokens (raw, 9 decimals) at block 6178793 and the operator deleted the balance at block
+  // 6178854 without emitting any Transfer event, while totalSupply stayed pinned at 1e18.
+  const uhoodVictim = {
+    address: "0x8cfa84924011b19765136baea669ac81fe8bb561" as const,
+    balanceBefore: "96167004477578",
+    balanceAfter: "0",
+    transferredIn: "0",
+    transferredOut: "0"
+  };
+
+  it("flags balances deleted without a Transfer event as critical", async () => {
+    const result = await ledgerIntegrityDetector.run(
+      {
+        readReconciliation: () => Promise.resolve({
+          fromBlock: "6178793",
+          toBlock: "6178860",
+          accounts: [uhoodVictim],
+          totalSupplyBefore: "1000000000000000000",
+          totalSupplyAfter: "1000000000000000000"
+        })
+      },
+      context
+    );
+
+    const codes = result.findings.map((finding) => finding.code);
+    expect(codes).toContain("LEDGER_BALANCE_DELETED");
+    // Balances vanished while supply never moved, so the token's books do not balance.
+    expect(codes).toContain("LEDGER_SUPPLY_MISMATCH");
+    expect(result.findings[0]?.severity).toBe("CRITICAL");
+    expect(result.checks[0]?.outcome).toBe("DETECTED");
+    expect(result.checks[0]?.code).toBe("LEDGER_INTEGRITY_VIOLATED");
+  });
+
+  it("passes a token whose balance changes are fully explained by Transfer events", async () => {
+    const result = await ledgerIntegrityDetector.run(
+      {
+        readReconciliation: () => Promise.resolve({
+          fromBlock: "100",
+          toBlock: "200",
+          accounts: [
+            {
+              address: "0x0000000000000000000000000000000000000011" as const,
+              balanceBefore: "1000",
+              transferredIn: "500",
+              transferredOut: "200",
+              balanceAfter: "1300"
+            }
+          ],
+          totalSupplyBefore: "5000",
+          totalSupplyAfter: "5000"
+        })
+      },
+      context
+    );
+
+    expect(result.findings).toHaveLength(0);
+    expect(result.checks[0]?.outcome).toBe("PASSED");
+  });
+
+  it("flags silent balance inflation as a hidden mint", async () => {
+    const result = await ledgerIntegrityDetector.run(
+      {
+        readReconciliation: () => Promise.resolve({
+          fromBlock: "100",
+          toBlock: "200",
+          accounts: [
+            {
+              address: "0x0000000000000000000000000000000000000012" as const,
+              balanceBefore: "1000",
+              transferredIn: "0",
+              transferredOut: "0",
+              balanceAfter: "9999"
+            }
+          ],
+          totalSupplyBefore: "5000",
+          totalSupplyAfter: "5000"
+        })
+      },
+      context
+    );
+
+    expect(result.findings.map((finding) => finding.code)).toContain("LEDGER_BALANCE_INFLATED");
+  });
+
+  it("reports unavailable rather than passing when no reconciliation data exists", async () => {
+    const result = await ledgerIntegrityDetector.run(
+      { readReconciliation: () => Promise.resolve(null) },
+      context
+    );
+
+    expect(result.findings).toHaveLength(0);
+    expect(result.checks[0]?.outcome).toBe("DATA_UNAVAILABLE");
+    expect(result.checks[0]?.code).toBe("LEDGER_INTEGRITY_UNAVAILABLE");
+  });
+});
+
+describe("pool reserve integrity detector", () => {
+  it("flags an order-of-magnitude reserve overstatement as critical", async () => {
+    // uhood: the pair reported 79,237,908.95 tokens of reserve while really holding 79.24.
+    const result = await poolReserveIntegrityDetector.run(
+      {
+        readPoolReserves: () => Promise.resolve([
+          {
+            poolAddress: "0x3fa1d64f8c239b83a200723eedcd3e1e01b0251b" as const,
+            protocol: "UNISWAP_V2",
+            reportedTokenReserveRaw: "79237908958709370",
+            actualTokenBalanceRaw: "79237908958"
+          }
+        ])
+      },
+      context
+    );
+
+    expect(result.findings.map((finding) => finding.code)).toContain("POOL_RESERVE_DESYNC_CRITICAL");
+    expect(result.findings[0]?.severity).toBe("CRITICAL");
+  });
+
+  it("does not flag a healthy pool whose reserves match its balance", async () => {
+    const result = await poolReserveIntegrityDetector.run(
+      {
+        readPoolReserves: () => Promise.resolve([
+          {
+            poolAddress: "0x00000000000000000000000000000000000000aa" as const,
+            reportedTokenReserveRaw: "65688000000000000",
+            actualTokenBalanceRaw: "65688000000000000"
+          }
+        ])
+      },
+      context
+    );
+
+    expect(result.findings).toHaveLength(0);
+    expect(result.checks[0]?.outcome).toBe("PASSED");
+  });
+
+  it("tolerates small pending-sync drift without a critical finding", async () => {
+    // A V2 pair's reserves legitimately lag a direct transfer until sync().
+    const result = await poolReserveIntegrityDetector.run(
+      {
+        readPoolReserves: () => Promise.resolve([
+          {
+            poolAddress: "0x00000000000000000000000000000000000000bb" as const,
+            reportedTokenReserveRaw: "1010",
+            actualTokenBalanceRaw: "1000"
+          }
+        ])
+      },
+      context
+    );
+
+    expect(result.findings.map((finding) => finding.code)).not.toContain(
+      "POOL_RESERVE_DESYNC_CRITICAL"
+    );
+  });
+});
+
+describe("dex interaction surface detector", () => {
+  it("flags a token whose bytecode can create or modify its own pool", async () => {
+    const result = await dexInteractionSurfaceDetector.run(
+      { bytecode: "0x60806040c9c65396f305d719791ac947" },
+      context
+    );
+
+    const codes = result.findings.map((finding) => finding.code);
+    expect(codes).toContain("TOKEN_POOL_CONTROL_SURFACE");
+    expect(codes).toContain("TOKEN_ROUTER_SWAP_SURFACE");
+  });
+
+  it("does not flag a plain ERC-20 bytecode", async () => {
+    const result = await dexInteractionSurfaceDetector.run(
+      { bytecode: "0x6080604052348015600f57600080fd5b50" },
+      context
+    );
+
+    expect(result.findings).toHaveLength(0);
+    expect(result.checks[0]?.outcome).toBe("PASSED");
   });
 });

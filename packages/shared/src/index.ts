@@ -367,6 +367,11 @@ export interface RelatedWalletEdge {
   evidence: string;
   source: string;
   firstObservedBlock?: string;
+  /** Raw token balance held by this address, read directly on-chain at the scan block. Present
+   * for every clustered wallet, not just those inside the top-holder snapshot. */
+  balanceRaw?: string;
+  /** `balanceRaw` as a percentage of total supply. Absent when supply is unknown. */
+  holdingPct?: number;
 }
 
 export type SecuritySignalAnswer = "YES" | "NO" | "UNKNOWN";
@@ -908,22 +913,38 @@ function buildFullAnalysisUrl(
   return `${webAppUrl.replace(/\/+$/u, "")}/token/${chainId}/${address}`;
 }
 
+/** Addresses that provably cannot trade: supply sent here is given up, not controlled. */
+const burnOrZeroAddresses = new Set([
+  "0x0000000000000000000000000000000000000000",
+  "0x000000000000000000000000000000000000dead"
+]);
+
 function buildDevClusterSummary(result: ScanResultView): DevClusterSummaryView {
   const holderPctByAddress = buildHolderPctLookup(result);
+  const deployerPct = readDeployerPct(result);
   const walletsByAddress = new Map<string, DevClusterWalletView>();
 
   const addWallet = (
     address: `0x${string}`,
     role: RelatedWalletEdgeType,
     confidence: FindingConfidence,
-    evidence: string
+    evidence: string,
+    /** Balance read directly on-chain for this wallet, when the scan captured one. */
+    directHoldingPct?: number | null
   ) => {
     const key = address.toLowerCase();
+    // Burned supply is unsellable, so folding it into the dev cluster would overstate how much
+    // the team can actually dump. Exclude it here too, not only at edge-discovery time, so
+    // scans persisted before that filter existed are also reported correctly.
+    if (burnOrZeroAddresses.has(key) || key === result.token.address.toLowerCase()) {
+      return;
+    }
+
     const existing = walletsByAddress.get(key);
     const next: DevClusterWalletView = {
       address,
       role,
-      holdingPct: holderPctByAddress.get(key) ?? null,
+      holdingPct: directHoldingPct ?? holderPctByAddress.get(key) ?? null,
       confidence,
       evidence
     };
@@ -938,13 +959,14 @@ function buildDevClusterSummary(result: ScanResultView): DevClusterSummaryView {
       result.token.deployerAddress,
       "DEPLOYED_BY",
       "HIGH",
-      "Explorer token profile reports this address as the contract deployer."
+      "Explorer token profile reports this address as the contract deployer.",
+      deployerPct
     );
   }
 
   for (const edge of extractRelatedWalletEdges(result)) {
     if (edge.type === "DEPLOYED_BY" || edge.type === "TRANSFERRED_SUPPLY_TO") {
-      addWallet(edge.address, edge.type, edge.confidence, edge.evidence);
+      addWallet(edge.address, edge.type, edge.confidence, edge.evidence, edge.holdingPct ?? null);
     }
   }
 
@@ -965,6 +987,12 @@ function buildDevClusterSummary(result: ScanResultView): DevClusterSummaryView {
     unknownHoldingWalletCount: wallets.filter((wallet) => wallet.holdingPct == null).length,
     wallets
   };
+}
+
+function readDeployerPct(result: ScanResultView): number | null {
+  const snapshot = result.holders.snapshots[0];
+  const concentration = snapshot?.concentration as { deployerPct?: number | null } | undefined;
+  return typeof concentration?.deployerPct === "number" ? concentration.deployerPct : null;
 }
 
 function buildDeployerBalance(result: ScanResultView): DeployerBalanceView | null {
