@@ -60,6 +60,7 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
   if (!res.ok) {
     throw new ApiError(`Request failed (${res.status}).`, "request_failed", res.status);
   }
+  if (res.status === 204) return undefined;
   return (await res.json()) as unknown;
 }
 
@@ -164,7 +165,7 @@ export async function getPublicAnalytics(): Promise<PublicAnalyticsView> {
 
 export async function recordAnalyticsVisit(): Promise<void> {
   if (USE_FIXTURES || typeof window === "undefined") return;
-  await request("/analytics/visit", { method: "POST" });
+  await request("/analytics/visit", { method: "POST", body: "{}" });
 }
 
 interface RecentScanApiRow {

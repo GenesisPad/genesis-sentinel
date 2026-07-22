@@ -5,9 +5,11 @@ import { recordAnalyticsVisit } from "@/lib/api";
 
 export function AnalyticsVisitTracker() {
   useEffect(() => {
-    if (sessionStorage.getItem("sentinel-visit-recorded")) return;
-    sessionStorage.setItem("sentinel-visit-recorded", "1");
-    void recordAnalyticsVisit().catch(() => undefined);
+    const storageKey = "sentinel-analytics-visit-v2";
+    if (sessionStorage.getItem(storageKey)) return;
+    void recordAnalyticsVisit()
+      .then(() => sessionStorage.setItem(storageKey, "1"))
+      .catch(() => undefined);
   }, []);
   return null;
 }
