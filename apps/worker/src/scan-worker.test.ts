@@ -250,6 +250,7 @@ describe("scan worker orchestration", () => {
       "detector:deployer-history:0",
       "detector:dex-interaction-surface:0",
       "detector:pool-reserve-integrity:0",
+      "detector:transfer-gate-surface:0",
       "stage:ANALYZING_CONTRACT:SUCCEEDED",
       "state:DISCOVERING_MARKETS",
       "stage:DISCOVERING_MARKETS:RUNNING",

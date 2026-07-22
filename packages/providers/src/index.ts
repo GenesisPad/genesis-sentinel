@@ -1,5 +1,6 @@
 export * from "./types.js";
 export * from "./http.js";
+export * from "./chain-infrastructure.js";
 export * from "./blockscout.js";
 export * from "./sourcify.js";
 export * from "./contract-source-chain.js";

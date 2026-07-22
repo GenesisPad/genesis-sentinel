@@ -2119,6 +2119,215 @@ export const dexInteractionSurfaceDetector: SecurityDetector<BytecodeDetectorInp
   }
 };
 
+export interface TransferGateDetectorInput {
+  bytecode: `0x${string}`;
+  /** Runtime code at an address, or null when it has none (a plain EOA). */
+  resolveCode(address: `0x${string}`): Promise<`0x${string}` | null>;
+  /**
+   * Calls `address` with empty calldata from `origin` and resolves true when the call
+   * succeeds. Empty calldata hits receive()/fallback(), which is what a token's transfer hook
+   * triggers, so a revert here means that origin would not be allowed to transfer.
+   */
+  probeCall(address: `0x${string}`, origin: `0x${string}`): Promise<boolean>;
+  /** Synthetic origins used for probing; none of them should be pre-authorized by an operator. */
+  probeOrigins: `0x${string}`[];
+  /** Whether ownership currently reads as renounced, for the residual-control finding. */
+  ownershipRenounced?: boolean | null;
+  /** Addresses that are expected constants (router, factory, WETH, pools, chain infrastructure). */
+  ignoredAddresses?: `0x${string}`[];
+}
+
+/** EIP-7702 sets an EOA's code to this prefix followed by the delegate address. */
+const eip7702CodePrefix = "0xef0100";
+/** Bounds the number of hardcoded addresses probed, so a large contract can't fan out reads. */
+const transferGateCandidateLimit = 12;
+
+interface TransferGateCandidate {
+  address: `0x${string}`;
+  delegatedTo: `0x${string}` | null;
+  blocksSyntheticOrigins: boolean;
+}
+
+/**
+ * Finds addresses hardcoded into a token's bytecode that behave like a transfer gate.
+ *
+ * The pattern this exists for: a token calls a hardcoded address on every transfer, and that
+ * address is an EOA whose code was set via EIP-7702 to an allowlist contract that reverts
+ * unless `flags[tx.origin]` is set. Only wallets the operator pre-authorized can transact, so
+ * ordinary buyers cannot sell — and because the gate lives outside the token, reading the
+ * token's own source or selectors never reveals it.
+ *
+ * A 7702-delegated EOA hardcoded into a token is itself a strong signal: legitimate tokens
+ * hardcode routers, factories and wrapped-native contracts, which are ordinary contracts.
+ * Callers pass those (and chain infrastructure) in `ignoredAddresses` so they are not reported.
+ */
+export const transferGateDetector: SecurityDetector<TransferGateDetectorInput> = {
+  metadata: {
+    id: "transfer-gate-surface",
+    version: detectorVersion,
+    name: "Transfer gate surface",
+    description:
+      "Resolves addresses hardcoded in token bytecode and detects EIP-7702 delegated allowlist gates that can block transfers."
+  },
+
+  async run(input, context) {
+    const ignored = new Set(
+      (input.ignoredAddresses ?? []).map((address) => address.toLowerCase())
+    );
+    ignored.add(context.address.toLowerCase());
+    ignored.add(`0x${"0".repeat(40)}`);
+
+    const candidates = extractHardcodedAddresses(input.bytecode)
+      .filter((address) => !ignored.has(address.toLowerCase()))
+      .slice(0, transferGateCandidateLimit);
+
+    const gates: TransferGateCandidate[] = [];
+    for (const address of candidates) {
+      const code = await input.resolveCode(address);
+      if (!code || !code.toLowerCase().startsWith(eip7702CodePrefix)) continue;
+
+      // Code layout is the 3-byte prefix followed by the 20-byte delegate address.
+      const delegate = `0x${code.slice(eip7702CodePrefix.length)}`.toLowerCase();
+      const results = await Promise.all(
+        input.probeOrigins.map((origin) => input.probeCall(address, origin))
+      );
+      gates.push({
+        address,
+        delegatedTo: /^0x[0-9a-f]{40}$/u.test(delegate) ? (delegate as `0x${string}`) : null,
+        // Every synthetic origin being rejected is what separates an allowlist gate from a
+        // contract that simply has no receive() — a plain rejection would be uniform anyway,
+        // so this is reported as a gate surface, and the allowlist reading is what the
+        // finding text claims only when combined with the 7702 delegation above.
+        blocksSyntheticOrigins: results.length > 0 && results.every((allowed) => !allowed)
+      });
+    }
+
+    const evidence: FindingEvidence = {
+      type: "BYTECODE",
+      summary: "Hardcoded addresses in token bytecode resolved for EIP-7702 delegation",
+      address: context.address,
+      data: { candidateCount: candidates.length, gates }
+    };
+    if (context.blockNumber !== undefined) {
+      evidence.blockNumber = context.blockNumber;
+    }
+
+    const findings: SecurityFinding[] = [];
+    const blocking = gates.filter((gate) => gate.blocksSyntheticOrigins);
+
+    if (blocking.length > 0) {
+      findings.push(
+        createFinding({
+          code: "TRANSFER_GATE_ALLOWLIST",
+          detector: this.metadata,
+          title: "Transfers route through an allowlist gate that rejects ordinary wallets",
+          severity: "CRITICAL",
+          category: "TRADING_SAFETY",
+          confidence: "HIGH",
+          description:
+            "The token has a hardcoded EIP-7702 delegated account that rejected every unaffiliated wallet we tested. If transfers call it, only wallets the operator pre-authorized can trade.",
+          technicalExplanation: `Hardcoded address(es) ${blocking.map((gate) => gate.address).join(", ")} carry EIP-7702 delegated code and reverted an empty call from every synthetic origin probed. The gate lives outside the token, so the token's own source or selectors do not reveal it.`,
+          evidence: [evidence],
+          recommendation:
+            "Do not assume you will be able to sell. Treat a passing buy/sell simulation as inconclusive, since the operator controls the allowlist and can change it per wallet at any time."
+        })
+      );
+    } else if (gates.length > 0) {
+      findings.push(
+        createFinding({
+          code: "TRANSFER_GATE_DELEGATED_ACCOUNT",
+          detector: this.metadata,
+          title: "Token hardcodes an EIP-7702 delegated account",
+          severity: "HIGH",
+          category: "CONTRACT_CONTROL",
+          confidence: "MEDIUM",
+          description:
+            "An address hardcoded in the token's bytecode is an EOA whose code was set via EIP-7702, meaning its behavior is controlled by a delegate contract and can be changed by its owner.",
+          technicalExplanation: `Hardcoded address(es) ${gates.map((gate) => `${gate.address} -> ${gate.delegatedTo ?? "unresolved"}`).join(", ")} return EIP-7702 delegation code. Routers, factories and wrapped-native contracts are ordinary contracts, so this is not a normal constant for a token to embed.`,
+          evidence: [evidence],
+          recommendation:
+            "Review what the token calls this address for. Its code can be swapped by whoever controls the account, so behavior verified today is not guaranteed tomorrow."
+        })
+      );
+    }
+
+    if (gates.length > 0 && input.ownershipRenounced === true) {
+      findings.push(
+        createFinding({
+          code: "RENOUNCED_BUT_EXTERNALLY_GATED",
+          detector: this.metadata,
+          title: "Ownership reads as renounced while control remains through a hardcoded gate",
+          severity: "HIGH",
+          category: "CONTRACT_CONTROL",
+          confidence: "HIGH",
+          description:
+            "owner() reports no owner, but the token still defers to a hardcoded externally-controlled account, so renouncement does not mean control was given up.",
+          technicalExplanation:
+            "Ownership renouncement only removes the owner() role. A hardcoded address whose code is controlled by someone else retains influence over transfers regardless of what owner() returns.",
+          evidence: [evidence],
+          recommendation:
+            "Do not treat this token as ownerless. Judge it by what the hardcoded gate can do, not by the renouncement."
+        })
+      );
+    }
+
+    return {
+      detector: this.metadata,
+      checks: [
+        {
+          code: gates.length > 0 ? "TRANSFER_GATE_DETECTED" : "TRANSFER_GATE_ABSENT",
+          outcome: gates.length > 0 ? "DETECTED" : "PASSED",
+          confidence: gates.length > 0 ? "HIGH" : "MEDIUM",
+          evidence: [evidence]
+        }
+      ],
+      findings
+    };
+  }
+};
+
+/**
+ * Recovers address constants stored in a contract's data section, where Solidity places
+ * immutables and hardcoded addresses as 20 bytes left-padded into a 32-byte word.
+ *
+ * Search bound, stated plainly: this reads the padded-word form only. Scanning for PUSH20
+ * immediates as well was tried and rejected — because a byte scan crosses instruction
+ * boundaries it produced 268 candidates on an ordinary router versus 13 here, which is too
+ * noisy to resolve. The cost is that an address embedded solely as a PUSH20 immediate is not
+ * recovered, so a null result means "no padded constant found", never "no gate exists".
+ *
+ * Measured on real Robinhood Chain contracts: 1 candidate for the uhood token (exactly its real
+ * gate), 0 for WETH, 2-5 for ordinary tokens, 13 for a 21KB router.
+ */
+function extractHardcodedAddresses(bytecode: string): `0x${string}`[] {
+  const hex = bytecode.startsWith("0x") ? bytecode.slice(2).toLowerCase() : bytecode.toLowerCase();
+  const zeroPadding = "0".repeat(24);
+  const found = new Set<`0x${string}`>();
+
+  for (let index = 0; index + 64 <= hex.length; index += 2) {
+    if (hex.slice(index, index + 24) !== zeroPadding) continue;
+    // Only take the start of a zero run. Without this a single padded word matches at every
+    // offset inside its padding and one constant becomes dozens of phantom candidates.
+    if (index >= 2 && hex.slice(index - 2, index) === "00") continue;
+
+    const candidate = hex.slice(index + 24, index + 64);
+    if (/^0+$/u.test(candidate) || /^f+$/u.test(candidate)) continue;
+    // A 20-byte run of printable ASCII is a string fragment, not an address.
+    if (isPrintableAsciiRun(candidate)) continue;
+    found.add(`0x${candidate}`);
+  }
+
+  return [...found];
+}
+
+function isPrintableAsciiRun(hex: string): boolean {
+  for (let index = 0; index < hex.length; index += 2) {
+    const byte = Number.parseInt(hex.slice(index, index + 2), 16);
+    if (!Number.isFinite(byte) || byte < 0x20 || byte > 0x7e) return false;
+  }
+  return true;
+}
+
 function parseRawAmount(value: string | null | undefined): bigint | null {
   if (typeof value !== "string" || !/^-?\d+$/u.test(value)) {
     return null;

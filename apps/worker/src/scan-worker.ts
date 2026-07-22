@@ -33,6 +33,7 @@ import {
   runFoundationDetectors,
   scoreFindings,
   sourceCodeRiskDetector,
+  transferGateDetector,
   type LedgerAccountReconciliation,
   type LedgerReconciliation,
   type PoolReserveSample
@@ -769,6 +770,48 @@ const erc20BalanceOfAbi = parseAbi([
 ]);
 const erc20TotalSupplyAbi = parseAbi(["function totalSupply() view returns (uint256)"]);
 
+/**
+ * Throwaway addresses used to probe a suspected transfer gate. They hold nothing and have never
+ * transacted, so an operator cannot have pre-authorized them — if a gate accepts these, it is
+ * not restricting by wallet.
+ */
+const transferGateProbeOrigins: `0x${string}`[] = [
+  "0x00000000000000000000000000000000000f0001",
+  "0x00000000000000000000000000000000000f0002"
+];
+
+async function readCodeAt(
+  adapter: ChainAdapter,
+  address: `0x${string}`,
+  blockNumber: bigint
+): Promise<`0x${string}` | null> {
+  try {
+    const code = await adapter.getBytecode({ address, blockNumber });
+    return code && code !== "0x" ? code : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Calls an address with empty calldata, which is what a token's transfer hook triggers when it
+ * pokes a gate. Resolves false when the call reverts, meaning that origin would be blocked.
+ */
+async function probeEmptyCall(
+  adapter: ChainAdapter,
+  address: `0x${string}`,
+  origin: `0x${string}`,
+  blockNumber: bigint
+): Promise<boolean> {
+  if (!adapter.traceCall) return true;
+  try {
+    await adapter.traceCall({ from: origin, to: address, data: "0x", blockNumber });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function topicToAddress(topic: `0x${string}`): `0x${string}` {
   return `0x${topic.slice(-40)}`.toLowerCase() as `0x${string}`;
 }
@@ -1332,6 +1375,25 @@ export async function processScanJob(
       },
       detectorRunContext
     );
+    const transferGateResult = await transferGateDetector.run(
+      {
+        bytecode,
+        resolveCode: (address) => readCodeAt(adapter, address, blockNumber),
+        probeCall: (address, origin) => probeEmptyCall(adapter, address, origin, blockNumber),
+        probeOrigins: transferGateProbeOrigins,
+        ownershipRenounced:
+          ownerAddressForEdges === null
+            ? null
+            : burnOrZeroAddresses.has(ownerAddressForEdges.toLowerCase()),
+        ignoredAddresses: [
+          robinhoodUniswapV2RouterAddress,
+          robinhoodWrappedNativeAddress,
+          ...(discoveredPools ?? []).map((pool) => pool.poolAddress),
+          ...(discoveredPools ?? []).map((pool) => pool.quoteTokenAddress)
+        ]
+      },
+      detectorRunContext
+    );
     detectorResults.push(
       sourceDetectorResult,
       ownershipRolesResult,
@@ -1339,7 +1401,8 @@ export async function processScanJob(
       genesispadLaunchResult,
       deployerHistoryResult,
       dexInteractionResult,
-      poolReserveResult
+      poolReserveResult,
+      transferGateResult
     );
     const detectorCompletedAt = now();
     for (const result of detectorResults) {

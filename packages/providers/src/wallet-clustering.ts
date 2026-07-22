@@ -2,6 +2,7 @@ import { parseAbiItem, toEventSelector, type Hex } from "viem";
 import type { ChainAdapter } from "@genesis-sentinel/chain-adapters";
 import type { RelatedWalletEdge } from "@genesis-sentinel/shared";
 import { decimalStringValue, fetchJson, isRecord, stringValue } from "./http.js";
+import { isChainInfrastructure } from "./chain-infrastructure.js";
 
 export interface WalletClusteringProvider {
   readonly id: string;
@@ -69,6 +70,8 @@ const ownershipTransferredEvent = parseAbiItem(
 const ownershipTransferredTopic = toEventSelector(ownershipTransferredEvent);
 
 export interface SupplyTransferScanInput {
+  /** Used to exclude chain infrastructure (fee collectors, precompiles) from the results. */
+  chainId?: number;
   tokenAddress: `0x${string}`;
   /** The wallet whose outgoing Transfer events are scanned — deployer, current owner, or a
    * recovered previous owner. */
@@ -126,6 +129,12 @@ export async function findSupplyTransfersFrom(
         burnOrZeroAddresses.has(toAddress.toLowerCase()) ||
         toAddress.toLowerCase() === input.tokenAddress.toLowerCase()
       ) {
+        continue;
+      }
+      // Chain infrastructure (gas fee collectors, system precompiles) is not the token
+      // operator's wallet. Attributing it to them would associate every address on the chain
+      // with every other, which is how a fee collector was once misread as a scam fleet.
+      if (input.chainId !== undefined && isChainInfrastructure(input.chainId, toAddress)) {
         continue;
       }
 
@@ -304,7 +313,12 @@ export function createBlockscoutWalletClusteringProvider(
       if (chainId !== config.chainId) {
         return null;
       }
-      return findFundingWallet(address, { apiBaseUrl: config.apiBaseUrl }, roleLabel);
+      const edge = await findFundingWallet(address, { apiBaseUrl: config.apiBaseUrl }, roleLabel);
+      // A gas-fee refund or a system precompile is not a funding relationship between wallets.
+      if (edge && isChainInfrastructure(chainId, edge.address)) {
+        return null;
+      }
+      return edge;
     },
 
     async findSupplyTransfers({
@@ -321,6 +335,7 @@ export function createBlockscoutWalletClusteringProvider(
         return [];
       }
       return findSupplyTransfersFrom(adapter, {
+        chainId,
         tokenAddress,
         fromAddress,
         roleLabel,

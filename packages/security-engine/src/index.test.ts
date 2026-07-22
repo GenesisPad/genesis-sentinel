@@ -20,6 +20,7 @@ import {
   scoreFindings,
   selectorPatternDetectors,
   sourceCodeRiskDetector,
+  transferGateDetector,
   type DetectorMetadata
 } from "./index.js";
 
@@ -1501,5 +1502,99 @@ describe("dex interaction surface detector", () => {
 
     expect(result.findings).toHaveLength(0);
     expect(result.checks[0]?.outcome).toBe("PASSED");
+  });
+});
+
+describe("transfer gate detector", () => {
+  const gate = "0xaeeddc8ec2bbb7772f00fa4c735d1a7063f11e5f" as const;
+  const delegate = "0x37a593d139ece78064032c19c943ff4f794dd2ba" as const;
+  // Address constants live in the data section as 20 bytes left-padded into a 32-byte word.
+  const paddedConstant = (address: string) => `${"0".repeat(24)}${address.slice(2)}`;
+  const bytecodeWith = (address: string) => `0x6080604052${paddedConstant(address)}` as const;
+
+  it("flags an EIP-7702 gate that rejects every unaffiliated wallet", async () => {
+    const result = await transferGateDetector.run(
+      {
+        bytecode: bytecodeWith(gate),
+        resolveCode: () => Promise.resolve(`0xef0100${delegate.slice(2)}` as `0x${string}`),
+        probeCall: () => Promise.resolve(false), // gate reverts for every synthetic origin
+        probeOrigins: [
+          "0x1111111111111111111111111111111111111111",
+          "0x2222222222222222222222222222222222222222"
+        ]
+      },
+      context
+    );
+
+    expect(result.findings.map((finding) => finding.code)).toContain("TRANSFER_GATE_ALLOWLIST");
+    expect(result.findings[0]?.severity).toBe("CRITICAL");
+    expect(result.checks[0]?.code).toBe("TRANSFER_GATE_DETECTED");
+    const data = result.checks[0]?.evidence[0]?.data as { gates: { delegatedTo: string }[] };
+    expect(data.gates[0]?.delegatedTo).toBe(delegate);
+  });
+
+  it("reports a hardcoded 7702 account that does not block as a lesser finding", async () => {
+    const result = await transferGateDetector.run(
+      {
+        bytecode: bytecodeWith(gate),
+        resolveCode: () => Promise.resolve(`0xef0100${delegate.slice(2)}` as `0x${string}`),
+        probeCall: () => Promise.resolve(true), // accepts anyone
+        probeOrigins: ["0x1111111111111111111111111111111111111111"]
+      },
+      context
+    );
+
+    const codes = result.findings.map((finding) => finding.code);
+    expect(codes).toContain("TRANSFER_GATE_DELEGATED_ACCOUNT");
+    expect(codes).not.toContain("TRANSFER_GATE_ALLOWLIST");
+  });
+
+  it("calls out a renounced token that still defers to a hardcoded gate", async () => {
+    const result = await transferGateDetector.run(
+      {
+        bytecode: bytecodeWith(gate),
+        resolveCode: () => Promise.resolve(`0xef0100${delegate.slice(2)}` as `0x${string}`),
+        probeCall: () => Promise.resolve(false),
+        probeOrigins: ["0x1111111111111111111111111111111111111111"],
+        ownershipRenounced: true
+      },
+      context
+    );
+
+    expect(result.findings.map((finding) => finding.code)).toContain(
+      "RENOUNCED_BUT_EXTERNALLY_GATED"
+    );
+  });
+
+  it("does not flag ordinary contract constants such as a router", async () => {
+    const router = "0x89e5db8b5aa49aa85ac63f691524311aeb649eba";
+    const result = await transferGateDetector.run(
+      {
+        bytecode: bytecodeWith(router),
+        // An ordinary contract, not a 7702-delegated EOA.
+        resolveCode: () => Promise.resolve("0x6080604052348015600f57600080fd5b50" as `0x${string}`),
+        probeCall: () => Promise.resolve(false),
+        probeOrigins: ["0x1111111111111111111111111111111111111111"]
+      },
+      context
+    );
+
+    expect(result.findings).toHaveLength(0);
+    expect(result.checks[0]?.code).toBe("TRANSFER_GATE_ABSENT");
+  });
+
+  it("skips addresses the caller marked as expected constants", async () => {
+    const result = await transferGateDetector.run(
+      {
+        bytecode: bytecodeWith(gate),
+        resolveCode: () => Promise.resolve(`0xef0100${delegate.slice(2)}` as `0x${string}`),
+        probeCall: () => Promise.resolve(false),
+        probeOrigins: ["0x1111111111111111111111111111111111111111"],
+        ignoredAddresses: [gate]
+      },
+      context
+    );
+
+    expect(result.findings).toHaveLength(0);
   });
 });
