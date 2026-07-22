@@ -31,6 +31,7 @@ import {
   type ScanStageStatus,
   type TokenProfileView,
   type OwnershipStatus,
+  type PublicAnalyticsView,
   type SecurityFindingView,
   type SimulationRunView
 } from "@genesis-sentinel/shared";
@@ -83,6 +84,8 @@ export interface ScanRepository {
   /** Public "recent detections" feed — most recent scan per token, newest first, limited to
    * scans with a real persisted numeric score. */
   getRecentScans(limit: number): Promise<RecentScanView[]>;
+  getPublicAnalytics?(): Promise<PublicAnalyticsView>;
+  recordAnalyticsVisit?(visitorHash: string): Promise<void>;
   getTokenFindings(chainId: number, address: `0x${string}`): Promise<SecurityFindingView[]>;
   getRiskSnapshot(chainId: number, address: `0x${string}`): Promise<RiskSnapshot | null>;
   getScanTarget(scanId: string): Promise<ScanTarget | null>;
@@ -432,6 +435,18 @@ export function createScanRepository(db: PrismaDatabase): ScanRepository {
             scannedAt: (scan.completedAt ?? scan.queuedAt).toISOString()
           }
         ];
+      });
+    },
+
+    async getPublicAnalytics() {
+      return buildPublicAnalytics(db);
+    },
+
+    async recordAnalyticsVisit(visitorHash) {
+      await db.analyticsVisitor.upsert({
+        where: { id: visitorHash },
+        create: { id: visitorHash },
+        update: { visitCount: { increment: 1 } }
       });
     },
 
@@ -1032,6 +1047,172 @@ export function createScanRepository(db: PrismaDatabase): ScanRepository {
         reusedByAddresses: contracts.map((contract) => contract.address as `0x${string}`)
       };
     }
+  };
+}
+
+type AnalyticsAggregateRow = {
+  tokens_analyzed: bigint;
+  scans_completed: bigint;
+  unique_contracts: bigint;
+  high_risk_tokens: bigint;
+  risk_signals: bigint;
+  honeypots: bigint;
+  high_tax_tokens: bigint;
+  dangerous_liquidity_tokens: bigint;
+  concentrated_holder_tokens: bigint;
+  privileged_control_tokens: bigint;
+  analyzed_liquidity_usd: number | null;
+  unique_users: bigint;
+  total_visits: bigint;
+  first_scan_at: Date | null;
+  last_24_hours: bigint;
+  last_7_days: bigint;
+  previous_7_days: bigint;
+  last_30_days: bigint;
+  previous_30_days: bigint;
+};
+
+async function buildPublicAnalytics(db: PrismaDatabase): Promise<PublicAnalyticsView> {
+  const [aggregate] = await db.$queryRaw<AnalyticsAggregateRow[]>(Prisma.sql`
+    WITH completed AS (
+      SELECT * FROM "Scan" WHERE state IN ('COMPLETED', 'PARTIALLY_COMPLETED')
+    ), latest AS (
+      SELECT DISTINCT ON ("chainId", "targetAddress") *
+      FROM completed ORDER BY "chainId", "targetAddress", COALESCE("completedAt", "queuedAt") DESC
+    ), latest_holders AS (
+      SELECT DISTINCT ON ("chainId", "tokenAddress") * FROM "HolderSnapshot"
+      ORDER BY "chainId", "tokenAddress", "blockNumber" DESC
+    )
+    SELECT
+      (SELECT COUNT(DISTINCT ("chainId", "targetAddress")) FROM completed) AS tokens_analyzed,
+      (SELECT COUNT(*) FROM completed) AS scans_completed,
+      (SELECT COUNT(DISTINCT ("chainId", address)) FROM "Contract" WHERE "bytecodeHash" IS NOT NULL) AS unique_contracts,
+      (SELECT COUNT(*) FROM latest l JOIN "RiskAssessment" r ON r."scanId" = l.id WHERE r.level IN ('HIGH', 'CRITICAL')) AS high_risk_tokens,
+      (SELECT COUNT(*) FROM "Finding" f JOIN latest l ON l.id = f."scanId" WHERE f.severity <> 'INFO') AS risk_signals,
+      (SELECT COUNT(DISTINCT (s."chainId", s."targetAddress")) FROM "SimulationRun" sr JOIN latest s ON s.id = sr."scanId" WHERE (sr.result->>'isHoneypot')::boolean IS TRUE) AS honeypots,
+      (SELECT COUNT(DISTINCT (s."chainId", s."targetAddress")) FROM "SimulationRun" sr JOIN latest s ON s.id = sr."scanId" WHERE COALESCE((sr.result->>'buyTaxBps')::numeric, 0) > 500 OR COALESCE((sr.result->>'sellTaxBps')::numeric, 0) > 500 OR COALESCE((sr.result->>'transferTaxBps')::numeric, 0) > 500) AS high_tax_tokens,
+      (SELECT COUNT(DISTINCT ("chainId", "tokenAddress")) FROM "LiquidityPool" WHERE ("liquidityData" ? 'totalLiquidityUsd' AND ("liquidityData"->>'totalLiquidityUsd')::numeric < 1000) OR ("liquidityData" ? 'lpBurnedOrLockedPct' AND ("liquidityData"->>'lpBurnedOrLockedPct')::numeric < 80)) AS dangerous_liquidity_tokens,
+      (SELECT COUNT(*) FROM latest_holders WHERE COALESCE((concentration->>'top10Pct')::numeric, 0) >= 35) AS concentrated_holder_tokens,
+      (SELECT COUNT(DISTINCT (l."chainId", l."targetAddress")) FROM "Finding" f JOIN latest l ON l.id = f."scanId" WHERE f.code ~ '(MINT|BLACKLIST|PAUSE|TAX|TRADING|PROXY|UPGRADE|WHITELIST)') AS privileged_control_tokens,
+      (SELECT COALESCE(SUM(("liquidityData"->>'totalLiquidityUsd')::numeric), 0) FROM "LiquidityPool" WHERE "liquidityData" ? 'totalLiquidityUsd') AS analyzed_liquidity_usd,
+      (SELECT COUNT(*) FROM "AnalyticsVisitor") AS unique_users,
+      (SELECT COALESCE(SUM("visitCount"), 0) FROM "AnalyticsVisitor") AS total_visits,
+      (SELECT MIN(COALESCE("completedAt", "queuedAt")) FROM completed) AS first_scan_at,
+      (SELECT COUNT(*) FROM completed WHERE COALESCE("completedAt", "queuedAt") >= NOW() - INTERVAL '24 hours') AS last_24_hours,
+      (SELECT COUNT(*) FROM completed WHERE COALESCE("completedAt", "queuedAt") >= NOW() - INTERVAL '7 days') AS last_7_days,
+      (SELECT COUNT(*) FROM completed WHERE COALESCE("completedAt", "queuedAt") >= NOW() - INTERVAL '14 days' AND COALESCE("completedAt", "queuedAt") < NOW() - INTERVAL '7 days') AS previous_7_days,
+      (SELECT COUNT(*) FROM completed WHERE COALESCE("completedAt", "queuedAt") >= NOW() - INTERVAL '30 days') AS last_30_days,
+      (SELECT COUNT(*) FROM completed WHERE COALESCE("completedAt", "queuedAt") >= NOW() - INTERVAL '60 days' AND COALESCE("completedAt", "queuedAt") < NOW() - INTERVAL '30 days') AS previous_30_days
+  `);
+
+  if (!aggregate) throw new Error("Analytics aggregate query returned no row.");
+
+  const [daily, categories, risks, trending, coverage] = await Promise.all([
+    db.$queryRaw<Array<{ date: Date; scans: bigint }>>(Prisma.sql`
+      SELECT day::date AS date, COUNT(s.id) AS scans
+      FROM generate_series(CURRENT_DATE - INTERVAL '29 days', CURRENT_DATE, INTERVAL '1 day') day
+      LEFT JOIN "Scan" s ON DATE(COALESCE(s."completedAt", s."queuedAt")) = day::date AND s.state IN ('COMPLETED', 'PARTIALLY_COMPLETED')
+      GROUP BY day ORDER BY day
+    `),
+    db.$queryRaw<Array<{ key: string; count: bigint }>>(Prisma.sql`
+      WITH latest AS (SELECT DISTINCT ON ("chainId", "targetAddress") id FROM "Scan" WHERE state IN ('COMPLETED', 'PARTIALLY_COMPLETED') ORDER BY "chainId", "targetAddress", COALESCE("completedAt", "queuedAt") DESC)
+      SELECT f.category::text AS key, COUNT(*) AS count FROM "Finding" f JOIN latest l ON l.id = f."scanId" WHERE f.severity <> 'INFO' GROUP BY f.category ORDER BY count DESC
+    `),
+    db.$queryRaw<Array<{ key: string; label: string; count: bigint }>>(Prisma.sql`
+      WITH latest AS (SELECT DISTINCT ON ("chainId", "targetAddress") id FROM "Scan" WHERE state IN ('COMPLETED', 'PARTIALLY_COMPLETED') ORDER BY "chainId", "targetAddress", COALESCE("completedAt", "queuedAt") DESC)
+      SELECT f.code AS key, MAX(f.title) AS label, COUNT(*) AS count FROM "Finding" f JOIN latest l ON l.id = f."scanId" WHERE f.severity <> 'INFO' GROUP BY f.code ORDER BY count DESC LIMIT 8
+    `),
+    db.$queryRaw<
+      Array<{
+        chainId: number;
+        address: string;
+        name: string | null;
+        symbol: string | null;
+        scans: bigint;
+        lastScannedAt: Date;
+      }>
+    >(Prisma.sql`
+      SELECT s."chainId", s."targetAddress" AS address, MAX(t.name) AS name, MAX(t.symbol) AS symbol, COUNT(*) AS scans, MAX(COALESCE(s."completedAt", s."queuedAt")) AS "lastScannedAt"
+      FROM "Scan" s LEFT JOIN "Token" t ON t.id = s."tokenId" WHERE COALESCE(s."completedAt", s."queuedAt") >= NOW() - INTERVAL '30 days'
+      GROUP BY s."chainId", s."targetAddress" ORDER BY scans DESC, "lastScannedAt" DESC LIMIT 8
+    `),
+    db.$queryRaw<Array<{ key: string; count: bigint }>>(Prisma.sql`
+      WITH latest AS (SELECT DISTINCT ON ("chainId", "targetAddress") * FROM "Scan" WHERE state IN ('COMPLETED', 'PARTIALLY_COMPLETED') ORDER BY "chainId", "targetAddress", COALESCE("completedAt", "queuedAt") DESC)
+      SELECT 'contracts' AS key, COUNT(*) FROM latest WHERE EXISTS (SELECT 1 FROM "Contract" c WHERE c."chainId" = latest."chainId" AND c.address = latest."targetAddress")
+      UNION ALL SELECT 'liquidity', COUNT(*) FROM latest WHERE EXISTS (SELECT 1 FROM "LiquidityPool" p WHERE p."chainId" = latest."chainId" AND p."tokenAddress" = latest."targetAddress")
+      UNION ALL SELECT 'holders', COUNT(*) FROM latest WHERE EXISTS (SELECT 1 FROM "HolderSnapshot" h WHERE h."chainId" = latest."chainId" AND h."tokenAddress" = latest."targetAddress")
+      UNION ALL SELECT 'simulations', COUNT(*) FROM latest WHERE EXISTS (SELECT 1 FROM "SimulationRun" r WHERE r."scanId" = latest.id AND r."simulationTool" <> '0.1.0-uniswap-v2-route-quote')
+      UNION ALL SELECT 'source', COUNT(*) FROM latest JOIN "Token" t ON t.id = latest."tokenId" WHERE t."sourceVerified" IS TRUE
+    `)
+  ]);
+
+  const n = (value: bigint) => Number(value);
+  const growth = (current: bigint, previous: bigint) =>
+    n(previous) === 0 ? null : Math.round(((n(current) - n(previous)) / n(previous)) * 1000) / 10;
+  const daysLive = aggregate.first_scan_at
+    ? Math.max(1, Math.ceil((Date.now() - aggregate.first_scan_at.getTime()) / 86_400_000))
+    : 1;
+  const labels: Record<string, string> = {
+    CONTRACT_CONTROL: "Contract controls",
+    TRADING_SAFETY: "Trading safety",
+    LIQUIDITY_SAFETY: "Liquidity",
+    DISTRIBUTION_RISK: "Holder distribution",
+    REPUTATION_RISK: "Reputation",
+    contracts: "Contract bytecode",
+    liquidity: "Liquidity",
+    holders: "Holder analysis",
+    simulations: "Executed simulations",
+    source: "Verified source"
+  };
+
+  return {
+    generatedAt: new Date().toISOString(),
+    totals: {
+      tokensAnalyzed: n(aggregate.tokens_analyzed),
+      scansCompleted: n(aggregate.scans_completed),
+      uniqueContracts: n(aggregate.unique_contracts),
+      highRiskTokens: n(aggregate.high_risk_tokens),
+      riskSignals: n(aggregate.risk_signals),
+      honeypots: n(aggregate.honeypots),
+      highTaxTokens: n(aggregate.high_tax_tokens),
+      dangerousLiquidityTokens: n(aggregate.dangerous_liquidity_tokens),
+      concentratedHolderTokens: n(aggregate.concentrated_holder_tokens),
+      privilegedControlTokens: n(aggregate.privileged_control_tokens),
+      analyzedLiquidityUsd: Number(aggregate.analyzed_liquidity_usd ?? 0),
+      uniqueUsers: n(aggregate.unique_users),
+      totalVisits: n(aggregate.total_visits)
+    },
+    activity: {
+      last24Hours: n(aggregate.last_24_hours),
+      last7Days: n(aggregate.last_7_days),
+      last30Days: n(aggregate.last_30_days),
+      averagePerDay: Math.round((n(aggregate.scans_completed) / daysLive) * 10) / 10,
+      sevenDayGrowthPct: growth(aggregate.last_7_days, aggregate.previous_7_days),
+      thirtyDayGrowthPct: growth(aggregate.last_30_days, aggregate.previous_30_days),
+      daily: daily.map((row) => ({
+        date: row.date.toISOString().slice(0, 10),
+        scans: n(row.scans)
+      }))
+    },
+    riskCategories: categories.map((row) => ({
+      key: row.key,
+      label: labels[row.key] ?? row.key,
+      count: n(row.count)
+    })),
+    frequentRisks: risks.map((row) => ({ key: row.key, label: row.label, count: n(row.count) })),
+    trendingTokens: trending.map((row) => ({
+      chainId: row.chainId,
+      address: row.address as `0x${string}`,
+      name: row.name,
+      symbol: row.symbol,
+      scans: n(row.scans),
+      lastScannedAt: row.lastScannedAt.toISOString()
+    })),
+    coverage: coverage.map((row) => ({
+      key: row.key,
+      label: labels[row.key] ?? row.key,
+      count: n(row.count)
+    }))
   };
 }
 

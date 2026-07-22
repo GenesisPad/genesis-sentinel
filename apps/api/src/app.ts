@@ -3,6 +3,7 @@ import rateLimit from "@fastify/rate-limit";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import Fastify from "fastify";
+import { createHmac } from "node:crypto";
 import { z } from "zod";
 import type { AppEnv } from "@genesis-sentinel/config";
 import {
@@ -45,6 +46,11 @@ declare module "fastify" {
      * Undefined when no key was presented at all (anonymous request is still allowed). */
     apiKey?: ApiKeyView;
   }
+}
+
+function analyticsVisitorHash(ip: string, secret: string | undefined): string | undefined {
+  if (!secret) return undefined;
+  return `web:${createHmac("sha256", secret).update(ip).digest("hex").slice(0, 24)}`;
 }
 
 const evmAddressSchema = z.custom<`0x${string}`>(
@@ -356,6 +362,20 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       return { scans: await scans.getRecentScans(limit) };
     }
   );
+
+  app.get("/v1/analytics", async (_request, reply) => {
+    if (!scans.getPublicAnalytics) {
+      return reply.code(503).send({ error: "analytics_unavailable", message: "Analytics are temporarily unavailable." });
+    }
+    reply.header("cache-control", "public, max-age=60, stale-while-revalidate=300");
+    return scans.getPublicAnalytics();
+  });
+
+  app.post("/v1/analytics/visit", async (request, reply) => {
+    const visitorHash = analyticsVisitorHash(request.ip, env.API_ADMIN_SECRET);
+    if (visitorHash && scans.recordAnalyticsVisit) await scans.recordAnalyticsVisit(visitorHash);
+    return reply.code(204).send();
+  });
 
   app.get(
     "/v1/scans/:scanId",

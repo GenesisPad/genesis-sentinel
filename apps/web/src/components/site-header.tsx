@@ -5,6 +5,7 @@ import { ExternalLink, Menu, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const NAV = [
+  { label: "Analytics", href: "/analytics" },
   { label: "Explore", href: "/explore" },
   { label: "API", href: "/api" },
   { label: "Docs", href: "/docs" },

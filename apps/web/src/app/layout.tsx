@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { JetBrains_Mono, Manrope, Space_Grotesk } from "next/font/google";
 import { Providers } from "./providers";
 import { SiteHeader } from "@/components/site-header";
+import { AnalyticsVisitTracker } from "@/components/analytics-visit-tracker";
 import "./globals.css";
 
 const manrope = Manrope({ subsets: ["latin"], variable: "--font-manrope", display: "swap" });
@@ -41,6 +42,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           Skip to content
         </a>
         <Providers>
+          <AnalyticsVisitTracker />
           <SiteHeader />
           <div id="main">{children}</div>
         </Providers>

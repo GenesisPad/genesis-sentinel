@@ -202,6 +202,15 @@ model ScanStage {
   @@unique([scanId, name])
 }
 
+/// Privacy-preserving public traffic counter. `id` is a truncated HMAC of the requester IP;
+/// raw IP addresses are never persisted.
+model AnalyticsVisitor {
+  id          String   @id
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @updatedAt
+  visitCount  Int      @default(1)
+}
+
 model Detector {
   id          String   @id
   name        String

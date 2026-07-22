@@ -1,5 +1,6 @@
 import type { ChainId } from "./chains";
 import type { RecentScan, ScanJob, ScanReport, ScanStage } from "./types";
+import type { PublicAnalyticsView } from "@genesis-sentinel/shared";
 
 const STAGE_DEFS: Array<{ key: ScanStage["key"]; label: string }> = [
   { key: "resolving_chain", label: "Resolving chain" },
@@ -217,7 +218,8 @@ export function buildFixtureReport(chainId: ChainId, address: string): ScanRepor
         type: "FUNDED_BY",
         address: "0x00000000000000000000000000000000000f42",
         confidence: "medium",
-        evidence: "Earliest inbound native-value transfer found within the bounded window came from this wallet.",
+        evidence:
+          "Earliest inbound native-value transfer found within the bounded window came from this wallet.",
         source: "blockscout-transaction-history"
       }
     ],
@@ -271,3 +273,71 @@ export const FIXTURE_RECENT: RecentScan[] = [
     scannedAt: new Date(Date.now() - 24 * 60_000).toISOString()
   }
 ];
+
+export function buildFixtureAnalytics(): PublicAnalyticsView {
+  const today = new Date();
+  return {
+    generatedAt: today.toISOString(),
+    totals: {
+      tokensAnalyzed: 4281,
+      scansCompleted: 7142,
+      uniqueContracts: 4239,
+      highRiskTokens: 936,
+      riskSignals: 3864,
+      honeypots: 147,
+      highTaxTokens: 392,
+      dangerousLiquidityTokens: 618,
+      concentratedHolderTokens: 804,
+      privilegedControlTokens: 1127,
+      analyzedLiquidityUsd: 12_480_000,
+      uniqueUsers: 2638,
+      totalVisits: 18492
+    },
+    activity: {
+      last24Hours: 184,
+      last7Days: 1032,
+      last30Days: 3814,
+      averagePerDay: 127.1,
+      sevenDayGrowthPct: 18.4,
+      thirtyDayGrowthPct: 31.2,
+      daily: Array.from({ length: 30 }, (_, index) => {
+        const date = new Date(today);
+        date.setDate(today.getDate() - (29 - index));
+        return {
+          date: date.toISOString().slice(0, 10),
+          scans: 78 + ((index * 37) % 91) + Math.round(Math.sin(index / 2) * 22)
+        };
+      })
+    },
+    riskCategories: [
+      { key: "CONTRACT_CONTROL", label: "Contract controls", count: 1240 },
+      { key: "TRADING_SAFETY", label: "Trading safety", count: 982 },
+      { key: "LIQUIDITY_SAFETY", label: "Liquidity", count: 734 },
+      { key: "DISTRIBUTION_RISK", label: "Holder distribution", count: 621 },
+      { key: "REPUTATION_RISK", label: "Reputation", count: 287 }
+    ],
+    frequentRisks: [
+      { key: "TAX", label: "Mutable token taxes", count: 584 },
+      { key: "OWNER", label: "Active owner controls", count: 512 },
+      { key: "LIQUIDITY", label: "Unlocked liquidity", count: 438 },
+      { key: "HOLDERS", label: "Concentrated supply", count: 391 },
+      { key: "BLACKLIST", label: "Blacklist capability", count: 284 },
+      { key: "MINT", label: "Mint capability", count: 229 }
+    ],
+    trendingTokens: FIXTURE_RECENT.slice(0, 5).map((token, index) => ({
+      chainId: 4663,
+      address: token.address as `0x${string}`,
+      name: token.name,
+      symbol: token.symbol,
+      scans: 42 - index * 6,
+      lastScannedAt: token.scannedAt
+    })),
+    coverage: [
+      { key: "contracts", label: "Contract bytecode", count: 4239 },
+      { key: "liquidity", label: "Liquidity", count: 3680 },
+      { key: "holders", label: "Holder analysis", count: 3492 },
+      { key: "simulations", label: "Executed simulations", count: 2918 },
+      { key: "source", label: "Verified source", count: 1764 }
+    ]
+  };
+}

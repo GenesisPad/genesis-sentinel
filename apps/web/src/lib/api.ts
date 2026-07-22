@@ -1,8 +1,8 @@
-import type { ScanProgress, ScanResultView } from "@genesis-sentinel/shared";
+import type { PublicAnalyticsView, ScanProgress, ScanResultView } from "@genesis-sentinel/shared";
 import { mapProgressToJob, mapResultToReport } from "./adapt";
 import { CHAINS, type ChainId } from "./chains";
 import type { RecentScan, ScanJob, ScanReport } from "./types";
-import { FIXTURE_RECENT, buildFixtureJob, buildFixtureReport } from "./fixtures";
+import { FIXTURE_RECENT, buildFixtureAnalytics, buildFixtureJob, buildFixtureReport } from "./fixtures";
 
 // Relative by default: the production Nginx config proxies /v1/* to the API on the same
 // origin, so no build-time env value has to be baked into the client bundle to get this
@@ -155,6 +155,16 @@ export async function getRecentScans(): Promise<RecentScan[]> {
     riskLevel: row.riskLevel,
     scannedAt: row.scannedAt,
   }));
+}
+
+export async function getPublicAnalytics(): Promise<PublicAnalyticsView> {
+  if (USE_FIXTURES) return buildFixtureAnalytics();
+  return (await request("/analytics")) as PublicAnalyticsView;
+}
+
+export async function recordAnalyticsVisit(): Promise<void> {
+  if (USE_FIXTURES || typeof window === "undefined") return;
+  await request("/analytics/visit", { method: "POST" });
 }
 
 interface RecentScanApiRow {

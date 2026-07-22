@@ -304,6 +304,58 @@ export interface RecentScanView {
   scannedAt: string;
 }
 
+export interface AnalyticsSeriesPoint {
+  date: string;
+  scans: number;
+}
+
+export interface AnalyticsBreakdownItem {
+  key: string;
+  label: string;
+  count: number;
+}
+
+export interface AnalyticsTrendingToken {
+  chainId: number;
+  address: `0x${string}`;
+  name: string | null;
+  symbol: string | null;
+  scans: number;
+  lastScannedAt: string;
+}
+
+export interface PublicAnalyticsView {
+  generatedAt: string;
+  totals: {
+    tokensAnalyzed: number;
+    scansCompleted: number;
+    uniqueContracts: number;
+    highRiskTokens: number;
+    riskSignals: number;
+    honeypots: number;
+    highTaxTokens: number;
+    dangerousLiquidityTokens: number;
+    concentratedHolderTokens: number;
+    privilegedControlTokens: number;
+    analyzedLiquidityUsd: number;
+    uniqueUsers: number;
+    totalVisits: number;
+  };
+  activity: {
+    last24Hours: number;
+    last7Days: number;
+    last30Days: number;
+    averagePerDay: number;
+    sevenDayGrowthPct: number | null;
+    thirtyDayGrowthPct: number | null;
+    daily: AnalyticsSeriesPoint[];
+  };
+  riskCategories: AnalyticsBreakdownItem[];
+  frequentRisks: AnalyticsBreakdownItem[];
+  trendingTokens: AnalyticsTrendingToken[];
+  coverage: AnalyticsBreakdownItem[];
+}
+
 export interface RiskSnapshot {
   chainId: number;
   address: `0x${string}`;
@@ -1001,12 +1053,14 @@ function buildDeployerBalance(result: ScanResultView): DeployerBalanceView | nul
 
   const snapshot = result.holders.snapshots[0];
   const concentration = snapshot?.concentration as
-    | { deployerPct?: number | null; deployerBalanceRaw?: string | null }
-    | undefined;
+    { deployerPct?: number | null; deployerBalanceRaw?: string | null } | undefined;
   if (!concentration) return null;
 
   return {
-    amountRaw: typeof concentration.deployerBalanceRaw === "string" ? concentration.deployerBalanceRaw : null,
+    amountRaw:
+      typeof concentration.deployerBalanceRaw === "string"
+        ? concentration.deployerBalanceRaw
+        : null,
     pctOfSupply: typeof concentration.deployerPct === "number" ? concentration.deployerPct : null
   };
 }
