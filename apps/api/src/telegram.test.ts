@@ -710,4 +710,62 @@ describe("telegram report informativeness", () => {
     expect(reply).toContain("12.50%");
     expect(reply).toContain("Burned supply is excluded");
   });
+
+  it("surfaces a compact controls flag count inline when a control surface is detected", () => {
+    const reply = formatTelegramResultReply(
+      baseResult({
+        findings: [
+          {
+            id: "f1",
+            code: "SOURCE_MINT_OR_SUPPLY_CONTROL",
+            detectorId: "source-code-risk-patterns",
+            detectorVersion: "0.1.0",
+            title: "Source code exposes mint or supply-control functions",
+            severity: "HIGH",
+            category: "CONTRACT_CONTROL",
+            confidence: "HIGH",
+            description: "d",
+            technicalExplanation: "t",
+            evidence: []
+          }
+        ]
+      })
+    );
+
+    expect(reply).toContain("Controls: 1 flag");
+    expect(reply).toContain("Can create more tokens");
+  });
+
+  it("reports no concerning control flags when nothing was detected", () => {
+    const reply = formatTelegramResultReply(baseResult());
+    expect(reply).toContain("Controls: no concerning flags");
+  });
+
+  it("breaks down every control-surface signal in the dedicated Controls section", () => {
+    const reply = formatTelegramSectionReply(
+      "controls",
+      baseResult({
+        findings: [
+          {
+            id: "f1",
+            code: "SOURCE_MINT_OR_SUPPLY_CONTROL",
+            detectorId: "source-code-risk-patterns",
+            detectorVersion: "0.1.0",
+            title: "Source code exposes mint or supply-control functions",
+            severity: "HIGH",
+            category: "CONTRACT_CONTROL",
+            confidence: "HIGH",
+            description: "d",
+            technicalExplanation: "t",
+            evidence: []
+          }
+        ]
+      })
+    );
+
+    expect(reply).toContain("Contract controls");
+    expect(reply).toContain("Can create more tokens: Yes");
+    // Signals with no evidence either way must read as unresolved, never a false "No".
+    expect(reply).toContain("Can block wallets: Unknown");
+  });
 });

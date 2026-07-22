@@ -12,7 +12,9 @@ import {
   type LiquidityHealthTier,
   type ScanProgress,
   type ScanResultView,
-  type SecurityFindingView
+  type SecurityFindingView,
+  type SecuritySignalAnswer,
+  type SecuritySignalSeverity
 } from "@genesis-sentinel/shared";
 import type { SubmitScanInput } from "./scan-service.js";
 
@@ -276,7 +278,7 @@ export function createTelegramBot(options: {
     await context.answerCallbackQuery();
   });
 
-  bot.callbackQuery(/^section:(holders|taxes|chart|cluster):(.+)$/u, async (context) => {
+  bot.callbackQuery(/^section:(holders|taxes|chart|cluster|controls):(.+)$/u, async (context) => {
     const section = context.match[1];
     const scanId = resolveTelegramCallbackScanId(callbackRegistry, context.match[2]);
     if (!isTelegramResultSection(section) || !scanId) {
@@ -366,9 +368,13 @@ export function createTelegramBot(options: {
 
 function isTelegramResultSection(
   value: string | undefined
-): value is "holders" | "taxes" | "chart" | "cluster" {
+): value is "holders" | "taxes" | "chart" | "cluster" | "controls" {
   return (
-    value === "holders" || value === "taxes" || value === "chart" || value === "cluster"
+    value === "holders" ||
+    value === "taxes" ||
+    value === "chart" ||
+    value === "cluster" ||
+    value === "controls"
   );
 }
 
@@ -532,6 +538,7 @@ export function formatTelegramResultReply(result: ScanResultView): string {
     honeypot ? `Honeypot: ${honeypot}` : null,
     capabilityLine(result),
     taxLine(tax),
+    controlsSummaryLine(result),
     "",
     ownership ? `Owner: ${ownership}${ownerAddress}` : null,
     result.token.deployerAddress ? `Deployer: \`${shortenAddress(result.token.deployerAddress)}\`` : null,
@@ -566,9 +573,10 @@ export function createTelegramResultKeyboard(
 ): InlineKeyboard {
   const keyboard = new InlineKeyboard()
     .text("Holders", `section:holders:${callbackScanId}`)
+    .text("Controls", `section:controls:${callbackScanId}`)
     .text("Dev cluster", `section:cluster:${callbackScanId}`)
-    .text("Taxes", `section:taxes:${callbackScanId}`)
     .row()
+    .text("Taxes", `section:taxes:${callbackScanId}`)
     .text("Chart", `section:chart:${callbackScanId}`)
     .text("Refresh", `refresh:${callbackScanId}`);
   return fullReportUrl ? keyboard.row().url("Full Report", fullReportUrl) : keyboard;
@@ -623,10 +631,62 @@ function resolveTelegramCallbackScanId(
   return registry.scanIdsByKey.get(callbackScanId) ?? callbackScanId;
 }
 
+/** Signal ids from buildTokenSecuritySummary's `signals` array that belong on the "Controls"
+ * section — the same capability flags the web app's Contract Controls grid shows. Excludes
+ * honeypot, buy_tax, sell_tax, dev_cluster, and creator_address, which already have their own
+ * dedicated sections/inline lines elsewhere in this bot. */
+const CONTROLS_SIGNAL_IDS = [
+  "can_create_more_tokens",
+  "can_block_wallets",
+  "can_pause_transfers",
+  "trading_cooldown",
+  "has_whitelist",
+  "proxy_contract",
+  "hidden_owner_controls",
+  "obfuscated_address",
+  "suspicious_functions",
+  "ownership_renounced"
+];
+
+function signalSeverityEmoji(severity: SecuritySignalSeverity): string {
+  if (severity === "CRITICAL") return "🔴";
+  if (severity === "HIGH") return "🟠";
+  if (severity === "WARN") return "🟡";
+  if (severity === "GOOD") return "🟢";
+  return "⚪";
+}
+
+function formatSignalAnswer(answer: SecuritySignalAnswer): string {
+  if (answer === "YES") return "Yes";
+  if (answer === "NO") return "No";
+  return "Unknown";
+}
+
 export function formatTelegramSectionReply(
-  section: "holders" | "taxes" | "chart" | "cluster",
+  section: "holders" | "taxes" | "chart" | "cluster" | "controls",
   result: ScanResultView
 ): string {
+  if (section === "controls") {
+    const { signals } = buildTokenSecuritySummary(result);
+    const rows = CONTROLS_SIGNAL_IDS.map((id) => signals.find((signal) => signal.id === id)).filter(
+      (signal): signal is (typeof signals)[number] => signal !== undefined
+    );
+
+    if (rows.length === 0) {
+      return "*Contract controls*\nNo control-surface evidence was returned by the configured detectors for this scan.";
+    }
+
+    return compact([
+      "*Contract controls*",
+      ...rows.map((signal) => {
+        const value = signal.value ? ` (${escapeMarkdown(signal.value)})` : "";
+        return `${signalSeverityEmoji(signal.severity)} ${escapeMarkdown(signal.label)}: ${formatSignalAnswer(signal.answer)}${value}`;
+      }),
+      "",
+      "_A capability existing does not prove it will be used — see /result for evidence and Top risks for what's actually confirmed._"
+    ]).join("\n");
+  }
+
   if (section === "cluster") {
     const { devCluster } = buildTokenSecuritySummary(result);
     if (devCluster.walletCount === 0) {
@@ -968,6 +1028,24 @@ function taxLine(tax: { buy: string; sell: string; transfer: string }): string |
     tax.transfer ? `T ${markPunitiveTax(tax.transfer)}` : null,
   ].filter((value): value is string => value !== null);
   return values.length > 0 ? `Tax: ${values.join(" | ")}` : null;
+}
+
+/** A one-line glance at the same control-surface signals the /Controls button breaks down in
+ * full — severity (not the raw yes/no answer) marks "concerning," since ownership_renounced
+ * flags concern on answer NO (owner still active), the inverse of every other signal here. */
+function controlsSummaryLine(result: ScanResultView): string | null {
+  const { signals } = buildTokenSecuritySummary(result);
+  const flagged = CONTROLS_SIGNAL_IDS.map((id) => signals.find((signal) => signal.id === id))
+    .filter((signal): signal is (typeof signals)[number] => signal !== undefined)
+    .filter(
+      (signal) =>
+        signal.severity === "WARN" || signal.severity === "HIGH" || signal.severity === "CRITICAL"
+    );
+
+  if (flagged.length === 0) return "Controls: no concerning flags";
+  return `Controls: ${flagged.length} flag${flagged.length === 1 ? "" : "s"} — ${flagged
+    .map((signal) => escapeMarkdown(signal.label))
+    .join(", ")}`;
 }
 
 function tokenAgeLine(result: ScanResultView): string | null {
