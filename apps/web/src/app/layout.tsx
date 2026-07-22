@@ -30,7 +30,7 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     siteName: "Genesis Sentinel",
-    images: [{ url: socialImage, width: 1200, height: 630, alt: "Genesis Sentinel token scanner" }],
+    images: [{ url: socialImage, width: 1981, height: 793, alt: "Genesis Sentinel smart contract security scanner" }],
   },
   twitter: { card: "summary_large_image", images: [socialImage] },
 };

@@ -47,7 +47,7 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
       description,
       url: canonical,
       type: "article",
-      images: [{ url: image, width: 1200, height: 630, alt: "Genesis Sentinel token scanner" }],
+      images: [{ url: image, width: 1981, height: 793, alt: "Genesis Sentinel smart contract security scanner" }],
     },
     twitter: { card: "summary_large_image", title, description, images: [image] },
   };
