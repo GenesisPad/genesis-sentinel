@@ -756,6 +756,20 @@ export const ownershipStatusDetector: SecurityDetector<OwnerAddressDetectorInput
 export const selectorPatternDetectors: SecurityDetector<BytecodeDetectorInput>[] =
   selectorRules.map((rule) => createSelectorDetector(rule));
 
+/**
+ * A rule's regex can match a genuinely dangerous shape and a well-known benign shape with the
+ * same keyword (e.g. `rescue`-named functions that recover foreign tokens vs. ones that drain
+ * this token; `burnFrom` gated by allowance vs. an unrestricted burn-anyone's-balance function).
+ * `classifyMatch` lets a specific pattern look at the full match context and the code) and
+ * confirm the occurrence is a known-safe shape. Returning null/undefined leaves the match at the
+ * rule's default severity — failing to prove benign-ness is not the same as proving risk, so an
+ * unresolved case must never silently clear.
+ */
+interface SourceRiskPattern {
+  regex: RegExp;
+  classifyMatch?: (source: string, matchIndex: number) => { note: string } | null;
+}
+
 interface SourceRiskRule {
   code: string;
   title: string;
@@ -765,7 +779,65 @@ interface SourceRiskRule {
   description: string;
   technicalExplanation: string;
   recommendation: string;
-  patterns: RegExp[];
+  patterns: SourceRiskPattern[];
+}
+
+/**
+ * Extracts a full brace-balanced function body starting from the first `{` at or after
+ * `fromIndex`, instead of a fixed-radius text snippet — verifying a benign shape (e.g. a guard
+ * clause) requires seeing the whole function, not just ~360 characters around the match.
+ */
+function extractFunctionBodyAt(source: string, fromIndex: number): string | null {
+  const braceStart = source.indexOf("{", fromIndex);
+  if (braceStart === -1) return null;
+
+  let depth = 0;
+  for (let i = braceStart; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}") {
+      depth--;
+      if (depth === 0) return source.slice(braceStart, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * Confirms a matched rescue/recover/sweep function explicitly reverts when its token parameter
+ * equals this contract's own address — the standard, safe shape for recovering foreign tokens
+ * accidentally sent to the contract, which cannot touch this token's own balances.
+ */
+function classifyRescueFunction(source: string, matchIndex: number): { note: string } | null {
+  const body = extractFunctionBodyAt(source, matchIndex);
+  if (!body) return null;
+
+  const excludesSelf =
+    /require\s*\(\s*\w+\s*!=\s*address\s*\(\s*this\s*\)/.test(body) ||
+    /if\s*\(\s*\w+\s*==\s*address\s*\(\s*this\s*\)\s*\)\s*revert/.test(body);
+  if (!excludesSelf) return null;
+
+  return {
+    note: "the matched rescue/recover/sweep function explicitly reverts when its token parameter equals this contract's own address, so it can only recover foreign tokens accidentally sent here, not this token's balances"
+  };
+}
+
+/**
+ * Confirms a matched `burnFrom` is the standard OpenZeppelin ERC20Burnable shape: it spends the
+ * caller's allowance from the target before burning, so it can only burn tokens the holder has
+ * already approved — not an unrestricted admin power to destroy any holder's balance.
+ */
+function classifyBurnFrom(source: string, matchIndex: number): { note: string } | null {
+  const body = extractFunctionBodyAt(source, matchIndex);
+  if (!body) return null;
+
+  const allowanceGated =
+    /_spendAllowance\s*\(/.test(body) ||
+    /allowance\s*\(\s*\w+\s*,\s*(?:_msgSender\s*\(\s*\)|msg\.sender)\s*\)/.test(body);
+  if (!allowanceGated) return null;
+
+  return {
+    note: "burnFrom spends the target's allowance to the caller before burning — the standard OpenZeppelin ERC20Burnable pattern, which can only burn tokens the holder has already approved, not seize arbitrary balances"
+  };
 }
 
 const sourceRiskRules: SourceRiskRule[] = [
@@ -782,8 +854,8 @@ const sourceRiskRules: SourceRiskRule[] = [
     recommendation:
       "Review who can call these controls and whether trade simulation confirms normal buyers can still sell.",
     patterns: [
-      /\b(?:blacklist|blacklisted|blocklist|blocked|isBot|bots)\b/i,
-      /\bmapping\s*\([^)]*address[^)]*\)\s*(?:public|private|internal)?\s*(?:_|is)?(?:blacklist|blacklisted|blocklist|blocked|bot|bots)/i
+      { regex: /\b(?:blacklist|blacklisted|blocklist|blocked|isBot|bots)\b/i },
+      { regex: /\bmapping\s*\([^)]*address[^)]*\)\s*(?:public|private|internal)?\s*(?:_|is)?(?:blacklist|blacklisted|blocklist|blocked|bot|bots)/i }
     ]
   },
   {
@@ -799,9 +871,9 @@ const sourceRiskRules: SourceRiskRule[] = [
     recommendation:
       "Review whether the cooldown is temporary/fixed or can be changed by a privileged role after launch.",
     patterns: [
-      /\b(?:cooldown|coolDown|transferDelay|antiBot|antiSnipe|sniper|launchBlock|limitsInEffect|_holderLastTransferTimestamp|lastTransferTimestamp)\b/i,
-      /\bfunction\s+\w*(?:setCooldown|setTransferDelay|setAntiBot|setAntiSnipe|removeLimits)\w*\s*\(/i,
-      /\bmapping\s*\([^)]*address[^)]*\)\s*(?:public|private|internal)?\s*\w*(?:cooldown|lastTransfer|lastTx)\w*/i
+      { regex: /\b(?:cooldown|coolDown|transferDelay|antiBot|antiSnipe|sniper|launchBlock|limitsInEffect|_holderLastTransferTimestamp|lastTransferTimestamp)\b/i },
+      { regex: /\bfunction\s+\w*(?:setCooldown|setTransferDelay|setAntiBot|setAntiSnipe|removeLimits)\w*\s*\(/i },
+      { regex: /\bmapping\s*\([^)]*address[^)]*\)\s*(?:public|private|internal)?\s*\w*(?:cooldown|lastTransfer|lastTx)\w*/i }
     ]
   },
   {
@@ -817,8 +889,8 @@ const sourceRiskRules: SourceRiskRule[] = [
     recommendation:
       "Verify current trading state and whether the owner/admin can disable trading after launch.",
     patterns: [
-      /\b(?:tradingOpen|tradingEnabled|tradingActive|openTrading|enableTrading|swapEnabled|limitsInEffect|launched)\b/i,
-      /\brequire\s*\([^;]*(?:trading|launched|swapEnabled|limitsInEffect)[^;]*\)/i
+      { regex: /\b(?:tradingOpen|tradingEnabled|tradingActive|openTrading|enableTrading|swapEnabled|limitsInEffect|launched)\b/i },
+      { regex: /\brequire\s*\([^;]*(?:trading|launched|swapEnabled|limitsInEffect)[^;]*\)/i }
     ]
   },
   {
@@ -834,8 +906,8 @@ const sourceRiskRules: SourceRiskRule[] = [
     recommendation:
       "Manually inspect the matched functions and compare owner(), roles, and storage writes before trusting renounced ownership.",
     patterns: [
-      /\bfunction\s+(?:reclaimOwnership|recoverOwnership|restoreOwnership|manualOwnership|setOwner)\s*\(/i,
-      /\b(?:reclaimOwnership|recoverOwnership|restoreOwnership)\b/i
+      { regex: /\bfunction\s+(?:reclaimOwnership|recoverOwnership|restoreOwnership|manualOwnership|setOwner)\s*\(/i },
+      { regex: /\b(?:reclaimOwnership|recoverOwnership|restoreOwnership)\b/i }
     ]
   },
   {
@@ -851,8 +923,8 @@ const sourceRiskRules: SourceRiskRule[] = [
     recommendation:
       "Review role holders and admin functions, especially if owner() appears renounced but roles remain active.",
     patterns: [
-      /\b(?:DEFAULT_ADMIN_ROLE|MINTER_ROLE|PAUSER_ROLE|grantRole|revokeRole|_grantRole|AccessControl)\b/i,
-      /\bfunction\s+(?:setAdmin|setOperator|setController|setManager|setMinter|setPauser)\s*\(/i
+      { regex: /\b(?:DEFAULT_ADMIN_ROLE|MINTER_ROLE|PAUSER_ROLE|grantRole|revokeRole|_grantRole|AccessControl)\b/i },
+      { regex: /\bfunction\s+(?:setAdmin|setOperator|setController|setManager|setMinter|setPauser)\s*\(/i }
     ]
   },
   {
@@ -864,12 +936,21 @@ const sourceRiskRules: SourceRiskRule[] = [
     description:
       "Verified source code contains functions or transfer paths that may let an admin move or seize tokens outside normal ERC-20 allowance rules.",
     technicalExplanation:
-      "The detector matched forced transfer, confiscation, seizure, or suspicious admin transfer function names/source paths.",
+      "The detector matched forced transfer, confiscation, seizure, unrestricted burnFrom, or suspicious admin transfer function names/source paths.",
     recommendation:
       "Inspect whether any privileged role can transfer tokens from holders without allowance. Treat confirmed forced-transfer capability as critical.",
     patterns: [
-      /\b(?:forceTransfer|forcedTransfer|adminTransfer|operatorTransfer|seize|confiscate|clawback|wipe|burnFrom)\b/i,
-      /function\s+\w*(?:rescue|recover|sweep)\w*\s*\([^)]*address\s+(?:token|from|account|wallet)/i
+      // forceTransfer/seize/confiscate/clawback/wipe have no known-benign shape — any real
+      // occurrence stays at full severity, unlike burnFrom and rescue below.
+      { regex: /\b(?:forceTransfer|forcedTransfer|adminTransfer|operatorTransfer|seize|confiscate|clawback|wipe)\b/i },
+      // burnFrom matches the OpenZeppelin ERC20Burnable name, which is allowance-gated and safe
+      // by far the most common case, but an unrestricted override sharing the same name would
+      // not be — classifyBurnFrom reads the actual function body to tell them apart.
+      { regex: /\bfunction\s+burnFrom\s*\(/i, classifyMatch: classifyBurnFrom },
+      {
+        regex: /function\s+\w*(?:rescue|recover|sweep)\w*\s*\([^)]*address\s+(?:token|from|account|wallet)/i,
+        classifyMatch: classifyRescueFunction
+      }
     ]
   },
   {
@@ -885,9 +966,9 @@ const sourceRiskRules: SourceRiskRule[] = [
     recommendation:
       "Manually inspect the matched address construction and confirm what wallet or contract it resolves to before trusting ownership, routing, or fee destinations.",
     patterns: [
-      /\baddress\s*\(\s*uint160\s*\(\s*(?:uint256\s*\(\s*)?0x[a-fA-F0-9]{20,64}\s*\)?\s*\)\s*\)/i,
-      /\baddress\s*\(\s*uint160\s*\([^)]*(?:\^|&|\|)[^)]*0x[a-fA-F0-9]{20,64}[^)]*\)\s*\)/i,
-      /\bassembly\s*\{[\s\S]{0,500}\b(?:mstore|sstore)\b[\s\S]{0,160}0x[a-fA-F0-9]{40,64}[\s\S]{0,500}\}/i
+      { regex: /\baddress\s*\(\s*uint160\s*\(\s*(?:uint256\s*\(\s*)?0x[a-fA-F0-9]{20,64}\s*\)?\s*\)\s*\)/i },
+      { regex: /\baddress\s*\(\s*uint160\s*\([^)]*(?:\^|&|\|)[^)]*0x[a-fA-F0-9]{20,64}[^)]*\)\s*\)/i },
+      { regex: /\bassembly\s*\{[\s\S]{0,500}\b(?:mstore|sstore)\b[\s\S]{0,160}0x[a-fA-F0-9]{40,64}[\s\S]{0,500}\}/i }
     ]
   },
   {
@@ -903,9 +984,9 @@ const sourceRiskRules: SourceRiskRule[] = [
     recommendation:
       "Verify mint permissions, max supply, and whether minting has been permanently disabled.",
     patterns: [
-      /\bfunction\s+\w*mint\w*\s*\([^)]*\)\s*(?:external|public)\b/i,
-      /\b(?:MINTER_ROLE|setMinter|grantRole\s*\(\s*MINTER_ROLE)\b/i,
-      /\b(?:setSupply|increaseSupply)\s*\(/i
+      { regex: /\bfunction\s+\w*mint\w*\s*\([^)]*\)\s*(?:external|public)\b/i },
+      { regex: /\b(?:MINTER_ROLE|setMinter|grantRole\s*\(\s*MINTER_ROLE)\b/i },
+      { regex: /\b(?:setSupply|increaseSupply)\s*\(/i }
     ]
   },
   {
@@ -927,14 +1008,14 @@ const sourceRiskRules: SourceRiskRule[] = [
       // against $GEN: `uint256 buyTax = (value * totalTax) / SWAP_DIVISOR;` is a per-call
       // local variable computing the already-fixed, constructor-capped tax owed on this
       // transfer, not a mutable control surface).
-      /\bfunction\s+set(?:Tax|Taxes|Fees?|BuyFee|SellFee|BuyTax|SellTax|MarketingFee|LiquidityFee)\s*\(/i,
+      { regex: /\bfunction\s+set(?:Tax|Taxes|Fees?|BuyFee|SellFee|BuyTax|SellTax|MarketingFee|LiquidityFee)\s*\(/i },
       // Only setter-shaped names (setMaxWallet/setMaxTx/...) — NOT a bare "maxWallet"/"maxTx"/
       // "maxTransaction" match, which false-positives on read-only getters, immutable variable
       // names, struct fields, and even unrelated identifiers like a custom error's parameter
       // name (verified against a real deployed token: `error MaxWalletExceeded(..., uint256
       // maxWallet)` alone triggered this finding with no owner, no setter, and the limit itself
       // declared `immutable` — a false claim of a mutable "control surface" that doesn't exist).
-      /\b(?:setMaxWallet|setMaxTx|setMaxTransaction|excludeFromFees|isExcludedFromFee|whitelist)\b/i
+      { regex: /\b(?:setMaxWallet|setMaxTx|setMaxTransaction|excludeFromFees|isExcludedFromFee|whitelist)\b/i }
     ]
   },
   {
@@ -950,7 +1031,7 @@ const sourceRiskRules: SourceRiskRule[] = [
     recommendation:
       "Review who can call these setters and whether trade simulations against the currently configured router/pair remain valid after a change.",
     patterns: [
-      /\bfunction\s+\w*(?:setRouter|setPair|updateRouter|updatePair|setUniswapRouter|setDexRouter)\w*\s*\(/i
+      { regex: /\bfunction\s+\w*(?:setRouter|setPair|updateRouter|updatePair|setUniswapRouter|setDexRouter)\w*\s*\(/i }
     ]
   },
   {
@@ -966,8 +1047,8 @@ const sourceRiskRules: SourceRiskRule[] = [
     recommendation:
       "Inspect whether the call target and calldata are attacker- or admin-controlled, and whether the call is reachable by a privileged role or by any user.",
     patterns: [
-      /\.\s*delegatecall\s*(?:\{[^}]*\})?\s*\(/,
-      /\.\s*call\s*(?:\{[^}]*\})?\s*\((?!\s*(?:""|'')\s*\))/
+      { regex: /\.\s*delegatecall\s*(?:\{[^}]*\})?\s*\(/ },
+      { regex: /\.\s*call\s*(?:\{[^}]*\})?\s*\((?!\s*(?:""|'')\s*\))/ }
     ]
   }
 ];
@@ -1019,14 +1100,28 @@ export const sourceCodeRiskDetector: SecurityDetector<ContractSourceDetectorInpu
     const checks: DetectorCheck[] = [];
     for (const rule of sourceRiskRules) {
       const matches = matchSourceRule(relevantSourceFiles, rule);
+      // Only downgrade when EVERY match for this rule is individually confirmed benign — one
+      // verified-safe rescue function must never mask a separate, unrelated dangerous match
+      // (e.g. a real `seize()` elsewhere in the same contract) that the rule also caught.
+      const allMatchesBenign = matches.length > 0 && matches.every((m) => m.benignNote);
+      const severity = allMatchesBenign ? "INFO" : rule.severity;
+      const confidence = allMatchesBenign ? "MEDIUM" : rule.confidence;
+      const technicalExplanation = allMatchesBenign
+        ? `${rule.technicalExplanation} Verified benign: ${matches
+            .map((m) => m.benignNote)
+            .filter((note, i, all) => all.indexOf(note) === i)
+            .join("; ")}.`
+        : rule.technicalExplanation;
+
       const evidence = createSourceEvidence(context, input, {
         ruleCode: rule.code,
-        matches
+        matches,
+        verifiedBenign: allMatchesBenign
       });
       checks.push({
         code: matches.length > 0 ? `${rule.code}_DETECTED` : `${rule.code}_ABSENT`,
         outcome: matches.length > 0 ? "DETECTED" : "PASSED",
-        confidence: matches.length > 0 ? rule.confidence : "MEDIUM",
+        confidence: matches.length > 0 ? confidence : "MEDIUM",
         evidence: [evidence]
       });
 
@@ -1036,11 +1131,11 @@ export const sourceCodeRiskDetector: SecurityDetector<ContractSourceDetectorInpu
             code: rule.code,
             detector: this.metadata,
             title: rule.title,
-            severity: rule.severity,
+            severity,
             category: rule.category,
-            confidence: rule.confidence,
+            confidence,
             description: rule.description,
-            technicalExplanation: rule.technicalExplanation,
+            technicalExplanation,
             evidence: [evidence],
             recommendation: rule.recommendation
           })
@@ -2673,16 +2768,18 @@ function createSourceEvidence(
 }
 
 function matchSourceRule(sourceFiles: ContractSourceFile[], rule: SourceRiskRule) {
-  const matches: Array<{ filename: string; pattern: string; snippet: string }> = [];
+  const matches: Array<{ filename: string; pattern: string; snippet: string; benignNote?: string }> = [];
   for (const file of sourceFiles) {
-    const source = stripSolidityComments(file.sourceCode);
-    for (const pattern of rule.patterns) {
-      const match = pattern.exec(source);
+    const source = stripInterfaceBlocks(stripSolidityComments(file.sourceCode));
+    for (const { regex, classifyMatch } of rule.patterns) {
+      const match = regex.exec(source);
       if (match?.index !== undefined) {
+        const classification = classifyMatch?.(source, match.index);
         matches.push({
           filename: file.filename,
-          pattern: pattern.source,
-          snippet: sourceSnippet(source, match.index)
+          pattern: regex.source,
+          snippet: sourceSnippet(source, match.index),
+          ...(classification ? { benignNote: classification.note } : {})
         });
       }
     }
@@ -2693,6 +2790,50 @@ function matchSourceRule(sourceFiles: ContractSourceFile[], rule: SourceRiskRule
 
 function stripSolidityComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/.*$/gm, " ");
+}
+
+/**
+ * Blanks out the body of every `interface X { ... }` declaration before rule matching. Solidity
+ * forbids function bodies inside interfaces — an interface can only ever describe a call
+ * signature for some OTHER contract this one calls, never a capability it implements itself.
+ * Matching risk patterns against interface text attributes a different contract's ABI to the one
+ * being scanned. Verified against a real false positive: PonsLauncherToken was flagged for
+ * "mint or supply-control functions" solely because its own imported ILaunchpad.sol interface
+ * declares Uniswap V3's position-manager signature
+ * `function mint(MintParams calldata params) external payable returns (...)` — used only to call
+ * the position manager, never implemented or callable on the token itself.
+ */
+function stripInterfaceBlocks(source: string): string {
+  let result = "";
+  let cursor = 0;
+  const declPattern = /\binterface\s+\w+(?:\s+is\s+[\w,\s]+)?\s*\{/g;
+  let match: RegExpExecArray | null;
+  while ((match = declPattern.exec(source))) {
+    if (match.index < cursor) continue;
+
+    const braceStart = match.index + match[0].length - 1;
+    let depth = 0;
+    let end = -1;
+    for (let i = braceStart; i < source.length; i++) {
+      if (source[i] === "{") depth++;
+      else if (source[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    if (end === -1) continue;
+
+    result += source.slice(cursor, braceStart + 1);
+    result += " ".repeat(end - braceStart - 1);
+    result += "}";
+    cursor = end + 1;
+    declPattern.lastIndex = end + 1;
+  }
+  result += source.slice(cursor);
+  return result;
 }
 
 /**

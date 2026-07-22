@@ -607,6 +607,187 @@ describe("source-code risk detector", () => {
     });
   });
 
+  it("downgrades a rescue function that explicitly excludes this contract's own token", async () => {
+    // Real-world shape: the overwhelming majority of rescue/recover/sweep functions can only
+    // recover foreign tokens accidentally sent to the contract — they revert if called with the
+    // contract's own token address, so they can never touch this token's holder balances.
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [
+          {
+            filename: "SafeRescue.sol",
+            sourceCode: `
+              contract SafeRescue {
+                function rescueToken(address token, uint256 amount) external onlyOwner {
+                  require(token != address(this), "cannot rescue own token");
+                  IERC20(token).transfer(msg.sender, amount);
+                }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    const finding = result.findings.find((f) => f.code === "SOURCE_ADMIN_TRANSFER_SURFACE");
+    expect(finding).toMatchObject({ severity: "INFO" });
+    expect(finding?.technicalExplanation).toContain("Verified benign");
+    expect(finding?.technicalExplanation).toContain("foreign tokens");
+  });
+
+  it("does not downgrade a rescue function that can still target its own token", async () => {
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [
+          {
+            filename: "UnsafeRescue.sol",
+            sourceCode: `
+              contract UnsafeRescue {
+                function rescueToken(address token, uint256 amount) external onlyOwner {
+                  IERC20(token).transfer(msg.sender, amount);
+                }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    expect(
+      result.findings.find((f) => f.code === "SOURCE_ADMIN_TRANSFER_SURFACE")
+    ).toMatchObject({ severity: "CRITICAL" });
+  });
+
+  it("downgrades a standard allowance-gated burnFrom but not an unrestricted one", async () => {
+    const gated = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [
+          {
+            filename: "Burnable.sol",
+            sourceCode: `
+              contract Burnable {
+                function burnFrom(address account, uint256 value) public {
+                  _spendAllowance(account, msg.sender, value);
+                  _burn(account, value);
+                }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+    expect(
+      gated.findings.find((f) => f.code === "SOURCE_ADMIN_TRANSFER_SURFACE")
+    ).toMatchObject({ severity: "INFO" });
+
+    const unrestricted = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [
+          {
+            filename: "Burnable.sol",
+            sourceCode: `
+              contract Burnable {
+                function burnFrom(address account, uint256 value) public onlyOwner {
+                  _burn(account, value);
+                }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+    expect(
+      unrestricted.findings.find((f) => f.code === "SOURCE_ADMIN_TRANSFER_SURFACE")
+    ).toMatchObject({ severity: "CRITICAL" });
+  });
+
+  it("keeps full severity when a benign rescue function coexists with a real forceTransfer elsewhere", async () => {
+    // Guards the aggregate-verdict design: one verified-safe match must never mask a separate,
+    // unrelated dangerous match caught by the same rule.
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        sourceFiles: [
+          {
+            filename: "Mixed.sol",
+            sourceCode: `
+              contract Mixed {
+                function rescueToken(address token, uint256 amount) external onlyOwner {
+                  require(token != address(this), "cannot rescue own token");
+                  IERC20(token).transfer(msg.sender, amount);
+                }
+                function forceTransfer(address from, address to, uint256 amount) external onlyOwner {
+                  _transfer(from, to, amount);
+                }
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    expect(
+      result.findings.find((f) => f.code === "SOURCE_ADMIN_TRANSFER_SURFACE")
+    ).toMatchObject({ severity: "CRITICAL" });
+  });
+
+  it("does not flag a function signature declared only inside an imported interface", async () => {
+    // Regression test for a real production false positive: PonsLauncherToken
+    // (0x62c71cd34a52c30d894419cbcc55db2afa8032ea on Robinhood Chain) was flagged for "mint or
+    // supply-control functions" solely because its own genuinely-imported ILaunchpad.sol
+    // interface declares Uniswap V3's position-manager signature
+    // `function mint(MintParams calldata params) external payable returns (...)`. The token
+    // itself never implements mint and cannot call it on itself — the interface only describes
+    // how to call the position manager, a different contract entirely. Unlike the sibling-file
+    // test above, this interface IS part of the real import closure (so import-closure scoping
+    // alone can't exclude it) — only recognizing "no Solidity interface has a function body, so
+    // it can never be a capability of this contract" can.
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        contractName: "LaunchToken",
+        sourceFiles: [
+          {
+            filename: "LaunchToken.sol",
+            sourceCode: `
+              import {IPositionManagerLike} from "./interfaces/ILaunchpad.sol";
+              contract LaunchToken {
+                address public immutable positionManager;
+                constructor(address positionManager_) { positionManager = positionManager_; }
+              }
+            `
+          },
+          {
+            filename: "interfaces/ILaunchpad.sol",
+            sourceCode: `
+              interface IPositionManagerLike {
+                function mint(MintParams calldata params) external payable returns (uint256 tokenId, uint128 liquidity);
+              }
+            `
+          }
+        ]
+      },
+      context
+    );
+
+    expect(result.findings.map((f) => f.code)).not.toContain("SOURCE_MINT_OR_SUPPLY_CONTROL");
+  });
+
   it("detects router/pair replacement and arbitrary low-level external calls", async () => {
     const result = await sourceCodeRiskDetector.run(
       {
