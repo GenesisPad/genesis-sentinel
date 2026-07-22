@@ -36,7 +36,7 @@ jobs:
             fi
           done
           if [ "$missing" -ne 0 ]; then
-            echo "Add the missing secrets to GenesisPad/sentinel before production deployment can run."
+            echo "Add the missing secrets to GenesisPad/genesis-sentinel before production deployment can run."
             exit 1
           fi
 
@@ -62,7 +62,7 @@ jobs:
             RELEASE_DIR="$RELEASE_ROOT/$RELEASE_ID"
             CURRENT_LINK="$APP_ROOT/current"
             ENV_FILE="$SHARED_ROOT/.env.production"
-            REPO_URL="https://github.com/GenesisPad/sentinel.git"
+            REPO_URL="https://github.com/GenesisPad/genesis-sentinel.git"
 
             require_env_key() {
               key="$1"
