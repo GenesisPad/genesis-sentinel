@@ -99,6 +99,45 @@ describe("createDexScreenerMarketDataProvider", () => {
     expect(result).toBeNull();
   });
 
+  it("falls back to GeckoTerminal market data when DexScreener has no Robinhood pair", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = fetchUrl(input);
+      if (url.includes("api.geckoterminal.com")) {
+        return Promise.resolve(
+          jsonResponse({
+            data: {
+              attributes: {
+                name: "Token",
+                symbol: "TOK",
+                price_usd: "0.0000025",
+                market_cap_usd: null,
+                fdv_usd: "2500",
+                total_reserve_in_usd: "999999",
+                volume_usd: { h24: "125.5" }
+              }
+            }
+          })
+        );
+      }
+      if (url.includes("/orders/")) {
+        return Promise.resolve(jsonResponse({ orders: [] }));
+      }
+      return Promise.resolve(jsonResponse([]));
+    });
+
+    const provider = createDexScreenerMarketDataProvider(config);
+    const result = await provider.getMarketProfile({ chainId: 4663, address: tokenAddress });
+
+    expect(result).toMatchObject({
+      name: "Token",
+      symbol: "TOK",
+      priceUsd: "0.0000025",
+      marketCapUsd: "2500",
+      volume24hUsd: "125.5",
+      liquidityUsd: null
+    });
+  });
+
   it("reports dexPaid true only when an approved tokenProfile order exists", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = fetchUrl(input);

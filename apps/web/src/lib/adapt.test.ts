@@ -498,6 +498,129 @@ describe("mapResultToReport", () => {
     const report = mapResultToReport(baseView());
     expect(report.walletCluster).toEqual([]);
   });
+
+  it("includes every evidenced connected wallet in the dev cluster total", () => {
+    const report = mapResultToReport(
+      baseView({
+        token: {
+          chainId: 4663,
+          address: ADDRESS,
+          deployerAddress: "0x0000000000000000000000000000000000000d3d"
+        },
+        detectorChecks: [
+          {
+            id: "check-1",
+            detectorResultId: "result-1",
+            detectorId: "deployer-history",
+            detectorVersion: "0.1.0",
+            code: "WALLET_CLUSTERING_EDGES_FOUND",
+            outcome: "DETECTED",
+            confidence: "HIGH",
+            evidence: [{
+              type: "EXTERNAL_SOURCE",
+              summary: "Connected wallets",
+              data: {
+                edges: [{
+                  type: "FUNDED_BY",
+                  address: "0x0000000000000000000000000000000000000f00",
+                  confidence: "MEDIUM",
+                  evidence: "Funded the deployer.",
+                  source: "transaction-history",
+                  holdingPct: 3.25
+                }]
+              }
+            }]
+          }
+        ],
+        holders: {
+          status: "AVAILABLE",
+          message: "Available.",
+          snapshots: [{
+            chainId: 4663,
+            tokenAddress: ADDRESS,
+            blockNumber: "1",
+            topHolders: {
+              holders: [{
+                address: "0x0000000000000000000000000000000000000d3d",
+                totalSupplyPct: 1.5
+              }]
+            },
+            concentration: {},
+            createdAt: "2026-07-23T00:00:00.000Z"
+          }]
+        }
+      })
+    );
+
+    expect(report.devCluster).toMatchObject({
+      walletCount: 2,
+      knownHoldingPct: 4.75,
+      unknownHoldingWalletCount: 0
+    });
+  });
+
+  it("recomputes tiny cached holdings from raw balances instead of preserving a false zero", () => {
+    const deployer = "0x0000000000000000000000000000000000000d3d";
+    const report = mapResultToReport(
+      baseView({
+        token: {
+          chainId: 4663,
+          address: ADDRESS,
+          deployerAddress: deployer,
+          totalSupply: "1000000000000000000000000000"
+        },
+        detectorChecks: [{
+          id: "check-1",
+          detectorResultId: "result-1",
+          detectorId: "deployer-history",
+          detectorVersion: "0.1.0",
+          code: "WALLET_CLUSTERING_EDGES_FOUND",
+          outcome: "DETECTED",
+          confidence: "HIGH",
+          evidence: [{
+            type: "EXTERNAL_SOURCE",
+            summary: "Connected wallets",
+            data: {
+              edges: [{
+                type: "DEPLOYED_BY",
+                address: deployer,
+                confidence: "HIGH",
+                evidence: "Contract deployer.",
+                source: "explorer",
+                balanceRaw: "6299711074348577580360",
+                holdingPct: 0
+              }]
+            }
+          }]
+        }],
+        holders: {
+          status: "AVAILABLE",
+          message: "Available.",
+          snapshots: [{
+            chainId: 4663,
+            tokenAddress: ADDRESS,
+            blockNumber: "1",
+            topHolders: {
+              holders: [{
+                address: deployer,
+                balanceRaw: "6299711074348577580360",
+                totalSupplyPct: 0
+              }]
+            },
+            concentration: {
+              deployerBalanceRaw: "6299711074348577580360",
+              deployerPct: 0
+            },
+            createdAt: "2026-07-23T00:00:00.000Z"
+          }]
+        }
+      })
+    );
+
+    expect(report.holders.deployerBalance?.pct).toBeCloseTo(0.000629);
+    expect(report.walletCluster[0]?.holdingPct).toBeCloseTo(0.000629);
+    expect(report.devCluster.knownHoldingPct).toBeCloseTo(0.000629);
+  });
 });
 
 describe("mapProgressToJob", () => {

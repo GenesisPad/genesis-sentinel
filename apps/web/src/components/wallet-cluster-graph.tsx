@@ -4,7 +4,7 @@ import { ExternalLink } from "lucide-react";
 import type { ChainId } from "@/lib/chains";
 import { CHAINS } from "@/lib/chains";
 import type { DevClusterInfo, WalletClusterEdge, WalletClusterEdgeType } from "@/lib/types";
-import { shortAddress } from "@/lib/utils";
+import { formatSupplyPct, shortAddress } from "@/lib/utils";
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion";
 import { EmptyState } from "@/components/empty-state";
 
@@ -101,7 +101,7 @@ export function WalletClusterGraph({
           <div className="rounded-lg border border-border bg-surface-deep px-3.5 py-2.5">
             <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Dev cluster</div>
             <div className="mt-1 text-lg font-extrabold text-foreground">
-              {devCluster.knownHoldingPct != null ? `${devCluster.knownHoldingPct.toFixed(2)}%` : "Unknown"}
+              {devCluster.knownHoldingPct != null ? formatSupplyPct(devCluster.knownHoldingPct) : "Unknown"}
             </div>
           </div>
           <div className="rounded-lg border border-border bg-surface-deep px-3.5 py-2.5">
@@ -216,7 +216,7 @@ export function WalletClusterGraph({
                 role="button"
                 tabIndex={0}
                 aria-pressed={isSelected}
-                aria-label={`${EDGE_STYLE[edge.type].label}: ${shortAddress(edge.address)}, ${edge.confidence} confidence${edge.holdingPct != null ? `, ${edge.holdingPct.toFixed(1)}% of supply` : ""}. ${isSelected ? "Selected." : "Press Enter to view evidence."}`}
+                aria-label={`${EDGE_STYLE[edge.type].label}: ${shortAddress(edge.address)}, ${edge.confidence} confidence${edge.holdingPct != null ? `, ${formatSupplyPct(edge.holdingPct)} of supply` : ""}. ${isSelected ? "Selected." : "Press Enter to view evidence."}`}
                 onMouseEnter={() => setHovered(i)}
                 onMouseLeave={() => setHovered((h) => (h === i ? null : h))}
                 onFocus={() => setHovered(i)}
@@ -303,7 +303,7 @@ export function WalletClusterGraph({
                     fill={hex}
                     className="select-none transition-colors duration-200"
                   >
-                    {edge.holdingPct.toFixed(1)}%
+                    {formatSupplyPct(edge.holdingPct)}
                   </text>
                 ) : null}
               </g>
@@ -329,7 +329,7 @@ export function WalletClusterGraph({
                   </span>
                   <span className="font-normal capitalize text-faint">· {active.edge.confidence} confidence</span>
                   {active.edge.holdingPct != null ? (
-                    <span className="font-mono font-bold text-foreground">{active.edge.holdingPct.toFixed(2)}% of supply</span>
+                    <span className="font-mono font-bold text-foreground">{formatSupplyPct(active.edge.holdingPct)} of supply</span>
                   ) : null}
                 </span>
                 <p className="mt-0.5 leading-snug text-secondary">{active.edge.evidence}</p>
@@ -388,7 +388,7 @@ export function WalletClusterGraph({
                   <span className="size-2 rounded-full" style={{ backgroundColor: EDGE_STYLE[edge.type].hex }} aria-hidden />
                   {EDGE_STYLE[edge.type].label}
                   {edge.holdingPct != null ? (
-                    <span className="font-mono text-xs font-bold text-foreground">{edge.holdingPct.toFixed(2)}%</span>
+                    <span className="font-mono text-xs font-bold text-foreground">{formatSupplyPct(edge.holdingPct)}</span>
                   ) : null}
                 </span>
                 <a

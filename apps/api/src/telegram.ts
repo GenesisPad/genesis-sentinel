@@ -10,6 +10,7 @@ import {
   buildTokenSecuritySummary,
   formatCompactUsd,
   formatHumanDateTime,
+  formatSupplyPercentage,
   liquidityHealthTier,
   selectPrimaryLiquidityPool,
   type LiquidityHealthTier,
@@ -1007,7 +1008,7 @@ export function formatTelegramSectionReply(
         .map(
           (wallet) =>
             `\`${shortenAddress(wallet.address)}\` — ${escapeMarkdown(roleLabels[wallet.role] ?? wallet.role)}: ${
-              wallet.holdingPct === null ? "not measured" : `${wallet.holdingPct.toFixed(2)}%`
+              wallet.holdingPct === null ? "not measured" : formatSupplyPercentage(wallet.holdingPct)
             }`
         ),
       devCluster.wallets.length > 10 ? `_…and ${devCluster.wallets.length - 10} more._` : null,
@@ -1092,7 +1093,7 @@ function deployerBalanceLine(
       : formatTokenAmount(deployerBalance.amountRaw, result.token.decimals ?? null);
 
   if (pct === null && amount === null) return null;
-  const parts = compact([amount, pct === null ? null : `${pct.toFixed(2)}% of supply`]);
+  const parts = compact([amount, pct === null ? null : `${formatSupplyPercentage(pct)} of supply`]);
   return `💰 Deployer holds: ${parts.join(" · ")}`;
 }
 
@@ -1107,7 +1108,7 @@ function devClusterLine(devCluster: {
   const held =
     devCluster.knownHoldingPct === null
       ? "holdings unknown"
-      : `${devCluster.knownHoldingPct.toFixed(2)}% of supply`;
+      : `${formatSupplyPercentage(devCluster.knownHoldingPct)} of supply`;
   // Saying only the measured percentage would understate the cluster when some of its wallets
   // fell outside the holder snapshot, so the gap is stated rather than hidden.
   const gap =

@@ -35,12 +35,12 @@ export function createDexScreenerMarketDataProvider(
         fetchDexPaidStatus(config.networkSlug, address)
       ]);
       if (!Array.isArray(response)) {
-        return null;
+        return fetchGeckoTerminalProfile(config.networkSlug, address, dexPaid);
       }
 
       const pairs = response.filter(isRecord);
       if (pairs.length === 0) {
-        return null;
+        return fetchGeckoTerminalProfile(config.networkSlug, address, dexPaid);
       }
 
       const normalizedAddress = address.toLowerCase();
@@ -50,7 +50,7 @@ export function createDexScreenerMarketDataProvider(
       });
       const bestPair = selectBestPair(matchingPairs.length > 0 ? matchingPairs : pairs);
       if (!bestPair) {
-        return null;
+        return fetchGeckoTerminalProfile(config.networkSlug, address, dexPaid);
       }
 
       const baseToken = isRecord(bestPair.baseToken) ? bestPair.baseToken : {};
@@ -76,6 +76,40 @@ export function createDexScreenerMarketDataProvider(
 
       return profile;
     }
+  };
+}
+
+/**
+ * Robinhood pairs can be indexed by GeckoTerminal before DexScreener exposes them. Fall back
+ * for volatile market fields when DexScreener returns no pair, while keeping the scanner's
+ * stronger direct on-chain liquidity measurement.
+ */
+async function fetchGeckoTerminalProfile(
+  networkSlug: string,
+  address: string,
+  dexPaid: boolean | null
+): Promise<MarketProfile | null> {
+  const response = await fetchJson(
+    `https://api.geckoterminal.com/api/v2/networks/${networkSlug}/tokens/${address}`
+  ).catch(() => null);
+  if (!isRecord(response) || !isRecord(response.data)) return null;
+
+  const attributes = isRecord(response.data.attributes) ? response.data.attributes : null;
+  if (!attributes) return null;
+
+  const volume = isRecord(attributes.volume_usd) ? attributes.volume_usd : {};
+  return {
+    name: stringValue(attributes.name),
+    symbol: stringValue(attributes.symbol),
+    iconUrl: stringValue(attributes.image_url),
+    labels: null,
+    priceUsd: decimalStringValue(attributes.price_usd),
+    marketCapUsd:
+      decimalStringValue(attributes.market_cap_usd) ?? decimalStringValue(attributes.fdv_usd),
+    volume24hUsd: decimalStringValue(volume.h24),
+    liquidityUsd: null,
+    pairCreatedAt: null,
+    dexPaid
   };
 }
 

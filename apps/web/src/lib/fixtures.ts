@@ -62,6 +62,8 @@ export function buildFixtureReport(chainId: ChainId, address: string): ScanRepor
       verified: true,
       totalSupply: "1000000000",
       holders: 2341,
+      marketCapUsd: "2500000",
+      volume24hUsd: "185000",
       createdAt: new Date(Date.now() - 4 * 3600_000).toISOString(),
       deployer: DEMO_ADDRESS
     },
@@ -180,7 +182,8 @@ export function buildFixtureReport(chainId: ChainId, address: string): ScanRepor
       deployerControlledPct: 72,
       burnedPct: 18,
       lockedPct: 10,
-      lpOwner: DEMO_ADDRESS
+      lpOwner: DEMO_ADDRESS,
+      poolAddress: "0x8c2e45e3c74bdfeac2c22bbadd8abd94c06be24d"
     },
     holders: {
       top1Pct: 18.4,

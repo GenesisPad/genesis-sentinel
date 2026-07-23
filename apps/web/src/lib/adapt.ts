@@ -310,6 +310,10 @@ function mapHolders(view: ScanResultView, devCluster: DevClusterInfo): HolderInf
           (holder as { labels: string[] }).labels.includes("RELATED_WALLET")
       ).length
     : undefined;
+  const deployerPct =
+    precisePctFromRaw(concentration?.deployerBalanceRaw, view.token.totalSupply) ??
+    concentration?.deployerPct ??
+    null;
 
   return {
     top1Pct: concentration?.top1Pct ?? null,
@@ -321,7 +325,7 @@ function mapHolders(view: ScanResultView, devCluster: DevClusterInfo): HolderInf
     devClusterWalletCount: devCluster.walletCount,
     devClusterUnknownHoldingWalletCount: devCluster.unknownHoldingWalletCount,
     ...(concentration?.deployerBalanceRaw != null
-      ? { deployerBalance: { amountRaw: concentration.deployerBalanceRaw, pct: concentration.deployerPct ?? null } }
+      ? { deployerBalance: { amountRaw: concentration.deployerBalanceRaw, pct: deployerPct } }
       : {})
   };
 }
@@ -348,9 +352,14 @@ function buildHolderPctLookup(view: ScanResultView): Map<string, number> {
   for (const holder of topHolders.holders) {
     if (typeof holder !== "object" || holder === null) continue;
     const record = holder as Record<string, unknown>;
-    const { address, totalSupplyPct } = record;
-    if (typeof address === "string" && typeof totalSupplyPct === "number") {
-      lookup.set(address.toLowerCase(), totalSupplyPct);
+    const { address, totalSupplyPct, balanceRaw } = record;
+    if (typeof address === "string") {
+      const precise = precisePctFromRaw(balanceRaw, view.token.totalSupply);
+      if (precise != null) {
+        lookup.set(address.toLowerCase(), precise);
+      } else if (typeof totalSupplyPct === "number") {
+        lookup.set(address.toLowerCase(), totalSupplyPct);
+      }
     }
   }
   return lookup;
@@ -384,7 +393,8 @@ function extractWalletCluster(view: ScanResultView): WalletClusterEdge[] {
     // The worker reads each clustered wallet's balance directly on-chain, so prefer that over
     // the top-holder snapshot, which only covers wallets large enough to make the top N.
     const directHoldingPct =
-      typeof record.holdingPct === "number" ? record.holdingPct : null;
+      precisePctFromRaw(record.balanceRaw, view.token.totalSupply) ??
+      (typeof record.holdingPct === "number" ? record.holdingPct : null);
 
     return [
       {
@@ -398,6 +408,17 @@ function extractWalletCluster(view: ScanResultView): WalletClusterEdge[] {
       },
     ];
   });
+}
+
+function precisePctFromRaw(balanceRaw: unknown, totalSupply: string | null | undefined): number | null {
+  if (typeof balanceRaw !== "string" || !totalSupply) return null;
+  try {
+    const total = BigInt(totalSupply);
+    if (total <= 0n) return null;
+    return Number((BigInt(balanceRaw) * 100_000_000n) / total) / 1_000_000;
+  } catch {
+    return null;
+  }
 }
 
 /** Supply sent here is given up, not controlled, so it never counts toward the dev cluster. */
@@ -418,7 +439,6 @@ function buildDevClusterSummary(view: ScanResultView, edges: WalletClusterEdge[]
   }
 
   for (const edge of edges) {
-    if (edge.type !== "DEPLOYED_BY" && edge.type !== "TRANSFERRED_SUPPLY_TO") continue;
     const key = edge.address.toLowerCase();
     if (isBurned(key)) continue;
     wallets.set(key, edge.holdingPct ?? holderPctByAddress.get(key) ?? null);

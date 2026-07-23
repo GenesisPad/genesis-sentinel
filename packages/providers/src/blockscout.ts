@@ -336,14 +336,14 @@ async function discoverBlockscoutHolderConcentration(
   );
   const pctOfBalance = (balanceRaw: string): number => {
     try {
-      return Number((BigInt(balanceRaw) * 10_000n) / total) / 100;
+      return precisePercentage(BigInt(balanceRaw), total);
     } catch {
       return 0;
     }
   };
   const pctOfRows = (candidateRows: typeof rows): number => {
     const sum = candidateRows.reduce((acc, row) => acc + BigInt(row.balanceRaw), 0n);
-    return Number((sum * 10_000n) / total) / 100;
+    return precisePercentage(sum, total);
   };
   const enrichedRows: EnrichedHolder[] = rows.map((row) => {
     const normalized = row.address.toLowerCase();
@@ -367,14 +367,14 @@ async function discoverBlockscoutHolderConcentration(
   );
   const pctOfTopN = (n: number): number => {
     const sum = distributionRows.slice(0, n).reduce((acc, row) => acc + BigInt(row.balanceRaw), 0n);
-    return Number((sum * 10_000n) / total) / 100;
+    return precisePercentage(sum, total);
   };
   // Raw = same top-N math but over every returned holder row, infrastructure included — what
   // a naive "top holders" list would show, kept alongside (never merged into) the adjusted
   // figures above.
   const pctOfTopNRaw = (n: number): number => {
     const sum = enrichedRows.slice(0, n).reduce((acc, row) => acc + BigInt(row.balanceRaw), 0n);
-    return Number((sum * 10_000n) / total) / 100;
+    return precisePercentage(sum, total);
   };
   const deployerRow = normalizedDeployer
     ? enrichedRows.find((row) => row.address.toLowerCase() === normalizedDeployer)
@@ -523,4 +523,9 @@ function firstMatchingSearchItem(
   });
 
   return isRecord(match) ? match : null;
+}
+
+/** Percentage of total supply with enough precision to preserve small non-zero balances. */
+function precisePercentage(balance: bigint, total: bigint): number {
+  return Number((balance * 100_000_000n) / total) / 1_000_000;
 }

@@ -1,4 +1,5 @@
 import type { HolderInfo } from "@/lib/types";
+import { formatSupplyPct } from "@/lib/utils";
 
 export function HolderConcentration({ holders, decimals }: { holders: HolderInfo; decimals?: number | null }) {
   const rows = [
@@ -22,7 +23,7 @@ export function HolderConcentration({ holders, decimals }: { holders: HolderInfo
               {formatTokenAmount(holders.deployerBalance.amountRaw, decimals)}
             </span>
             {holders.deployerBalance.pct != null ? (
-              <span className="block text-xs text-muted">{holders.deployerBalance.pct.toFixed(2)}% of supply</span>
+              <span className="block text-xs text-muted">{formatSupplyPct(holders.deployerBalance.pct)} of supply</span>
             ) : null}
           </span>
         </div>
@@ -32,7 +33,7 @@ export function HolderConcentration({ holders, decimals }: { holders: HolderInfo
           <div className="flex items-center justify-between gap-3">
             <span className="font-semibold text-secondary">Dev cluster</span>
             <span className="font-bold text-foreground">
-              {holders.devClusterPct != null ? `${holders.devClusterPct.toFixed(2)}%` : "Unknown"}
+              {holders.devClusterPct != null ? formatSupplyPct(holders.devClusterPct) : "Unknown"}
             </span>
           </div>
           <p className="mt-1 text-xs text-muted">

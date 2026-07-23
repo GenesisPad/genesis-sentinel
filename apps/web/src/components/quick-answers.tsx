@@ -1,4 +1,5 @@
-import { Check, Info, ShieldAlert, X } from "lucide-react";
+import { buildMarketChartUrl } from "@genesis-sentinel/shared";
+import { Check, ExternalLink, Info, ShieldAlert, X } from "lucide-react";
 import type { ScanReport } from "@/lib/types";
 import { bpsToPct, formatUsd } from "@/lib/utils";
 import { NEGLIGIBLE_LIQUIDITY_USD } from "@/lib/adapt";
@@ -14,6 +15,7 @@ interface Answer {
   /** Extra context shown on hover — used when `detail` alone doesn't fully explain the number
    * (e.g. what "liquidity" is actually measuring). */
   hint?: string;
+  href?: string;
 }
 
 const TONE_STYLE: Record<Tone, { hex: string; Icon: typeof Check | null }> = {
@@ -63,6 +65,17 @@ export function QuickAnswers({ report }: { report: ScanReport }) {
               <span>{a.value}</span>
             </div>
             {a.detail ? <div className="mt-0.5 text-[11px] text-faint">{a.detail}</div> : null}
+            {a.href ? (
+              <a
+                href={a.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-2 inline-flex items-center gap-1 text-xs font-bold text-primary transition-colors hover:text-foreground"
+              >
+                View chart
+                <ExternalLink className="size-3" aria-hidden />
+              </a>
+            ) : null}
           </div>
         );
       })}
@@ -96,6 +109,7 @@ function buildAnswers(report: ScanReport): Answer[] {
                   : ""
               }`
             : undefined,
+          href: liquidity.poolAddress ? buildMarketChartUrl(liquidity.poolAddress) : undefined,
           hint: `ETH side: ${formatUsd(liquidity.totalUsd / 2)}. This figure is the full pool value (token + paired asset) — health is measured against the paired-asset side alone, since that's what actually backs sell orders.`,
         }
       : null,

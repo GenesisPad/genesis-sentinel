@@ -955,7 +955,7 @@ function devClusterSignal(cluster: DevClusterSummaryView): SecuritySummarySignal
     value:
       knownPct == null
         ? `${cluster.walletCount} linked wallet(s), holdings unknown`
-        : `${knownPct.toFixed(2)}% across ${cluster.walletCount} linked wallet(s)`
+        : `${formatSupplyPercentage(knownPct)} across ${cluster.walletCount} linked wallet(s)`
   };
 }
 
@@ -1020,9 +1020,7 @@ function buildDevClusterSummary(result: ScanResultView): DevClusterSummaryView {
   }
 
   for (const edge of extractRelatedWalletEdges(result)) {
-    if (edge.type === "DEPLOYED_BY" || edge.type === "TRANSFERRED_SUPPLY_TO") {
-      addWallet(edge.address, edge.type, edge.confidence, edge.evidence, edge.holdingPct ?? null);
-    }
+    addWallet(edge.address, edge.type, edge.confidence, edge.evidence, edge.holdingPct ?? null);
   }
 
   const wallets = [...walletsByAddress.values()].sort((a, b) => {
@@ -1046,8 +1044,12 @@ function buildDevClusterSummary(result: ScanResultView): DevClusterSummaryView {
 
 function readDeployerPct(result: ScanResultView): number | null {
   const snapshot = result.holders.snapshots[0];
-  const concentration = snapshot?.concentration as { deployerPct?: number | null } | undefined;
-  return typeof concentration?.deployerPct === "number" ? concentration.deployerPct : null;
+  const concentration = snapshot?.concentration as
+    { deployerPct?: number | null; deployerBalanceRaw?: string | null } | undefined;
+  return (
+    precisePctFromRaw(concentration?.deployerBalanceRaw, result.token.totalSupply) ??
+    (typeof concentration?.deployerPct === "number" ? concentration.deployerPct : null)
+  );
 }
 
 function buildDeployerBalance(result: ScanResultView): DeployerBalanceView | null {
@@ -1064,7 +1066,9 @@ function buildDeployerBalance(result: ScanResultView): DeployerBalanceView | nul
       typeof concentration.deployerBalanceRaw === "string"
         ? concentration.deployerBalanceRaw
         : null,
-    pctOfSupply: typeof concentration.deployerPct === "number" ? concentration.deployerPct : null
+    pctOfSupply:
+      precisePctFromRaw(concentration.deployerBalanceRaw, result.token.totalSupply) ??
+      (typeof concentration.deployerPct === "number" ? concentration.deployerPct : null)
   };
 }
 
@@ -1077,9 +1081,14 @@ function buildHolderPctLookup(result: ScanResultView): Map<string, number> {
   for (const holder of topHolders.holders) {
     if (typeof holder !== "object" || holder === null) continue;
     const record = holder as Record<string, unknown>;
-    const { address, totalSupplyPct } = record;
-    if (typeof address === "string" && typeof totalSupplyPct === "number") {
-      lookup.set(address.toLowerCase(), totalSupplyPct);
+    const { address, totalSupplyPct, balanceRaw } = record;
+    if (typeof address === "string") {
+      const precise = precisePctFromRaw(balanceRaw, result.token.totalSupply);
+      if (precise != null) {
+        lookup.set(address.toLowerCase(), precise);
+      } else if (typeof totalSupplyPct === "number") {
+        lookup.set(address.toLowerCase(), totalSupplyPct);
+      }
     }
   }
 
@@ -1094,7 +1103,7 @@ function extractRelatedWalletEdges(result: ScanResultView): RelatedWalletEdge[] 
   return edges.flatMap((edge): RelatedWalletEdge[] => {
     if (typeof edge !== "object" || edge === null) return [];
     const record = edge as Record<string, unknown>;
-    const { type, address, confidence, evidence, source, firstObservedBlock } = record;
+    const { type, address, confidence, evidence, source, firstObservedBlock, balanceRaw } = record;
     if (
       !isRelatedWalletEdgeType(type) ||
       typeof address !== "string" ||
@@ -1116,8 +1125,28 @@ function extractRelatedWalletEdges(result: ScanResultView): RelatedWalletEdge[] 
     if (typeof firstObservedBlock === "string") {
       view.firstObservedBlock = firstObservedBlock;
     }
+    if (typeof balanceRaw === "string") {
+      view.balanceRaw = balanceRaw;
+    }
+    const holdingPct =
+      precisePctFromRaw(balanceRaw, result.token.totalSupply) ??
+      (typeof record.holdingPct === "number" ? record.holdingPct : null);
+    if (holdingPct != null) {
+      view.holdingPct = holdingPct;
+    }
     return [view];
   });
+}
+
+function precisePctFromRaw(balanceRaw: unknown, totalSupply: string | null | undefined): number | null {
+  if (typeof balanceRaw !== "string" || !totalSupply) return null;
+  try {
+    const total = BigInt(totalSupply);
+    if (total <= 0n) return null;
+    return Number((BigInt(balanceRaw) * 100_000_000n) / total) / 1_000_000;
+  } catch {
+    return null;
+  }
 }
 
 function isRelatedWalletEdgeType(value: unknown): value is RelatedWalletEdgeType {
@@ -1387,4 +1416,16 @@ export function formatHumanDateTime(iso: string | null | undefined): string | nu
  * just for this one link. */
 export function buildDexScreenerUrl(pairAddress: string): string {
   return `https://dexscreener.com/robinhood/${pairAddress}`;
+}
+
+/** Formats supply ownership without rounding a real sub-0.01% balance down to zero. */
+export function formatSupplyPercentage(value: number, maximumFractionDigits = 2): string {
+  if (value > 0 && value < 0.01) return "<0.01%";
+  if (value === 0) return "0%";
+  return `${value.toFixed(maximumFractionDigits)}%`;
+}
+
+/** GeckoTerminal currently indexes Robinhood pools that DexScreener's API does not yet return. */
+export function buildMarketChartUrl(pairAddress: string): string {
+  return `https://www.geckoterminal.com/robinhood/pools/${pairAddress}`;
 }

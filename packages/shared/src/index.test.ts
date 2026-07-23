@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   assertRiskScore,
   buildDexScreenerUrl,
+  buildMarketChartUrl,
   buildTokenSecuritySummary,
   createHealth,
   createScanId,
   formatCompactUsd,
   formatHumanDateTime,
+  formatSupplyPercentage,
   liquidityHealthTier,
   normalizeEvmAddress,
   scannerVersion,
@@ -104,6 +106,22 @@ describe("buildDexScreenerUrl", () => {
   it("builds a Robinhood Chain DexScreener pair URL", () => {
     expect(buildDexScreenerUrl("0x10cc6bd38112cac182db90b6a71d8bb5939526ba")).toBe(
       "https://dexscreener.com/robinhood/0x10cc6bd38112cac182db90b6a71d8bb5939526ba"
+    );
+  });
+});
+
+describe("formatSupplyPercentage", () => {
+  it("does not present a tiny non-zero holding as zero", () => {
+    expect(formatSupplyPercentage(0.000629)).toBe("<0.01%");
+    expect(formatSupplyPercentage(0)).toBe("0%");
+    expect(formatSupplyPercentage(6.3)).toBe("6.30%");
+  });
+});
+
+describe("buildMarketChartUrl", () => {
+  it("builds a Robinhood Chain GeckoTerminal pool URL", () => {
+    expect(buildMarketChartUrl("0x10cc6bd38112cac182db90b6a71d8bb5939526ba")).toBe(
+      "https://www.geckoterminal.com/robinhood/pools/0x10cc6bd38112cac182db90b6a71d8bb5939526ba"
     );
   });
 });

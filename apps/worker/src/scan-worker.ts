@@ -1110,7 +1110,7 @@ async function enrichEdgesWithBalances(
       ...edge,
       balanceRaw: balance.toString(),
       ...(total !== null && total > 0n
-        ? { holdingPct: Number((balance * 10_000n) / total) / 100 }
+        ? { holdingPct: Number((balance * 100_000_000n) / total) / 1_000_000 }
         : {})
     };
   });

@@ -23,6 +23,13 @@ export function formatUsd(value?: number | null): string {
   return formatCompactUsd(value) ?? "—";
 }
 
+/** Keeps a tiny but real supply holding from being displayed as a measured zero. */
+export function formatSupplyPct(value: number, maximumFractionDigits = 2): string {
+  if (value > 0 && value < 0.01) return "<0.01%";
+  if (value === 0) return "0%";
+  return `${value.toFixed(maximumFractionDigits)}%`;
+}
+
 export function formatNumber(value?: number | string | null): string {
   if (value == null) return "—";
   const n = typeof value === "string" ? Number(value) : value;
