@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { loadEnv } from "@genesis-sentinel/config";
 import type { ApiKeyRepository, ScanRepository } from "@genesis-sentinel/database";
 import { createLogger } from "@genesis-sentinel/observability";
+import type { MarketDataProvider } from "@genesis-sentinel/providers";
 import type {
   ApiKeyView,
   ApiUsageKind,
@@ -229,13 +230,22 @@ describe("api foundation", () => {
       await Promise.resolve();
     }
   };
+  const marketDataProvider: MarketDataProvider = {
+    id: "test-stub",
+    supportsChain: () => true,
+    async getMarketProfile() {
+      await Promise.resolve();
+      return null;
+    }
+  };
 
   it("responds to health checks", async () => {
     const app = await buildApp({
       env: loadEnv({ NODE_ENV: "test", LOG_LEVEL: "silent" }),
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
-      scanQueue
+      scanQueue,
+      marketDataProvider
     });
 
     const response = await app.inject({ method: "GET", url: "/health" });
@@ -250,7 +260,8 @@ describe("api foundation", () => {
       env: loadEnv({ NODE_ENV: "test", LOG_LEVEL: "silent" }),
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
-      scanQueue
+      scanQueue,
+      marketDataProvider
     });
 
     const response = await app.inject({
@@ -280,7 +291,8 @@ describe("api foundation", () => {
       env: loadEnv({ NODE_ENV: "test", LOG_LEVEL: "silent" }),
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
-      scanQueue
+      scanQueue,
+      marketDataProvider
     });
 
     const request = {
@@ -309,7 +321,8 @@ describe("api foundation", () => {
       env: loadEnv({ NODE_ENV: "test", LOG_LEVEL: "silent" }),
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
-      scanQueue
+      scanQueue,
+      marketDataProvider
     });
 
     const created = await app.inject({
@@ -340,7 +353,8 @@ describe("api foundation", () => {
       env: loadEnv({ NODE_ENV: "test", LOG_LEVEL: "silent" }),
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
-      scanQueue
+      scanQueue,
+      marketDataProvider
     });
 
     const response = await app.inject({
@@ -366,7 +380,8 @@ describe("api foundation", () => {
       }),
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
-      scanQueue
+      scanQueue,
+      marketDataProvider
     });
 
     const response = await app.inject({
@@ -392,7 +407,8 @@ describe("api foundation", () => {
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
       scanQueue,
-      apiKeyRepository: repository
+      apiKeyRepository: repository,
+      marketDataProvider
     });
 
     const response = await app.inject({
@@ -420,7 +436,8 @@ describe("api foundation", () => {
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
       scanQueue,
-      apiKeyRepository: repository
+      apiKeyRepository: repository,
+      marketDataProvider
     });
 
     const publicWrite = await app.inject({
@@ -461,7 +478,8 @@ describe("api foundation", () => {
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
       scanQueue,
-      apiKeyRepository: repository
+      apiKeyRepository: repository,
+      marketDataProvider
     });
 
     const created = await app.inject({
@@ -496,7 +514,8 @@ describe("api foundation", () => {
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
       scanQueue,
-      apiKeyRepository: repository
+      apiKeyRepository: repository,
+      marketDataProvider
     });
 
     const created = await app.inject({
@@ -541,7 +560,8 @@ describe("api foundation", () => {
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
       scanQueue,
-      apiKeyRepository: repository
+      apiKeyRepository: repository,
+      marketDataProvider
     });
 
     const attempt = (i: number) =>
@@ -566,7 +586,8 @@ describe("api foundation", () => {
       env: loadEnv({ NODE_ENV: "test", LOG_LEVEL: "silent" }),
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
-      scanQueue
+      scanQueue,
+      marketDataProvider
     });
 
     const address = "0x0000000000000000000000000000000000000009";

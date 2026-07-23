@@ -18,6 +18,7 @@
     "@genesis-sentinel/config": "workspace:*",
     "@genesis-sentinel/database": "workspace:*",
     "@genesis-sentinel/observability": "workspace:*",
+    "@genesis-sentinel/providers": "workspace:*",
     "@genesis-sentinel/queue": "workspace:*",
     "@genesis-sentinel/shared": "workspace:*",
     "fastify": "5.10.0",

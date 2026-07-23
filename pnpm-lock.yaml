@@ -56,6 +56,9 @@ importers:
       '@genesis-sentinel/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@genesis-sentinel/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
       '@genesis-sentinel/queue':
         specifier: workspace:*
         version: link:../../packages/queue

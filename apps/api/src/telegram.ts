@@ -123,8 +123,18 @@ export function createTelegramBot(options: {
    * only — bounds total scan volume a group can generate regardless of how many distinct
    * members are each individually within their own per-user budget. */
   groupScanLimiter?: TelegramScanLimiter;
+  /**
+   * Same shape as `getScanResult`, but additionally refreshes price/market cap/24h volume/
+   * liquidity via a live lookup before returning — used only at the specific call sites that
+   * actually render those fields (the main summary), never for Controls/Holders/Dev Cluster
+   * section views, which don't show market data and would otherwise pay live-lookup latency for
+   * no visible benefit. Falls back to plain `getScanResult` when omitted (e.g. in tests, or a
+   * deployment that hasn't wired live market refresh yet).
+   */
+  refreshScanResult?: TelegramGetScanResult;
 }) {
   const bot = new Bot(options.token);
+  const getSummaryScanResult = options.refreshScanResult ?? options.getScanResult;
   const callbackRegistry: TelegramCallbackRegistry = {
     scanIdsByKey: new Map(),
     keysByScanId: new Map()
@@ -270,7 +280,7 @@ export function createTelegramBot(options: {
       return;
     }
 
-    const result = await options.getScanResult(scanId);
+    const result = await getSummaryScanResult(scanId);
     if (!result) {
       await context.reply("❓ No scan result was found for that ID.");
       return;
@@ -293,7 +303,7 @@ export function createTelegramBot(options: {
       return;
     }
 
-    const result = await options.getScanResult(scanId);
+    const result = await getSummaryScanResult(scanId);
     if (!result) {
       await context.answerCallbackQuery({ text: "No scan result was found for that ID." });
       return;
@@ -317,7 +327,7 @@ export function createTelegramBot(options: {
       return;
     }
 
-    const result = await options.getScanResult(scanId);
+    const result = await getSummaryScanResult(scanId);
     if (!result) {
       await context.answerCallbackQuery({ text: "No scan result was found for that ID." });
       return;
@@ -477,7 +487,7 @@ export function createTelegramBot(options: {
       await sleep(pollDelayMs);
     }
 
-    const result = await options.getScanResult(scan.scanId);
+    const result = await getSummaryScanResult(scan.scanId);
     if (stageMessageId !== undefined) {
       await bot.api.deleteMessage(chatId, stageMessageId).catch(() => {});
     }

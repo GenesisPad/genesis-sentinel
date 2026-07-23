@@ -16,6 +16,11 @@ import {
   type ScanRepository
 } from "@genesis-sentinel/database";
 import type { Logger } from "pino";
+import {
+  createDexScreenerMarketDataProvider,
+  robinhoodChainId,
+  type MarketDataProvider
+} from "@genesis-sentinel/providers";
 import { checkRedis, createScanQueue, type ScanQueue } from "@genesis-sentinel/queue";
 import {
   buildTokenSecuritySummary,
@@ -30,6 +35,7 @@ import {
   type ServiceReadiness
 } from "@genesis-sentinel/shared";
 import { extractApiKey, generateApiKey, hashApiKey } from "./auth.js";
+import { createMarketRefresher } from "./market-refresh.js";
 import { createRateLimiter } from "./rate-limiter.js";
 import { submitScanRequest } from "./scan-service.js";
 import {
@@ -90,15 +96,35 @@ export interface AppOptions {
   scanRepository?: ScanRepository;
   scanQueue?: ScanQueue;
   apiKeyRepository?: ApiKeyRepository;
+  /** Overrides the live DexScreener lookup used to refresh volatile fields on cached reads —
+   * inject a stub in tests so they stay fast, deterministic, and offline rather than depending
+   * on a real network call every time these routes are exercised. */
+  marketDataProvider?: MarketDataProvider;
 }
 
-export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyRepository }: AppOptions) {
+export async function buildApp({
+  env,
+  logger,
+  scanRepository,
+  scanQueue,
+  apiKeyRepository,
+  marketDataProvider
+}: AppOptions) {
   const prisma = scanRepository ? undefined : createPrismaClient(env.DATABASE_URL);
   const scans = scanRepository ?? createScanRepository(prisma!);
   const telegramTracking = prisma ? createTelegramTrackingRepository(prisma) : null;
   const apiKeys = apiKeyRepository ?? (prisma ? createApiKeyRepository(prisma) : null);
   const queue = scanQueue ?? createScanQueue(env.REDIS_URL);
   const scanRateLimiter = createRateLimiter(RATE_LIMIT_WINDOW_MS);
+  // Refreshes price/market cap/24h volume/liquidity via a live DexScreener lookup on top of an
+  // already-persisted scan result, so a cached read shows current numbers for the parts that
+  // change minute to minute without re-running the full detector/simulation pipeline. See
+  // market-refresh.ts for why this is DexScreener-only rather than the full explorer-then-market
+  // precedence chain a real scan uses.
+  const refreshVolatileFields = createMarketRefresher(
+    marketDataProvider ??
+      createDexScreenerMarketDataProvider({ chainId: robinhoodChainId, networkSlug: "robinhood" })
+  );
   const app = Fastify({
     loggerInstance: logger,
     bodyLimit: 16 * 1024,
@@ -212,6 +238,10 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
         submitScan,
         getScan: (scanId) => scans.getScan(scanId),
         getScanResult: (scanId) => scans.getScanResult(scanId),
+        refreshScanResult: async (scanId) => {
+          const result = await scans.getScanResult(scanId);
+          return result ? refreshVolatileFields(result) : null;
+        },
         ...(telegramTracking
           ? {
               trackAddress: ((input) => telegramTracking.trackAddress(input)) satisfies TelegramTrackAddress,
@@ -565,7 +595,7 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       });
     }
 
-      return result;
+      return refreshVolatileFields(result);
     }
   );
 
@@ -596,7 +626,7 @@ export async function buildApp({ env, logger, scanRepository, scanQueue, apiKeyR
       });
     }
 
-      return result.liquidity;
+      return (await refreshVolatileFields(result)).liquidity;
     }
   );
 
