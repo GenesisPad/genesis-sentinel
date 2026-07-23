@@ -57,6 +57,41 @@ describe("createDexScreenerMarketDataProvider", () => {
     expect(result?.pairCreatedAt).toEqual(new Date(1_700_000_000_000));
   });
 
+  it("rejects a pair whose price is a wild outlier even if it reports the highest liquidity", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse([
+        {
+          baseToken: { address: tokenAddress, name: "Genuine Pool A", symbol: "TOK" },
+          liquidity: { usd: 1_400_000 },
+          priceUsd: "0.03041",
+          marketCap: 24170841,
+          volume: { h24: 7547577.71 }
+        },
+        {
+          baseToken: { address: tokenAddress, name: "Genuine Pool B", symbol: "TOK" },
+          liquidity: { usd: 624011.29 },
+          priceUsd: "0.03032",
+          marketCap: 24095161,
+          volume: { h24: 4807702.24 }
+        },
+        {
+          baseToken: { address: tokenAddress, name: "Manipulated Pool", symbol: "TOK" },
+          // A rogue pair claiming implausible liquidity and price to hijack "best pair" selection.
+          liquidity: { usd: 1_271_977_382.19 },
+          priceUsd: "635988691056855100523247862.011",
+          volume: { h24: 0.12 }
+        }
+      ])
+    );
+
+    const provider = createDexScreenerMarketDataProvider(config);
+    const result = await provider.getMarketProfile({ chainId: 4663, address: tokenAddress });
+
+    expect(result?.name).toBe("Genuine Pool A");
+    expect(result?.priceUsd).toBe("0.03041");
+    expect(result?.liquidityUsd).toBe(1_400_000);
+  });
+
   it("returns null when no pairs are returned", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse([]));
     const provider = createDexScreenerMarketDataProvider(config);

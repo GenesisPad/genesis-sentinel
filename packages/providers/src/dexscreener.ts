@@ -99,8 +99,44 @@ async function fetchDexPaidStatus(networkSlug: string, address: string): Promise
   );
 }
 
+function pairPriceUsd(pair: Record<string, unknown>): number | null {
+  const price = numberValue(pair.priceUsd);
+  return price !== null && price > 0 ? price : null;
+}
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const midValue = sorted[mid];
+  if (midValue === undefined) return null;
+  if (sorted.length % 2 !== 0) return midValue;
+  const prevValue = sorted[mid - 1];
+  return prevValue === undefined ? midValue : (prevValue + midValue) / 2;
+}
+
+/**
+ * A single manipulated pool can report a wildly implausible price and a fabricated
+ * multi-billion-dollar liquidity figure to game naive "highest liquidity" selection — seen live
+ * for a real Robinhood-chain token where one rogue pair reported priceUsd ~6.36e26 alongside
+ * $1.27B of liquidity while every other pair agreed on ~$0.03. Since genuine pools for the same
+ * token largely agree on price, an outlier more than 10x away from the median price across all
+ * pairs is dropped before ranking by liquidity, rather than trusting liquidity figures alone.
+ */
 function selectBestPair(pairs: Record<string, unknown>[]): Record<string, unknown> | null {
-  const sorted = [...pairs].sort((a, b) => {
+  const prices = pairs.map(pairPriceUsd).filter((price): price is number => price !== null);
+  const medianPrice = median(prices);
+
+  const plausiblePairs =
+    medianPrice === null
+      ? pairs
+      : pairs.filter((pair) => {
+          const price = pairPriceUsd(pair);
+          return price === null || (price <= medianPrice * 10 && price >= medianPrice / 10);
+        });
+  const candidates = plausiblePairs.length > 0 ? plausiblePairs : pairs;
+
+  const sorted = [...candidates].sort((a, b) => {
     const aLiquidity = numberValue(isRecord(a.liquidity) ? a.liquidity.usd : undefined) ?? 0;
     const bLiquidity = numberValue(isRecord(b.liquidity) ? b.liquidity.usd : undefined) ?? 0;
     return bLiquidity - aLiquidity;
