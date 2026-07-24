@@ -148,7 +148,7 @@ export function ContractInput({
       <div className="mt-2.5 sm:hidden">
         <ChainSelector />
       </div>
-      <StatusMessage state={state} chain={detectedChain} />
+      <StatusMessage state={state} chain={detectedChain} isManualChain={selectedChain !== "auto"} />
     </div>
   );
 }
@@ -162,13 +162,30 @@ function LeadingIcon({ state }: { state: ValidationState }) {
   return <Search className={cn(cls, "text-faint")} aria-hidden />;
 }
 
-function StatusMessage({ state, chain }: { state: ValidationState; chain?: ChainId }) {
+function StatusMessage({
+  state,
+  chain,
+  isManualChain,
+}: {
+  state: ValidationState;
+  chain?: ChainId;
+  isManualChain: boolean;
+}) {
+  // "Network detected" only when a URL host genuinely named a chain — a bare pasted address
+  // never lets us know which chain it's actually valid on client-side, so a manually-selected
+  // chain is echoed back as the user's own pick, never as something we verified. The scan
+  // itself still auto-detects the real chain server-side when the selector is left on Auto.
+  const chainText = chain
+    ? isManualChain
+      ? ` · Will scan on ${CHAINS[chain].label} (your selection, not verified yet)`
+      : ` · Network detected: ${CHAINS[chain].label}`
+    : " · Chain will be auto-detected on scan";
   const map: Record<ValidationState, { text: string; cls: string } | null> = {
     empty: null,
     typing: null,
     validating: { text: "Validating address…", cls: "text-muted" },
     valid: {
-      text: `Valid contract address${chain ? ` · Network detected: ${CHAINS[chain].label}` : " · Chain will be auto-detected on scan"}`,
+      text: `Valid contract address${chainText}`,
       cls: "text-primary",
     },
     invalid_address: { text: "This does not appear to be a valid EVM contract address.", cls: "text-danger" },
