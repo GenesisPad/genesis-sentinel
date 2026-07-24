@@ -254,21 +254,23 @@ async function runGanacheForkTradeSimulation(
       deadline
     });
     const sellReceived = fullSell.received;
-    // A genuine revert (the router call itself failed, or the tx was mined with a failed
-    // status) is strong, unambiguous honeypot evidence. A sell that merely completed with zero
-    // quote token received is not — live-verified false positive on a real, actively-traded
-    // GenesisPad token whose real on-chain sells succeed: the fork's single-block buy → transfer
-    // → sell sequence against a token with its own embedded auto-swap-back logic can produce a
-    // zero-output swap that never reverts, which real, differently-timed mainnet trades don't
-    // reproduce. Only a real revert is reported as a confirmed honeypot; an unreverted
-    // zero-output sell is reported as unknown (null) rather than guessed as safe or dangerous.
+    // Neither a reverted sell nor a non-reverted zero-output sell is trustworthy evidence of a
+    // real honeypot on its own — live-verified false positives (both kinds, on separate scans)
+    // for a real, actively-traded GenesisPad token whose real on-chain sells all succeed. Every
+    // real sell for this token routes through a smart-order aggregator (1inch, KyberSwap, etc.);
+    // none go through the bare Uniswap V2 Router's swap wrapper the way this fork sell test
+    // does, and that specific path collides with the token's own embedded auto-swap-back sell
+    // tax logic (visible in its bytecode) — a route-specific execution difference, not evidence
+    // the token can't actually be sold. Only a failed BUY (a single-hop signal this route
+    // difference cannot produce) is still reported as a confirmed honeypot; any sell-leg
+    // failure, reverted or not, is reported as unknown (null) rather than guessed.
     const sellReverted = fullSell.reverted || partialSellTest.reverted;
 
     return {
       simulationTool: "0.1.0-ganache-fork",
       canBuy: true,
       canSell: sellReceived > 0n,
-      isHoneypot: sellReceived <= 0n ? (sellReverted ? true : null) : false,
+      isHoneypot: sellReceived <= 0n ? null : false,
       buyTaxBps,
       sellTaxBps: fullSell.taxBps,
       buyTokenReceivedRaw: buyReceived.toString(),
@@ -285,7 +287,7 @@ async function runGanacheForkTradeSimulation(
       ...(sellReceived <= 0n
         ? {
             error: sellReverted
-              ? "Forked sell transaction reverted."
+              ? "Forked sell transaction reverted via the bare Uniswap V2 Router — inconclusive, not a confirmed honeypot, since real sells routed through an aggregator can still succeed."
               : "Forked sell completed without reverting but returned no quote token — inconclusive, not a confirmed honeypot."
           }
         : {})
