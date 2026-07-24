@@ -5,7 +5,7 @@ import type { ScanQueue } from "@genesis-sentinel/queue";
 import { createScanId, normalizeEvmAddress, type ScanProgress } from "@genesis-sentinel/shared";
 
 export interface SubmitScanInput {
-  chainId: 4663;
+  chainId: number;
   address: `0x${string}`;
   idempotencyKey: string;
   requestedBy?: string;

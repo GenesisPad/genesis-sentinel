@@ -101,6 +101,28 @@ export function memoizeQuoteTokenPriceLookup(lookup: QuoteTokenPriceLookup): Quo
  * lookup (normally the Blockscout explorer provider's getTokenPriceUsd) and is left null,
  * not fabricated, if the lookup fails.
  */
+/**
+ * A LiquidityProvider that returns no pools — useful for chains where DEX infrastructure
+ * addresses are not yet known. Discovered pools will simply be empty, and the scan will
+ * proceed without liquidity data (reported as unavailable/not found rather than an error).
+ */
+export function createUnsupportedLiquidityProvider(chainId: number): LiquidityProvider {
+  return {
+    id: `unsupported-liquidity-${chainId}`,
+    supportsChain: (candidate) => candidate === chainId,
+    describeCoverage() {
+      return {
+        discoveryTool: "unsupported",
+        checkedDexes: [],
+        checkedQuoteSymbols: []
+      };
+    },
+    async discoverPools() {
+      return [];
+    }
+  };
+}
+
 export function createRobinhoodLiquidityProvider(
   getQuoteTokenPriceUsd: QuoteTokenPriceLookup,
   locker: LockerProvider

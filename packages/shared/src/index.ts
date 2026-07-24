@@ -5,6 +5,16 @@ export const supportedChains = [
     chainId: 4663,
     name: "Robinhood Chain",
     implemented: true
+  },
+  {
+    chainId: 5042,
+    name: "Arc Chain",
+    implemented: true
+  },
+  {
+    chainId: 988,
+    name: "Stable Chain",
+    implemented: true
   }
 ] as const;
 

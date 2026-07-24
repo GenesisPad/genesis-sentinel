@@ -18,6 +18,9 @@ export function TokenHeader({
   const chain = CHAINS[token.chainId];
   const [copied, setCopied] = useState(false);
   const supply = formatTokenSupply(token.totalSupply, token.decimals);
+  const chainRgb = hexToRgb(chain.color);
+  const bgColor = chainRgb ? `rgba(${chainRgb.r},${chainRgb.g},${chainRgb.b},0.12)` : undefined;
+  const borderColor = chainRgb ? `rgba(${chainRgb.r},${chainRgb.g},${chainRgb.b},0.3)` : undefined;
   const profileFacts = [
     token.createdAt ? `Created ${timeAgo(token.createdAt)}` : null,
     token.holders ? `${token.holders.toLocaleString()} holders` : null,
@@ -46,7 +49,7 @@ export function TokenHeader({
           "flex shrink-0 items-center justify-center overflow-hidden rounded-full border-2 bg-[#0e1a06]",
           avatar,
         )}
-        style={{ borderColor: "#b4f11f" }}
+        style={{ borderColor: chain.color }}
         aria-hidden
       >
         {showIcon ? (
@@ -64,7 +67,7 @@ export function TokenHeader({
           />
         ) : (
           <svg viewBox="0 0 34 34" className="size-1/2">
-            <path d="M17 6 L26 11 L17 28 L8 11 Z" fill="#b4f11f" />
+            <path d="M17 6 L26 11 L17 28 L8 11 Z" fill={chain.color} />
           </svg>
         )}
       </div>
@@ -86,7 +89,7 @@ export function TokenHeader({
         <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted">
           <span
             className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-bold"
-            style={{ color: chain.color, backgroundColor: "rgba(180,241,31,0.12)", border: "1px solid rgba(180,241,31,0.3)" }}
+            style={{ color: chain.color, backgroundColor: bgColor, border: borderColor ? `1px solid ${borderColor}` : undefined }}
           >
             {chain.label}
           </span>
@@ -107,6 +110,12 @@ export function TokenHeader({
       </div>
     </div>
   );
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } | undefined {
+  const match = /^#?([a-f0-9]{2})([a-f0-9]{2})([a-f0-9]{2})$/i.exec(hex);
+  if (!match) return undefined;
+  return { r: Number.parseInt(match[1], 16), g: Number.parseInt(match[2], 16), b: Number.parseInt(match[3], 16) };
 }
 
 function formatTokenSupply(value: string | undefined, decimals: number | null): string | null {

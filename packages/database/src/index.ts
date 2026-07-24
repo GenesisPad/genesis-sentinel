@@ -10,6 +10,7 @@ import type {
 import {
   normalizeEvmAddress,
   scannerVersion,
+  supportedChains,
   type ApiKeyView,
   type ApiUsageKind,
   type BytecodeReuseView,
@@ -248,6 +249,12 @@ export interface RecordHolderSnapshotInput {
   concentration?: Record<string, unknown>;
 }
 
+function chainName(chainId: number): string {
+  return (supportedChains as readonly { chainId: number; name: string }[]).find(
+    (chain) => chain.chainId === chainId
+  )?.name ?? `EVM Chain ${chainId}`;
+}
+
 export function createPrismaClient(databaseUrl: string): PrismaClient {
   const adapter = new PrismaPg(databaseUrl);
 
@@ -324,7 +331,7 @@ export function createScanRepository(db: PrismaDatabase): ScanRepository {
         update: {},
         create: {
           chainId: input.chainId,
-          name: input.chainId === 4663 ? "Robinhood Chain" : `EVM Chain ${input.chainId}`
+          name: chainName(input.chainId)
         }
       });
 
@@ -679,7 +686,7 @@ export function createScanRepository(db: PrismaDatabase): ScanRepository {
         update: {},
         create: {
           chainId: input.chainId,
-          name: input.chainId === 4663 ? "Robinhood Chain" : `EVM Chain ${input.chainId}`
+          name: chainName(input.chainId)
         }
       });
 

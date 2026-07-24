@@ -68,7 +68,7 @@ export type TelegramGetRegisteredUsers = (
   pageSize: number
 ) => Promise<TelegramRegisteredUsersPage>;
 export type TelegramTokenContractStatus =
-  | { kind: "SUPPORTED" }
+  | { kind: "SUPPORTED"; chainId: number; chainName: string }
   | { kind: "UNSUPPORTED_CHAIN"; chainName: string }
   | { kind: "NOT_TOKEN" };
 export type TelegramIsTokenContract = (
@@ -556,7 +556,8 @@ export function createTelegramBot(options: {
       address,
       chatId: context.chat.id,
       fromId: context.from?.id,
-      telegramChat: context.chat
+      telegramChat: context.chat,
+      chainId: tokenStatus.kind === "SUPPORTED" ? tokenStatus.chainId : 4663
     });
   });
 
@@ -589,6 +590,7 @@ export function createTelegramBot(options: {
       chatId: context.chat.id,
       fromId: context.from?.id,
       telegramChat: context.chat,
+      chainId: tokenStatus.kind === "SUPPORTED" ? tokenStatus.chainId : 4663,
       forceFresh: true
     });
   });
@@ -617,7 +619,8 @@ export function createTelegramBot(options: {
       return;
     }
 
-    const tracking = await trackTelegramAddress(options.trackAddress, address, context.chat);
+    const chainId = tokenStatus.kind === "SUPPORTED" ? tokenStatus.chainId : 4663;
+    const tracking = await trackTelegramAddress(options.trackAddress, address, context.chat, chainId);
     if (!tracking) {
       await context.reply("⚠️ CA tracking is not configured for this bot yet.");
       return;
@@ -628,6 +631,7 @@ export function createTelegramBot(options: {
       chatId: context.chat.id,
       fromId: context.from?.id,
       telegramChat: context.chat,
+      chainId,
       tracking
     });
   });
@@ -645,7 +649,9 @@ export function createTelegramBot(options: {
       return;
     }
 
-    const result = await options.untrackAddress({ chat, chainId: 4663, address });
+    const tokenStatus = await classifyTelegramAddress(address, options.isTokenContract);
+    const untrackChainId = tokenStatus.kind === "SUPPORTED" ? tokenStatus.chainId : 4663;
+    const result = await options.untrackAddress({ chat, chainId: untrackChainId, address });
     await context.reply(formatTelegramUntrackReply(address, result.removed));
   });
 
@@ -708,6 +714,7 @@ export function createTelegramBot(options: {
       chatId: context.chat.id,
       fromId: context.from?.id,
       telegramChat: context.chat,
+      chainId: 4663,
       forceFresh: true
     });
   });
@@ -749,6 +756,7 @@ export function createTelegramBot(options: {
       chatId: context.chat.id,
       fromId: context.from?.id,
       telegramChat: context.chat,
+      chainId: result.scan.chainId,
       forceFresh: true
     });
   });
@@ -835,14 +843,15 @@ export function createTelegramBot(options: {
     }
 
     const isGroup = context.chat.type === "group" || context.chat.type === "supergroup";
+    let detectedChainId = 4663;
     if (options.isTokenContract) {
       const tokenStatus = await classifyTelegramAddress(
         address,
         options.isTokenContract
       );
-      // Any address that isn't a valid ERC-20 on Robinhood Chain is ignored in group chats
-      // so normal address sharing does not trigger noisy false-positive scans.
-      if (tokenStatus.kind !== "SUPPORTED") {
+      if (tokenStatus.kind === "SUPPORTED") {
+        detectedChainId = tokenStatus.chainId;
+      } else {
         if (!isGroup) {
           await context.reply(telegramUnsupportedAddressMessage(tokenStatus, "scan"));
         }
@@ -865,7 +874,8 @@ export function createTelegramBot(options: {
       address,
       chatId: context.chat.id,
       fromId: context.from?.id,
-      telegramChat: context.chat
+      telegramChat: context.chat,
+      chainId: detectedChainId
     });
   });
 
@@ -883,6 +893,7 @@ export function createTelegramBot(options: {
     chatId: number | bigint;
     fromId: number | bigint | undefined;
     telegramChat: TelegramChatLike | undefined;
+    chainId: number;
     tracking?: { item: TrackedTelegramAddress; created: boolean };
     forceFresh?: boolean;
   }) {
@@ -891,9 +902,9 @@ export function createTelegramBot(options: {
     const chatId = Number(input.chatId);
     const tracking =
       input.tracking ??
-      (await trackTelegramAddress(options.trackAddress, input.address, input.telegramChat));
+      (await trackTelegramAddress(options.trackAddress, input.address, input.telegramChat, input.chainId));
     const scan = await options.submitScan(
-      createTelegramScanInput(input.address, input.chatId, input.fromId, input.forceFresh)
+      createTelegramScanInput(input.address, input.chatId, input.fromId, input.chainId, input.forceFresh)
     );
 
     const trackingLine = tracking ? formatTelegramTrackingLine(tracking) : null;
@@ -1044,6 +1055,15 @@ function extractGroupAlertMedia(message: unknown): TelegramGroupAlertMedia | nul
   return photoFileId ? { fileId: photoFileId, type: "photo" } : null;
 }
 
+export function telegramSupportedChainName(chainId: number): string {
+  const names: Record<number, string> = {
+    4663: "Robinhood Chain",
+    5042: "Arc Chain",
+    988: "Stable Chain"
+  };
+  return names[chainId] ?? `Chain ${chainId}`;
+}
+
 export async function shouldAutoScanTelegramAddress(
   _chatType: string,
   address: `0x${string}`,
@@ -1056,10 +1076,12 @@ async function classifyTelegramAddress(
   address: `0x${string}`,
   isTokenContract?: TelegramIsTokenContract
 ): Promise<TelegramTokenContractStatus> {
-  if (!isTokenContract) return { kind: "SUPPORTED" };
+  if (!isTokenContract) return { kind: "SUPPORTED", chainId: 4663, chainName: "Robinhood Chain" };
   const result = await isTokenContract(address).catch(() => false);
   if (typeof result === "boolean") {
-    return { kind: result ? "SUPPORTED" : "NOT_TOKEN" };
+    return result
+      ? { kind: "SUPPORTED", chainId: 4663, chainName: "Robinhood Chain" }
+      : { kind: "NOT_TOKEN" };
   }
   return result;
 }
@@ -1069,11 +1091,11 @@ function telegramUnsupportedAddressMessage(
   action: "scan" | "track"
 ): string {
   if (status.kind === "UNSUPPORTED_CHAIN") {
-    return `ℹ️ That is a valid token contract on ${status.chainName}, but Genesis Sentinel currently scans Robinhood Chain only. It was not ${action === "scan" ? "scanned" : "tracked"}.`;
+    return `ℹ️ That is a valid token contract on ${status.chainName}, but Genesis Sentinel does not scan that chain yet. It was not ${action === "scan" ? "scanned" : "tracked"}.`;
   }
   return action === "scan"
-    ? "ℹ️ No token contract exists at that address on Robinhood Chain, so Sentinel did not scan it."
-    : "ℹ️ No token contract exists at that address on Robinhood Chain, so Sentinel did not track or scan it.";
+    ? "ℹ️ No token contract exists at that address on a supported chain, so Sentinel did not scan it."
+    : "ℹ️ No token contract exists at that address on a supported chain, so Sentinel did not track or scan it.";
 }
 
 export function createTelegramScanLimiter(options: TelegramScanLimitOptions): TelegramScanLimiter {
@@ -1815,7 +1837,8 @@ function scannedAtLine(result: ScanResultView): string | null {
 
 function tokenAgeLine(result: ScanResultView): string | null {
   const age = formatTokenAge(result.token.contractCreatedAt);
-  return age ? `⛓️ Chain: Robinhood | Age: ${age}` : "⛓️ Chain: Robinhood";
+  const chainName = telegramSupportedChainName(result.scan.chainId);
+  return age ? `⛓️ Chain: ${chainName} | Age: ${age}` : `⛓️ Chain: ${chainName}`;
 }
 
 function marketLine(result: ScanResultView): string | null {
@@ -1837,7 +1860,8 @@ function liquidityLine(liquidity: ReturnType<typeof readLiquidityData>): string 
   const values = [
     liquidity.totalUsd ? `Liquidity: ${liquidity.totalUsd}` : null,
     liquidity.healthLabel ? `Health: ${liquidity.healthLabel}` : null,
-    liquidity.burnedPct ? `Burn/Lock: ${liquidity.burnedPct}` : null
+    liquidity.burnedPct ? `Burn/Lock: ${liquidity.burnedPct}` : null,
+    liquidity.dex ? `DEX: ${liquidity.dex}` : null
   ].filter((value): value is string => value !== null);
   return values.length > 0 ? `💧 ${values.join(" | ")}` : null;
 }
@@ -1864,6 +1888,7 @@ function readLiquidityData(result: ScanResultView): {
   totalUsd: string;
   burnedPct: string;
   healthLabel: string;
+  dex: string;
 } {
   // Uses the same pool-selection and health-tiering rules as the web app
   // (@genesis-sentinel/shared) so Telegram can't independently drift into the same bugs already
@@ -1890,7 +1915,8 @@ function readLiquidityData(result: ScanResultView): {
   return {
     totalUsd: totalUsd != null ? (formatCompactUsd(totalUsd) ?? "") : "",
     burnedPct: burnedPct != null ? `${burnedPct.toFixed(1)}%` : "",
-    healthLabel: healthTier ? LIQUIDITY_HEALTH_LABEL[healthTier] : ""
+    healthLabel: healthTier ? LIQUIDITY_HEALTH_LABEL[healthTier] : "",
+    dex: pool?.dex ?? ""
   };
 }
 
@@ -2011,10 +2037,11 @@ function createTelegramScanInput(
   address: `0x${string}`,
   chatId: number | bigint | undefined,
   fromId: number | bigint | undefined,
+  chainId: number,
   forceFresh = false
 ): SubmitScanInput {
   const input: SubmitScanInput = {
-    chainId: 4663,
+    chainId,
     address,
     idempotencyKey: forceFresh
       ? `${createTelegramIdempotencyKey(chatId, address)}:rescan:${randomUUID()}`
@@ -2044,7 +2071,8 @@ function formatTelegramTrackingLine(tracking: { created: boolean }): string {
 async function trackTelegramAddress(
   trackAddress: TelegramTrackAddress | undefined,
   address: `0x${string}`,
-  telegramChat: TelegramChatLike | undefined
+  telegramChat: TelegramChatLike | undefined,
+  chainId: number
 ): Promise<{ item: TrackedTelegramAddress; created: boolean } | undefined> {
   const chat = createTelegramChatIdentity(telegramChat);
   if (!chat || !trackAddress) {
@@ -2053,7 +2081,7 @@ async function trackTelegramAddress(
 
   return trackAddress({
     chat,
-    chainId: 4663,
+    chainId,
     address
   });
 }

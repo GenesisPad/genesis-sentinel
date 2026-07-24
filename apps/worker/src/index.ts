@@ -1,4 +1,8 @@
-import { createRobinhoodChainAdapter } from "@genesis-sentinel/chain-adapters";
+import {
+  createRobinhoodChainAdapter,
+  createArcChainAdapter,
+  createStableChainAdapter
+} from "@genesis-sentinel/chain-adapters";
 import { loadEnv } from "@genesis-sentinel/config";
 import {
   checkPostgres,
@@ -38,13 +42,17 @@ const worker = createScanWorker(
       scans,
       ...(forkTradeSimulator ? { forkTradeSimulator } : {}),
       getChainAdapter(chainId: number) {
-        if (chainId !== 4663) {
-          throw new Error(`Unsupported chain ID ${chainId}.`);
+        const allowPublicDefault = env.NODE_ENV !== "production";
+        switch (chainId) {
+          case 4663:
+            return createRobinhoodChainAdapter(env, { allowPublicDefault });
+          case 5042:
+            return createArcChainAdapter(env, { allowPublicDefault });
+          case 988:
+            return createStableChainAdapter(env, { allowPublicDefault });
+          default:
+            throw new Error(`Unsupported chain ID ${chainId}.`);
         }
-
-        return createRobinhoodChainAdapter(env, {
-          allowPublicDefault: env.NODE_ENV !== "production"
-        });
       }
     };
 

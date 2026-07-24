@@ -1,4 +1,4 @@
-export type ChainId = "ethereum" | "bnb" | "base" | "robinhood";
+export type ChainId = "ethereum" | "bnb" | "base" | "robinhood" | "arc" | "stable";
 
 export interface ChainMeta {
   id: ChainId;
@@ -18,7 +18,6 @@ export interface ChainMeta {
 export const CHAINS: Record<ChainId, ChainMeta> = {
   robinhood: {
     id: "robinhood",
-    // Real Robinhood Chain mainnet id — the only chain the API currently implements.
     chainId: 4663,
     label: "Robinhood Chain",
     shortLabel: "Robinhood",
@@ -26,6 +25,26 @@ export const CHAINS: Record<ChainId, ChainMeta> = {
     symbol: "ETH",
     explorerUrl: "https://robinhoodchain.blockscout.com",
     urlHosts: ["robinhoodchain.blockscout.com"],
+  },
+  arc: {
+    id: "arc",
+    chainId: 5042,
+    label: "Arc Chain",
+    shortLabel: "Arc",
+    color: "#5b8def",
+    symbol: "USDC",
+    explorerUrl: "https://arcscan.io",
+    urlHosts: ["arcscan.io"],
+  },
+  stable: {
+    id: "stable",
+    chainId: 988,
+    label: "Stable Chain",
+    shortLabel: "Stable",
+    color: "#00c9a7",
+    symbol: "USDT0",
+    explorerUrl: "https://stablescan.xyz",
+    urlHosts: ["stablescan.xyz"],
   },
   ethereum: {
     id: "ethereum",
@@ -59,10 +78,10 @@ export const CHAINS: Record<ChainId, ChainMeta> = {
   },
 };
 
-// Only Robinhood Chain is implemented by the API today (packages/shared supportedChains).
+// Chains actively implemented by the API (packages/shared supportedChains).
 // Ethereum/Base/BNB stay in CHAINS for future use but are intentionally excluded here so
 // the UI never lets someone submit a scan the backend will reject.
-export const SUPPORTED_CHAINS: ChainMeta[] = [CHAINS.robinhood];
+export const SUPPORTED_CHAINS: ChainMeta[] = [CHAINS.robinhood, CHAINS.arc, CHAINS.stable];
 
 export const CHAIN_IDS = Object.keys(CHAINS) as ChainId[];
 

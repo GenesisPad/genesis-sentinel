@@ -121,6 +121,62 @@ export interface ChainAdapter {
 export const robinhoodChainPublicRpcUrl = "https://rpc.mainnet.chain.robinhood.com";
 export const robinhoodChainBlockscoutUrl = "https://robinhoodchain.blockscout.com";
 
+export const arcChainId = 5042;
+export const arcChainPublicRpcUrl = "https://rpc-mainnet.arc.io";
+export const arcChainBlockscoutUrl = "https://arcscan.cc";
+
+export const arcChainConfig: ChainConfig = {
+  chainId: arcChainId,
+  name: "Arc Chain",
+  nativeCurrency: {
+    name: "USDC",
+    symbol: "USDC",
+    decimals: 18
+  },
+  rpcUrls: {
+    publicDefault: arcChainPublicRpcUrl,
+    fallbacks: []
+  },
+  blockExplorers: [
+    {
+      name: "ArcScan",
+      url: arcChainBlockscoutUrl
+    }
+  ],
+  productionNotes: [
+    "Arc mainnet RPC is not officially published by Circle yet; configure ARC_RPC_URL for production.",
+    "Arc uses USDC as native gas token with 18 decimals for gas/msg.value and 6 decimals for ERC-20."
+  ]
+};
+
+export const stableChainId = 988;
+export const stableChainPublicRpcUrl = "https://rpc.stable.xyz";
+export const stableChainBlockscoutUrl = "https://stablescan.xyz";
+
+export const stableChainConfig: ChainConfig = {
+  chainId: stableChainId,
+  name: "Stable Chain",
+  nativeCurrency: {
+    name: "USDT0",
+    symbol: "USDT0",
+    decimals: 18
+  },
+  rpcUrls: {
+    publicDefault: stableChainPublicRpcUrl,
+    fallbacks: []
+  },
+  blockExplorers: [
+    {
+      name: "StableScan",
+      url: stableChainBlockscoutUrl
+    }
+  ],
+  productionNotes: [
+    "Stable's public RPC is rate-limited to 1,000 requests per 10 seconds per IP.",
+    "Configure STABLE_RPC_URL and STABLE_FALLBACK_RPC_URLS for production deployments."
+  ]
+};
+
 export const robinhoodChainConfig: ChainConfig = {
   chainId: 4663,
   name: "Robinhood Chain",
@@ -192,11 +248,61 @@ export function resolveRpcUrls(
   return urls;
 }
 
+export function getArcChainConfig(
+  env: Pick<AppEnv, "ARC_RPC_URL" | "ARC_FALLBACK_RPC_URLS">
+): ChainConfig {
+  const fallbacks = parseRpcUrlList(env.ARC_FALLBACK_RPC_URLS);
+  const rpcUrls: ChainConfig["rpcUrls"] = {
+    publicDefault: arcChainPublicRpcUrl,
+    fallbacks
+  };
+  if (env.ARC_RPC_URL) {
+    rpcUrls.primary = env.ARC_RPC_URL;
+  }
+  return {
+    ...arcChainConfig,
+    rpcUrls
+  };
+}
+
+export function getStableChainConfig(
+  env: Pick<AppEnv, "STABLE_RPC_URL" | "STABLE_FALLBACK_RPC_URLS">
+): ChainConfig {
+  const fallbacks = parseRpcUrlList(env.STABLE_FALLBACK_RPC_URLS);
+  const rpcUrls: ChainConfig["rpcUrls"] = {
+    publicDefault: stableChainPublicRpcUrl,
+    fallbacks
+  };
+  if (env.STABLE_RPC_URL) {
+    rpcUrls.primary = env.STABLE_RPC_URL;
+  }
+  return {
+    ...stableChainConfig,
+    rpcUrls
+  };
+}
+
 export function createRobinhoodChainAdapter(
   env: Pick<AppEnv, "ROBINHOOD_RPC_URL" | "ROBINHOOD_FALLBACK_RPC_URLS">,
   options?: { allowPublicDefault?: boolean }
 ): ChainAdapter {
   const config = getRobinhoodChainConfig(env);
+  return createViemChainAdapter(config, options);
+}
+
+export function createArcChainAdapter(
+  env: Pick<AppEnv, "ARC_RPC_URL" | "ARC_FALLBACK_RPC_URLS">,
+  options?: { allowPublicDefault?: boolean }
+): ChainAdapter {
+  const config = getArcChainConfig(env);
+  return createViemChainAdapter(config, options);
+}
+
+export function createStableChainAdapter(
+  env: Pick<AppEnv, "STABLE_RPC_URL" | "STABLE_FALLBACK_RPC_URLS">,
+  options?: { allowPublicDefault?: boolean }
+): ChainAdapter {
+  const config = getStableChainConfig(env);
   return createViemChainAdapter(config, options);
 }
 

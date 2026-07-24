@@ -100,7 +100,7 @@ export function LiquidityCard({ liquidity, technical }: { liquidity: LiquidityIn
           <span className="font-mono text-secondary">{shortAddress(liquidity.lpOwner)}</span>
         </div>
       ) : null}
-      {technical && liquidity.dex ? (
+      {liquidity.dex ? (
         <div className="flex justify-between text-sm text-muted">
           <span>DEX</span>
           <span className="text-secondary">{liquidity.dex}</span>

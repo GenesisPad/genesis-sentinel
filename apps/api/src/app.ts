@@ -5,7 +5,11 @@ import swaggerUi from "@fastify/swagger-ui";
 import Fastify from "fastify";
 import { createHmac } from "node:crypto";
 import { z } from "zod";
-import { createRobinhoodChainAdapter } from "@genesis-sentinel/chain-adapters";
+import {
+  createRobinhoodChainAdapter,
+  createArcChainAdapter,
+  createStableChainAdapter
+} from "@genesis-sentinel/chain-adapters";
 import type { AppEnv } from "@genesis-sentinel/config";
 import {
   checkPostgres,
@@ -70,13 +74,15 @@ const evmAddressSchema = z.custom<`0x${string}`>(
   "Expected a checksummed or lowercase EVM address"
 );
 
+const supportedChainId = z.union([z.literal(4663), z.literal(5042), z.literal(988)]);
+
 const createScanSchema = z.object({
-  chainId: z.literal(4663),
+  chainId: supportedChainId,
   address: evmAddressSchema
 });
 
 const tokenParamsSchema = z.object({
-  chainId: z.coerce.number().pipe(z.literal(4663)),
+  chainId: z.coerce.number().pipe(supportedChainId),
   address: evmAddressSchema
 });
 
@@ -380,7 +386,7 @@ export async function buildApp({
   });
 
   const submitScan = async (input: {
-    chainId: 4663;
+    chainId: number;
     address: `0x${string}`;
     idempotencyKey: string;
     requestedBy?: string;
@@ -390,6 +396,12 @@ export async function buildApp({
   };
   const telegramChainAdapter = env.TELEGRAM_BOT_TOKEN
     ? createRobinhoodChainAdapter(env, { allowPublicDefault: true })
+    : null;
+  const telegramArcAdapter = env.TELEGRAM_BOT_TOKEN
+    ? createArcChainAdapter(env, { allowPublicDefault: true })
+    : null;
+  const telegramStableAdapter = env.TELEGRAM_BOT_TOKEN
+    ? createStableChainAdapter(env, { allowPublicDefault: true })
     : null;
 
   const telegramBot = env.TELEGRAM_BOT_TOKEN
@@ -415,17 +427,30 @@ export async function buildApp({
             }
           : {}),
         isTokenContract: async (address) => {
-          if (!telegramChainAdapter) return false;
-          const bytecode = await telegramChainAdapter.getBytecode({ address });
-          if (bytecode === "0x") {
-            const chainName = await findExternalTokenChain(address);
-            return chainName
-              ? { kind: "UNSUPPORTED_CHAIN" as const, chainName }
-              : { kind: "NOT_TOKEN" as const };
+          const adapters = [
+            { adapter: telegramChainAdapter, chainId: 4663, name: "Robinhood Chain" },
+            { adapter: telegramArcAdapter, chainId: 5042, name: "Arc Chain" },
+            { adapter: telegramStableAdapter, chainId: 988, name: "Stable Chain" }
+          ].filter((entry): entry is typeof entry & { adapter: NonNullable<typeof entry.adapter> } =>
+            entry.adapter !== null
+          );
+          if (adapters.length === 0) return false;
+          for (const { adapter, chainId, name } of adapters) {
+            try {
+              const bytecode = await adapter.getBytecode({ address });
+              if (bytecode !== "0x") {
+                const metadata = await adapter.getTokenMetadata(address);
+                if (metadata.name !== null || metadata.symbol !== null || metadata.decimals !== null) {
+                  return { kind: "SUPPORTED" as const, chainId, chainName: name };
+                }
+              }
+            } catch {
+              continue;
+            }
           }
-          const metadata = await telegramChainAdapter.getTokenMetadata(address);
-          return metadata.name !== null || metadata.symbol !== null || metadata.decimals !== null
-            ? { kind: "SUPPORTED" as const }
+          const chainName = await findExternalTokenChain(address);
+          return chainName
+            ? { kind: "UNSUPPORTED_CHAIN" as const, chainName }
             : { kind: "NOT_TOKEN" as const };
         },
         ...(recordTelegramActivity ? { recordActivity: recordTelegramActivity } : {}),
@@ -510,7 +535,7 @@ export async function buildApp({
           type: "object",
           required: ["chainId", "address"],
           properties: {
-            chainId: { type: "integer", enum: [4663], description: "Robinhood Chain ID." },
+            chainId: { type: "integer", enum: [4663, 5042, 988], description: "Supported chain ID: Robinhood Chain (4663), Arc Chain (5042), or Stable Chain (988)." },
             address: { type: "string", pattern: "^0x[a-fA-F0-9]{40}$" }
           }
         },
@@ -575,7 +600,7 @@ export async function buildApp({
       if (!parsed.success) {
         return reply.code(400).send({
           error: "invalid_scan_request",
-          message: "Provide Robinhood Chain ID 4663 and a valid EVM contract address."
+          message: "Provide a valid EVM contract address on Robinhood Chain, Arc Chain, or Stable Chain."
         });
       }
 
@@ -810,7 +835,7 @@ export async function buildApp({
     type: "object",
     required: ["chainId", "address"],
     properties: {
-      chainId: { type: "integer", enum: [4663], description: "Robinhood Chain ID." },
+      chainId: { type: "integer", enum: [4663, 5042, 988], description: "Robinhood Chain (4663), Arc Chain (5042), or Stable Chain (988)." },
       address: { type: "string", pattern: "^0x[a-fA-F0-9]{40}$" }
     }
   } as const;
@@ -850,7 +875,7 @@ export async function buildApp({
       if (!parsed.success) {
         return reply.code(400).send({
           error: "invalid_token_request",
-          message: "Provide Robinhood Chain ID 4663 and a valid EVM contract address."
+          message: "Provide a valid EVM contract address on Robinhood Chain, Arc Chain, or Stable Chain."
         });
       }
 
@@ -885,7 +910,7 @@ export async function buildApp({
       if (!parsed.success) {
         return reply.code(400).send({
           error: "invalid_token_request",
-          message: "Provide Robinhood Chain ID 4663 and a valid EVM contract address."
+          message: "Provide a valid EVM contract address on Robinhood Chain, Arc Chain, or Stable Chain."
         });
       }
 
@@ -924,7 +949,7 @@ export async function buildApp({
       if (!parsed.success) {
         return reply.code(400).send({
           error: "invalid_token_request",
-          message: "Provide Robinhood Chain ID 4663 and a valid EVM contract address."
+          message: "Provide a valid EVM contract address on Robinhood Chain, Arc Chain, or Stable Chain."
         });
       }
 
@@ -963,7 +988,7 @@ export async function buildApp({
       if (!parsed.success) {
         return reply.code(400).send({
           error: "invalid_token_request",
-          message: "Provide Robinhood Chain ID 4663 and a valid EVM contract address."
+          message: "Provide a valid EVM contract address on Robinhood Chain, Arc Chain, or Stable Chain."
         });
       }
 
@@ -1008,7 +1033,7 @@ export async function buildApp({
       if (!parsed.success) {
         return reply.code(400).send({
           error: "invalid_token_request",
-          message: "Provide Robinhood Chain ID 4663 and a valid EVM contract address."
+          message: "Provide a valid EVM contract address on Robinhood Chain, Arc Chain, or Stable Chain."
         });
       }
 
@@ -1058,7 +1083,7 @@ export async function buildApp({
       if (!parsed.success) {
         return reply.code(400).send({
           error: "invalid_token_request",
-          message: "Provide Robinhood Chain ID 4663 and a valid EVM contract address."
+          message: "Provide a valid EVM contract address on Robinhood Chain, Arc Chain, or Stable Chain."
         });
       }
 
@@ -1097,7 +1122,7 @@ export async function buildApp({
       if (!parsed.success) {
         return reply.code(400).send({
           error: "invalid_token_request",
-          message: "Provide Robinhood Chain ID 4663 and a valid EVM contract address."
+          message: "Provide a valid EVM contract address on Robinhood Chain, Arc Chain, or Stable Chain."
         });
       }
 
@@ -1190,7 +1215,7 @@ export async function buildApp({
       if (!parsed.success) {
         return reply.code(400).send({
           error: "invalid_risk_request",
-          message: "Provide Robinhood Chain ID 4663 and a valid EVM contract address."
+          message: "Provide a valid EVM contract address on Robinhood Chain, Arc Chain, or Stable Chain."
         });
       }
 
@@ -1469,7 +1494,9 @@ const DEXSCREENER_CHAIN_NAMES: Readonly<Record<string, string>> = {
   polygon: "Polygon",
   optimism: "Optimism",
   avalanche: "Avalanche",
-  solana: "Solana"
+  solana: "Solana",
+  arc: "Arc Chain",
+  stable: "Stable Chain"
 };
 
 export async function findExternalTokenChain(

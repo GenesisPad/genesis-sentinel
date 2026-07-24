@@ -547,7 +547,8 @@ function hasNoContractCode(view: ScanResultView): boolean {
 
 function scoreExplanation(view: ScanResultView): string {
   if (hasNoContractCode(view)) {
-    return "No deployed contract bytecode was found at this address on Robinhood Chain. This is not a valid token contract for DYOR; verify the CA and chain before trading.";
+    const chainName = chainByNumericId(view.scan.chainId)?.label ?? `Chain ${view.scan.chainId}`;
+    return `No deployed contract bytecode was found at this address on ${chainName}. This is not a valid token contract for DYOR; verify the CA and chain before trading.`;
   }
 
   return view.risk.message;

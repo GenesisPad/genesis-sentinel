@@ -1,3 +1,4 @@
+import { arcChainId, stableChainId } from "@genesis-sentinel/chain-adapters";
 import {
   createBlockscoutContractSourceProvider,
   createBlockscoutExplorerProvider,
@@ -9,9 +10,9 @@ import { createContractSourceChain } from "./contract-source-chain.js";
 import { createDexScreenerMarketDataProvider } from "./dexscreener.js";
 import { createGenesisLockerProvider } from "./genesis-locker.js";
 import { createLegacyGenesisLockerProvider } from "./legacy-genesis-locker.js";
-import { createCompositeLockerProvider } from "./locker.js";
+import { createCompositeLockerProvider, createUnsupportedLockerProvider } from "./locker.js";
 import { createGenesisPadLaunchProvider } from "./genesispad-registry.js";
-import { createRobinhoodLiquidityProvider, robinhoodChainId } from "./robinhood-liquidity.js";
+import { createRobinhoodLiquidityProvider, createUnsupportedLiquidityProvider, robinhoodChainId } from "./robinhood-liquidity.js";
 import { createSourcifyContractSourceProvider } from "./sourcify.js";
 import type { ProviderSet } from "./types.js";
 import { createBlockscoutWalletClusteringProvider } from "./wallet-clustering.js";
@@ -20,6 +21,18 @@ const robinhoodBlockscoutConfig: BlockscoutChainConfig = {
   chainId: robinhoodChainId,
   apiBaseUrl: "https://robinhoodchain.blockscout.com/api/v2",
   legacyApiBaseUrl: "https://robinhoodchain.blockscout.com/api"
+};
+
+const arcBlockscoutConfig: BlockscoutChainConfig = {
+  chainId: arcChainId,
+  apiBaseUrl: "https://arcscan.cc/api/v2",
+  legacyApiBaseUrl: "https://arcscan.cc/api"
+};
+
+const stableBlockscoutConfig: BlockscoutChainConfig = {
+  chainId: stableChainId,
+  apiBaseUrl: "https://stablescan.xyz/api/v2",
+  legacyApiBaseUrl: "https://stablescan.xyz/api"
 };
 
 // Verified against C:\Projects\genesispad\genesis-locker\contracts\deployments\robinhood.json,
@@ -41,20 +54,32 @@ const robinhoodGenesisLaunchRegistryAddress = "0xAEeF0D03CC8E9FF7879C86Ce07b70f0
  * only provider that actually covers Robinhood Chain). Both are wrapped with a verification
  * cache keyed by chain/address/bytecode hash/provider/cache version.
  */
-function createRobinhoodSourceProvider() {
+function createSourcifyWithBlockscoutSourceProvider(
+  blockscoutConfig: BlockscoutChainConfig
+) {
   const sourcify = createCachedContractSourceProvider(
     createSourcifyContractSourceProvider({
       apiBaseUrl: "https://sourcify.dev/server",
-      // Robinhood Chain (4663) is not a chain Sourcify indexes today; listed explicitly so
-      // adding chains Sourcify does support is a one-line change, not new provider logic.
       supportedChainIds: []
     })
   );
   const blockscout = createCachedContractSourceProvider(
-    createBlockscoutContractSourceProvider(robinhoodBlockscoutConfig)
+    createBlockscoutContractSourceProvider(blockscoutConfig)
   );
 
   return createContractSourceChain([sourcify, blockscout]);
+}
+
+function createRobinhoodSourceProvider() {
+  return createSourcifyWithBlockscoutSourceProvider(robinhoodBlockscoutConfig);
+}
+
+function createArcSourceProvider() {
+  return createSourcifyWithBlockscoutSourceProvider(arcBlockscoutConfig);
+}
+
+function createStableSourceProvider() {
+  return createSourcifyWithBlockscoutSourceProvider(stableBlockscoutConfig);
 }
 
 /**
@@ -106,6 +131,36 @@ export function createProviderRegistry(): { getProviderSet(chainId: number): Pro
       chainId: robinhoodChainId,
       apiBaseUrl: robinhoodBlockscoutConfig.apiBaseUrl
     })
+  });
+
+  const arcExplorer = createBlockscoutExplorerProvider(arcBlockscoutConfig);
+  sets.set(arcChainId, {
+    source: createArcSourceProvider(),
+    explorer: arcExplorer,
+    market: createDexScreenerMarketDataProvider({
+      chainId: arcChainId,
+      networkSlug: "arc"
+    }),
+    holder: createBlockscoutHolderProvider(arcBlockscoutConfig, {
+      knownLockerAddresses: []
+    }),
+    liquidity: createUnsupportedLiquidityProvider(arcChainId),
+    locker: createUnsupportedLockerProvider()
+  });
+
+  const stableExplorer = createBlockscoutExplorerProvider(stableBlockscoutConfig);
+  sets.set(stableChainId, {
+    source: createStableSourceProvider(),
+    explorer: stableExplorer,
+    market: createDexScreenerMarketDataProvider({
+      chainId: stableChainId,
+      networkSlug: "stable"
+    }),
+    holder: createBlockscoutHolderProvider(stableBlockscoutConfig, {
+      knownLockerAddresses: []
+    }),
+    liquidity: createUnsupportedLiquidityProvider(stableChainId),
+    locker: createUnsupportedLockerProvider()
   });
 
   return {
