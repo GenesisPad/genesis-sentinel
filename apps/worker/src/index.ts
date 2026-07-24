@@ -42,7 +42,7 @@ const worker = createScanWorker(
       scans,
       ...(forkTradeSimulator ? { forkTradeSimulator } : {}),
       getChainAdapter(chainId: number) {
-        const allowPublicDefault = env.NODE_ENV !== "production";
+        const allowPublicDefault = true;
         switch (chainId) {
           case 4663:
             return createRobinhoodChainAdapter(env, { allowPublicDefault });
