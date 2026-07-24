@@ -109,7 +109,9 @@ function buildAnswers(report: ScanReport): Answer[] {
                   : ""
               }`
             : undefined,
-          href: liquidity.poolAddress ? buildMarketChartUrl(liquidity.poolAddress) : undefined,
+          href: liquidity.poolAddress
+            ? buildMarketChartUrl(token.chainId, liquidity.poolAddress)
+            : undefined,
           hint: `ETH side: ${formatUsd(liquidity.totalUsd / 2)}. This figure is the full pool value (token + paired asset) — health is measured against the paired-asset side alone, since that's what actually backs sell orders.`,
         }
       : null,
