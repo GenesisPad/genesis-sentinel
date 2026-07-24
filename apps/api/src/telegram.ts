@@ -840,10 +840,10 @@ export function createTelegramBot(options: {
         address,
         options.isTokenContract
       );
-      // EOAs/wallets and contracts that do not expose ERC-20 metadata are deliberately ignored
-      // in groups so normal address sharing does not trigger noisy false-positive scans.
+      // Any address that isn't a valid ERC-20 on Robinhood Chain is ignored in group chats
+      // so normal address sharing does not trigger noisy false-positive scans.
       if (tokenStatus.kind !== "SUPPORTED") {
-        if (!isGroup || tokenStatus.kind === "UNSUPPORTED_CHAIN") {
+        if (!isGroup) {
           await context.reply(telegramUnsupportedAddressMessage(tokenStatus, "scan"));
         }
         return;
