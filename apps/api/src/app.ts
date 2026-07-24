@@ -77,7 +77,7 @@ const evmAddressSchema = z.custom<`0x${string}`>(
 const supportedChainId = z.union([z.literal(4663), z.literal(5042), z.literal(988)]);
 
 const createScanSchema = z.object({
-  chainId: supportedChainId,
+  chainId: supportedChainId.optional(),
   address: evmAddressSchema
 });
 
@@ -394,15 +394,37 @@ export async function buildApp({
     const result = await submitScanRequest(input, { scans, queue });
     return result.scan;
   };
-  const telegramChainAdapter = env.TELEGRAM_BOT_TOKEN
-    ? createRobinhoodChainAdapter(env, { allowPublicDefault: true })
-    : null;
-  const telegramArcAdapter = env.TELEGRAM_BOT_TOKEN
-    ? createArcChainAdapter(env, { allowPublicDefault: true })
-    : null;
-  const telegramStableAdapter = env.TELEGRAM_BOT_TOKEN
-    ? createStableChainAdapter(env, { allowPublicDefault: true })
-    : null;
+  const chainAdapter = createRobinhoodChainAdapter(env, { allowPublicDefault: true });
+  const arcAdapter = createArcChainAdapter(env, { allowPublicDefault: true });
+  const stableAdapter = createStableChainAdapter(env, { allowPublicDefault: true });
+
+  async function detectTokenChain(
+    address: `0x${string}`
+  ): Promise<{ chainId: number; chainName: string } | null> {
+    const checks: Array<{ adapter: typeof chainAdapter; chainId: number; name: string }> = [
+      { adapter: chainAdapter, chainId: 4663, name: "Robinhood Chain" },
+      { adapter: arcAdapter, chainId: 5042, name: "Arc Chain" },
+      { adapter: stableAdapter, chainId: 988, name: "Stable Chain" }
+    ];
+    for (const { adapter, chainId, name } of checks) {
+      try {
+        const bytecode = await adapter.getBytecode({ address });
+        if (bytecode !== "0x") {
+          const metadata = await adapter.getTokenMetadata(address);
+          if (metadata.name !== null || metadata.symbol !== null || metadata.decimals !== null) {
+            return { chainId, chainName: name };
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+    const chainName = await findExternalTokenChain(address);
+    if (chainName) {
+      return { chainId: -1, chainName };
+    }
+    return null;
+  }
 
   const telegramBot = env.TELEGRAM_BOT_TOKEN
     ? createTelegramBot({
@@ -427,31 +449,10 @@ export async function buildApp({
             }
           : {}),
         isTokenContract: async (address) => {
-          const adapters = [
-            { adapter: telegramChainAdapter, chainId: 4663, name: "Robinhood Chain" },
-            { adapter: telegramArcAdapter, chainId: 5042, name: "Arc Chain" },
-            { adapter: telegramStableAdapter, chainId: 988, name: "Stable Chain" }
-          ].filter((entry): entry is typeof entry & { adapter: NonNullable<typeof entry.adapter> } =>
-            entry.adapter !== null
-          );
-          if (adapters.length === 0) return false;
-          for (const { adapter, chainId, name } of adapters) {
-            try {
-              const bytecode = await adapter.getBytecode({ address });
-              if (bytecode !== "0x") {
-                const metadata = await adapter.getTokenMetadata(address);
-                if (metadata.name !== null || metadata.symbol !== null || metadata.decimals !== null) {
-                  return { kind: "SUPPORTED" as const, chainId, chainName: name };
-                }
-              }
-            } catch {
-              continue;
-            }
-          }
-          const chainName = await findExternalTokenChain(address);
-          return chainName
-            ? { kind: "UNSUPPORTED_CHAIN" as const, chainName }
-            : { kind: "NOT_TOKEN" as const };
+          const detected = await detectTokenChain(address);
+          if (detected === null) return { kind: "NOT_TOKEN" as const };
+          if (detected.chainId === -1) return { kind: "UNSUPPORTED_CHAIN" as const, chainName: detected.chainName };
+          return { kind: "SUPPORTED" as const, chainId: detected.chainId, chainName: detected.chainName };
         },
         ...(recordTelegramActivity ? { recordActivity: recordTelegramActivity } : {}),
         ...(getTelegramAdminAnalytics ? { getAdminAnalytics: getTelegramAdminAnalytics } : {}),
@@ -533,9 +534,9 @@ export async function buildApp({
         tags: ["scans"],
         body: {
           type: "object",
-          required: ["chainId", "address"],
+          required: ["address"],
           properties: {
-            chainId: { type: "integer", enum: [4663, 5042, 988], description: "Supported chain ID: Robinhood Chain (4663), Arc Chain (5042), or Stable Chain (988)." },
+            chainId: { type: "integer", enum: [4663, 5042, 988], description: "Supported chain ID: Robinhood Chain (4663), Arc Chain (5042), or Stable Chain (988). When omitted the server auto-detects the chain." },
             address: { type: "string", pattern: "^0x[a-fA-F0-9]{40}$" }
           }
         },
@@ -604,13 +605,35 @@ export async function buildApp({
         });
       }
 
+      const address = normalizeEvmAddress(parsed.data.address);
+      const providedChainId = parsed.data.chainId;
+      let chainId: number;
+      if (providedChainId) {
+        chainId = providedChainId;
+      } else {
+        const detected = await detectTokenChain(address as `0x${string}`);
+        if (detected === null) {
+          return reply.code(400).send({
+            error: "no_token_found",
+            message: "No token contract found at that address on any supported chain."
+          });
+        }
+        if (detected.chainId === -1) {
+          return reply.code(400).send({
+            error: "unsupported_chain",
+            message: `That address is a token on ${detected.chainName}, which is not yet supported.`
+          });
+        }
+        chainId = detected.chainId;
+      }
+
       const result = await submitScanRequest(
         {
-          chainId: parsed.data.chainId,
-          address: normalizeEvmAddress(parsed.data.address),
+          chainId,
+          address,
           idempotencyKey:
             request.headers["idempotency-key"]?.toString() ??
-            `${parsed.data.chainId}:${parsed.data.address.toLowerCase()}`,
+            `${chainId}:${address.toLowerCase()}`,
           source: request.headers["x-sentinel-client"] === "web" ? "WEB" : "API"
         },
         { scans, queue }

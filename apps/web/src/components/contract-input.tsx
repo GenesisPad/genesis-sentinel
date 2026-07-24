@@ -77,7 +77,7 @@ export function ContractInput({
 
   const detectedChain: ChainId | undefined = useMemo(() => {
     if (selectedChain !== "auto") return selectedChain;
-    return parsed?.chainId ?? (state === "valid" ? "robinhood" : undefined);
+    return parsed?.chainId;
   }, [selectedChain, parsed, state]);
 
   function submit() {
@@ -168,7 +168,7 @@ function StatusMessage({ state, chain }: { state: ValidationState; chain?: Chain
     typing: null,
     validating: { text: "Validating address…", cls: "text-muted" },
     valid: {
-      text: `Valid contract address · Network detected: ${chain ? CHAINS[chain].label : "Robinhood Chain"}`,
+      text: `Valid contract address${chain ? ` · Network detected: ${CHAINS[chain].label}` : " · Chain will be auto-detected on scan"}`,
       cls: "text-primary",
     },
     invalid_address: { text: "This does not appear to be a valid EVM contract address.", cls: "text-danger" },

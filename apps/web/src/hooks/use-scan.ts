@@ -31,8 +31,8 @@ export function useScan() {
     // same stale idempotency key every subsequent visit would otherwise resolve to. Only an
     // explicit `fresh: true` (the Rerun button) forces a genuinely new scan.
     mutationFn: async (args: CreateScanArgs) => {
-      if (!args.fresh) {
-        const existing = await getExistingTokenReport(args.chainId ?? "robinhood", args.address);
+      if (!args.fresh && args.chainId !== undefined) {
+        const existing = await getExistingTokenReport(args.chainId, args.address);
         if (existing) return { kind: "existing" as const, report: existing };
       }
       return { kind: "job" as const, job: await createScan(args) };

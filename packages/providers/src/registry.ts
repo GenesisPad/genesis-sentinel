@@ -12,6 +12,7 @@ import { createGenesisLockerProvider } from "./genesis-locker.js";
 import { createLegacyGenesisLockerProvider } from "./legacy-genesis-locker.js";
 import { createCompositeLockerProvider, createUnsupportedLockerProvider } from "./locker.js";
 import { createGenesisPadLaunchProvider } from "./genesispad-registry.js";
+import { createDexScreenerLiquidityProvider } from "./dexscreener-liquidity.js";
 import { createRobinhoodLiquidityProvider, createUnsupportedLiquidityProvider, robinhoodChainId } from "./robinhood-liquidity.js";
 import { createSourcifyContractSourceProvider } from "./sourcify.js";
 import type { ProviderSet } from "./types.js";
@@ -149,6 +150,7 @@ export function createProviderRegistry(): { getProviderSet(chainId: number): Pro
   });
 
   const stableExplorer = createBlockscoutExplorerProvider(stableBlockscoutConfig);
+  const stableLocker = createUnsupportedLockerProvider();
   sets.set(stableChainId, {
     source: createStableSourceProvider(),
     explorer: stableExplorer,
@@ -159,8 +161,13 @@ export function createProviderRegistry(): { getProviderSet(chainId: number): Pro
     holder: createBlockscoutHolderProvider(stableBlockscoutConfig, {
       knownLockerAddresses: []
     }),
-    liquidity: createUnsupportedLiquidityProvider(stableChainId),
-    locker: createUnsupportedLockerProvider()
+    liquidity: createDexScreenerLiquidityProvider(
+      stableChainId,
+      "stable",
+      (address) => stableExplorer.getTokenPriceUsd({ chainId: stableChainId, address }),
+      stableLocker
+    ),
+    locker: stableLocker
   });
 
   return {

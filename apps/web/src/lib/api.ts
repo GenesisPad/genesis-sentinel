@@ -80,22 +80,25 @@ function numericChainId(chainId?: ChainId): number {
 }
 
 /** Deterministic idempotency key so repeat visits to the same token resolve the same scan. */
-function idempotencyKeyFor(numericChainId: number, address: string, fresh?: boolean): string {
-  const base = `web:${numericChainId}:${address.toLowerCase()}`;
+function idempotencyKeyFor(numericChainId: number | undefined, address: string, fresh?: boolean): string {
+  const suffix = numericChainId !== undefined ? `${numericChainId}:` : "auto:";
+  const base = `web:${suffix}${address.toLowerCase()}`;
   return fresh ? `${base}:${Date.now()}` : base;
 }
 
 /** POST /v1/scans — create (or resolve a cached) scan job. */
 export async function createScan(args: CreateScanArgs): Promise<ScanJob> {
   if (USE_FIXTURES) return buildFixtureJob(args.address, args.chainId);
-  const chainId = numericChainId(args.chainId);
+  const chainId = args.chainId ? numericChainId(args.chainId) : undefined;
   const json = await request("/scans", {
     method: "POST",
     headers: {
       "idempotency-key": idempotencyKeyFor(chainId, args.address, args.fresh),
       "x-sentinel-client": "web"
     },
-    body: JSON.stringify({ chainId, address: args.address })
+    body: chainId !== undefined
+      ? JSON.stringify({ chainId, address: args.address })
+      : JSON.stringify({ address: args.address })
   });
   return mapProgressToJob(json as ScanProgress);
 }
