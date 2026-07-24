@@ -167,7 +167,11 @@ export function createProviderRegistry(): { getProviderSet(chainId: number): Pro
       (address) => stableExplorer.getTokenPriceUsd({ chainId: stableChainId, address }),
       stableLocker
     ),
-    locker: stableLocker
+    locker: stableLocker,
+    walletClustering: createBlockscoutWalletClusteringProvider({
+      chainId: stableChainId,
+      apiBaseUrl: stableBlockscoutConfig.apiBaseUrl
+    })
   });
 
   return {
