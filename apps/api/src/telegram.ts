@@ -1,4 +1,5 @@
 ﻿import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
 import { robinhoodChainBlockscoutUrl } from "@genesis-sentinel/chain-adapters";
 import type {
@@ -74,6 +75,7 @@ export const TELEGRAM_BOT_COMMANDS = [
   { command: "start", description: "Open Genesis Sentinel and see the main commands" },
   { command: "help", description: "Learn how contract scanning and tracking work" },
   { command: "scan", description: "Scan a token contract: /scan <address>" },
+  { command: "rescan", description: "Run a fresh scan: /rescan <address>" },
   { command: "track", description: "Scan and track a token contract in this chat" },
   { command: "untrack", description: "Stop tracking a token contract in this chat" },
   { command: "tracked", description: "List token contracts tracked in this chat" },
@@ -493,6 +495,7 @@ export function createTelegramBot(options: {
         "",
         "*Commands:*",
         "🔍 /scan <contract address>",
+        "🔁 /rescan <contract address>",
         "⭐ /track <contract address>",
         "📌 /tracked",
         "🗑️ /untrack <contract address>"
@@ -505,6 +508,7 @@ export function createTelegramBot(options: {
     await context.reply(
       [
         "🔍 Send /scan <contract address> or paste a contract address.",
+        "🔁 Use /rescan <contract address> to run a completely fresh scan.",
         "⭐ Use /track <contract address> to save a CA for this chat.",
         "📌 Use /tracked to list saved CAs.",
         "🗑️ Use /untrack <contract address> to remove one.",
@@ -542,6 +546,39 @@ export function createTelegramBot(options: {
       chatId: context.chat.id,
       fromId: context.from?.id,
       telegramChat: context.chat
+    });
+  });
+
+  bot.command("rescan", async (context) => {
+    const address = parseScanAddress(context.message?.text ?? "");
+    if (!address) {
+      await context.reply("⚠️ Send /rescan followed by a valid EVM contract address.");
+      return;
+    }
+    if (!context.chat) return;
+    const tokenStatus = await classifyTelegramAddress(address, options.isTokenContract);
+    if (tokenStatus.kind !== "SUPPORTED") {
+      await context.reply(telegramUnsupportedAddressMessage(tokenStatus, "scan"));
+      return;
+    }
+
+    const limit = checkTelegramRateLimit(
+      options.scanLimiter,
+      options.groupScanLimiter,
+      context.chat,
+      context.from?.id
+    );
+    if (!limit.allowed) {
+      await context.reply(formatTelegramRateLimitReply(limit.retryAfterSeconds));
+      return;
+    }
+
+    await submitScanAndReply({
+      address,
+      chatId: context.chat.id,
+      fromId: context.from?.id,
+      telegramChat: context.chat,
+      forceFresh: true
     });
   });
 
@@ -612,28 +649,45 @@ export function createTelegramBot(options: {
     await context.reply(formatTelegramTrackedListReply(tracked));
   });
 
-  bot.callbackQuery(/^refresh:(.+)$/u, async (context) => {
+  bot.callbackQuery(/^rescan:(.+)$/u, async (context) => {
     const scanId = resolveTelegramCallbackScanId(callbackRegistry, context.match[1]);
     if (!scanId) {
       await context.answerCallbackQuery({ text: "Missing scan ID." });
       return;
     }
 
-    const result = await getSummaryScanResult(scanId);
+    const result = await options.getScanResult(scanId);
     if (!result) {
       await context.answerCallbackQuery({ text: "No scan result was found for that ID." });
       return;
     }
 
-    await context.editMessageText(formatTelegramResultReply(result), {
-      parse_mode: "Markdown",
-      reply_markup: createTelegramResultKeyboard(
-        rememberTelegramCallbackScanId(callbackRegistry, result.scan.scanId),
-        resolveChartUrl(result),
-        options.webAppUrl ? telegramFullReportUrl(options.webAppUrl, result) : undefined
-      )
+    if (!context.chat) {
+      await context.answerCallbackQuery({ text: "This chat is unavailable." });
+      return;
+    }
+
+    const limit = checkTelegramRateLimit(
+      options.scanLimiter,
+      options.groupScanLimiter,
+      context.chat,
+      context.from?.id
+    );
+    if (!limit.allowed) {
+      await context.answerCallbackQuery({
+        text: `Try again in ${limit.retryAfterSeconds}s.`
+      });
+      return;
+    }
+
+    await context.answerCallbackQuery({ text: "Fresh scan started." });
+    await submitScanAndReply({
+      address: result.scan.address,
+      chatId: context.chat.id,
+      fromId: context.from?.id,
+      telegramChat: context.chat,
+      forceFresh: true
     });
-    await context.answerCallbackQuery({ text: "Result refreshed." });
   });
 
   bot.callbackQuery(/^back:(.+)$/u, async (context) => {
@@ -767,6 +821,7 @@ export function createTelegramBot(options: {
     fromId: number | bigint | undefined;
     telegramChat: TelegramChatLike | undefined;
     tracking?: { item: TrackedTelegramAddress; created: boolean };
+    forceFresh?: boolean;
   }) {
     // Telegram chat ids always fit within JS's safe integer range in practice; grammy's API
     // client types chat_id as string | number, not bigint.
@@ -775,7 +830,7 @@ export function createTelegramBot(options: {
       input.tracking ??
       (await trackTelegramAddress(options.trackAddress, input.address, input.telegramChat));
     const scan = await options.submitScan(
-      createTelegramScanInput(input.address, input.chatId, input.fromId)
+      createTelegramScanInput(input.address, input.chatId, input.fromId, input.forceFresh)
     );
 
     const trackingLine = tracking ? formatTelegramTrackingLine(tracking) : null;
@@ -1126,7 +1181,7 @@ export function createTelegramResultKeyboard(
   if (chartUrl) {
     keyboard.url("📈 Chart", chartUrl);
   }
-  keyboard.text("🔄 Refresh", `refresh:${callbackScanId}`);
+  keyboard.text("🔁 Rescan Token", `rescan:${callbackScanId}`);
   return fullReportUrl ? keyboard.row().url("🔗 Full Report", fullReportUrl) : keyboard;
 }
 
@@ -1136,7 +1191,7 @@ export function createTelegramResultKeyboard(
 export function createTelegramSectionKeyboard(callbackScanId: string): InlineKeyboard {
   return new InlineKeyboard()
     .text("◀️ Back", `back:${callbackScanId}`)
-    .text("🔄 Refresh", `refresh:${callbackScanId}`);
+    .text("🔁 Rescan Token", `rescan:${callbackScanId}`);
 }
 
 /** Robinhood Chain (4663) is the only chain the API implements end-to-end today, matching every
@@ -1208,7 +1263,7 @@ function adminChartKeyboard(kind: TelegramChartKind, selected: TelegramChartRang
 export function createTelegramScanKeyboard(callbackScanId: string): InlineKeyboard {
   return new InlineKeyboard()
     .text("🔎 Status", `status:${callbackScanId}`)
-    .text("📋 Result", `refresh:${callbackScanId}`);
+    .text("📋 Result", `back:${callbackScanId}`);
 }
 
 export function createTelegramCallbackKey(scanId: string): string {
@@ -1870,12 +1925,15 @@ export function checkTelegramRateLimit(
 function createTelegramScanInput(
   address: `0x${string}`,
   chatId: number | bigint | undefined,
-  fromId: number | bigint | undefined
+  fromId: number | bigint | undefined,
+  forceFresh = false
 ): SubmitScanInput {
   const input: SubmitScanInput = {
     chainId: 4663,
     address,
-    idempotencyKey: createTelegramIdempotencyKey(chatId, address),
+    idempotencyKey: forceFresh
+      ? `${createTelegramIdempotencyKey(chatId, address)}:rescan:${randomUUID()}`
+      : createTelegramIdempotencyKey(chatId, address),
     source: "TELEGRAM"
   };
 

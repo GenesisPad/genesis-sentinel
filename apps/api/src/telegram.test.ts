@@ -654,7 +654,11 @@ describe("telegram scan helpers", () => {
     expect(labels).toContain("📊 Controls");
     expect(labels).toContain("👥 Holders");
     expect(labels).toContain("🕸️ Dev Cluster");
-    expect(labels).toContain("🔄 Refresh");
+    expect(
+      flat.some(
+        (button) => "callback_data" in button && button.callback_data === "rescan:shortkey"
+      )
+    ).toBe(true);
   });
 
   it("adds a working Chart button only when a chart URL is available", () => {
@@ -675,13 +679,17 @@ describe("telegram scan helpers", () => {
     );
   });
 
-  it("gives section views a Back button that returns to the summary, plus Refresh", () => {
+  it("gives section views a Back button that returns to the summary, plus Rescan Token", () => {
     const keyboard = createTelegramSectionKeyboard("shortkey");
     const flat = keyboard.inline_keyboard.flat();
     const labels = flat.map((button) => button.text);
 
     expect(labels).toContain("◀️ Back");
-    expect(labels).toContain("🔄 Refresh");
+    expect(
+      flat.some(
+        (button) => "callback_data" in button && button.callback_data === "rescan:shortkey"
+      )
+    ).toBe(true);
     const backButton = flat.find((button) => button.text === "◀️ Back");
     expect(backButton && "callback_data" in backButton ? backButton.callback_data : undefined).toBe(
       "back:shortkey"
