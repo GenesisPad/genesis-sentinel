@@ -597,6 +597,37 @@ describe("source-code risk detector", () => {
     expect(result.findings.map((finding) => finding.code)).toContain("SOURCE_ARBITRARY_EXTERNAL_CALL");
   });
 
+  it("does not treat unused OpenZeppelin helper implementations as an exposed arbitrary call", async () => {
+    const result = await sourceCodeRiskDetector.run(
+      {
+        status: "VERIFIED",
+        address: context.address,
+        contractName: "Token",
+        sourceFiles: [
+          {
+            filename: "src/Token.sol",
+            sourceCode: "contract Token { function transfer(address, uint256) external {} }"
+          },
+          {
+            filename: "lib/openzeppelin-contracts/contracts/utils/Address.sol",
+            sourceCode:
+              "library Address { function call(address target, bytes memory data) internal { target.delegatecall(data); } }"
+          },
+          {
+            filename: "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol",
+            sourceCode:
+              "library SafeERC20 { function safe(address token, bytes memory data) internal { token.call(data); } }"
+          }
+        ]
+      },
+      context
+    );
+
+    expect(result.findings.map((finding) => finding.code)).not.toContain(
+      "SOURCE_ARBITRARY_EXTERNAL_CALL"
+    );
+  });
+
   it("detects ownership recovery and forced-transfer surfaces in verified source", async () => {
     const result = await sourceCodeRiskDetector.run(
       {

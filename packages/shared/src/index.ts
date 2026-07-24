@@ -752,6 +752,7 @@ export function buildTokenSecuritySummary(
 
 interface SecuritySignalContext {
   findingCodes: Set<string>;
+  findingSeveritiesByCode: Map<string, FindingSeverity>;
   checkCodesByOutcome: Map<CheckOutcome, Set<string>>;
 }
 
@@ -770,6 +771,9 @@ function createSecuritySignalContext(
 
   return {
     findingCodes: new Set(result.findings.map((finding) => finding.code)),
+    findingSeveritiesByCode: new Map(
+      result.findings.map((finding) => [finding.code, finding.severity])
+    ),
     checkCodesByOutcome
   };
 }
@@ -791,11 +795,17 @@ function detectorSignal(
   ];
 
   if (evidenceCodes.length > 0) {
+    const findingSeverities = input.yesFindings
+      .map((code) => context.findingSeveritiesByCode.get(code))
+      .filter((severity): severity is FindingSeverity => severity !== undefined);
     return {
       id: input.id,
       label: input.label,
       answer: "YES",
-      severity: "HIGH",
+      severity:
+        findingSeverities.length > 0
+          ? signalSeverityForFindings(findingSeverities)
+          : "HIGH",
       confidence: "HIGH",
       source: "DETECTOR",
       description: input.description,
@@ -1217,6 +1227,15 @@ function extractRelatedWalletEdges(result: ScanResultView): RelatedWalletEdge[] 
     }
     return [view];
   });
+}
+
+function signalSeverityForFindings(
+  severities: FindingSeverity[]
+): SecuritySignalSeverity {
+  if (severities.includes("CRITICAL")) return "CRITICAL";
+  if (severities.includes("HIGH")) return "HIGH";
+  if (severities.includes("MEDIUM") || severities.includes("LOW")) return "WARN";
+  return "INFO";
 }
 
 function precisePctFromRaw(balanceRaw: unknown, totalSupply: string | null | undefined): number | null {

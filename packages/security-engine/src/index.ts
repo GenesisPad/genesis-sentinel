@@ -836,6 +836,10 @@ interface SourceRiskRule {
   technicalExplanation: string;
   recommendation: string;
   patterns: SourceRiskPattern[];
+  /** Generic helper implementations in vendored dependencies are not evidence that the deployed
+   * contract exposes that helper's capability. Rules using this flag inspect only application
+   * source; actual call sites must appear there to become a finding. */
+  excludeVendoredDependencies?: boolean;
 }
 
 /**
@@ -1264,6 +1268,7 @@ const sourceRiskRules: SourceRiskRule[] = [
       "The detector matched .delegatecall( (always flagged — it runs the target's code inside this contract's own storage context, regardless of arguments), or .call( carrying real calldata (able to invoke any function on the target). A .call{value: x}(\"\") with empty calldata is excluded: it can only trigger the target's receive()/fallback(), never an arbitrary function — it's the ETH-send idiom Solidity's own docs recommend over .transfer()/.send(), not an arbitrary-execution risk. Verified against a real false positive ($GEN): a fixed, constructor-only recipient list paid via .call{value: share}(\"\") was being flagged identically to a genuine arbitrary-calldata call.",
     recommendation:
       "Inspect whether the call target and calldata are attacker- or admin-controlled, and whether the call is reachable by a privileged role or by any user.",
+    excludeVendoredDependencies: true,
     patterns: [
       { regex: /\.\s*delegatecall\s*(?:\{[^}]*\})?\s*\(/ },
       { regex: /\.\s*call\s*(?:\{[^}]*\})?\s*\((?!\s*(?:""|'')\s*\))/ }
@@ -3148,6 +3153,9 @@ function matchSourceRule(sourceFiles: ContractSourceFile[], rule: SourceRiskRule
     contextNote?: string;
   }> = [];
   for (const file of sourceFiles) {
+    if (rule.excludeVendoredDependencies && isVendoredSourceFile(file.filename)) {
+      continue;
+    }
     const source = stripInterfaceBlocks(stripSolidityComments(file.sourceCode));
     for (const { regex, classifyMatch } of rule.patterns) {
       const match = regex.exec(source);
@@ -3168,6 +3176,16 @@ function matchSourceRule(sourceFiles: ContractSourceFile[], rule: SourceRiskRule
   }
 
   return matches.slice(0, 10);
+}
+
+function isVendoredSourceFile(filename: string): boolean {
+  const normalized = filename.replaceAll("\\", "/").toLowerCase();
+  return (
+    normalized.startsWith("lib/") ||
+    normalized.includes("/node_modules/") ||
+    normalized.startsWith("@openzeppelin/") ||
+    normalized.includes("/@openzeppelin/")
+  );
 }
 
 function stripSolidityComments(source: string): string {

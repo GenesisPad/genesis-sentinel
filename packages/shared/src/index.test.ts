@@ -243,7 +243,21 @@ describe("buildTokenSecuritySummary", () => {
           ]
         }
       ],
-      findings: [],
+      findings: [
+        {
+          id: "finding-proxy",
+          code: "EIP1167_MINIMAL_PROXY_DETECTED",
+          detectorId: "dangerous-opcode-surface",
+          detectorVersion: "1.0.0",
+          title: "Standard EIP-1167 minimal proxy detected",
+          severity: "INFO",
+          category: "CONTRACT_CONTROL",
+          confidence: "HIGH",
+          description: "Canonical clone runtime.",
+          technicalExplanation: "The implementation address is fixed in bytecode.",
+          evidence: []
+        }
+      ],
       liquidity: {
         status: "UNSUPPORTED",
         pools: [],
@@ -339,6 +353,10 @@ describe("buildTokenSecuritySummary", () => {
     expect(summary.signals.find((signal) => signal.id === "honeypot")).toMatchObject({
       label: "Honeypot",
       answer: "NO"
+    });
+    expect(summary.signals.find((signal) => signal.id === "proxy_contract")).toMatchObject({
+      answer: "YES",
+      severity: "INFO"
     });
     expect(summary.signals.find((signal) => signal.id === "buy_tax")).toMatchObject({
       label: "Buy tax",
