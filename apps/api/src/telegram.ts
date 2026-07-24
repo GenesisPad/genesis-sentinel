@@ -670,9 +670,24 @@ export function createTelegramBot(options: {
     }
 
     const tracked = await options.listTrackedAddresses(chat);
-    await context.reply(formatTelegramTrackedListReply(tracked), {
-      reply_markup: createTelegramTrackedListKeyboard(tracked)
+    await context.reply(formatTelegramTrackedListReply(tracked, 0), {
+      reply_markup: createTelegramTrackedListKeyboard(tracked, 0)
     });
+  });
+
+  bot.callbackQuery(/^trackedpage:(\d+)$/u, async (context) => {
+    const chat = createTelegramChatIdentity(context.chat);
+    if (!chat || !options.listTrackedAddresses) {
+      await context.answerCallbackQuery({ text: "CA tracking is not configured for this bot yet." });
+      return;
+    }
+
+    const page = Number(context.match[1]);
+    const tracked = await options.listTrackedAddresses(chat);
+    await context.editMessageText(formatTelegramTrackedListReply(tracked, page), {
+      reply_markup: createTelegramTrackedListKeyboard(tracked, page)
+    });
+    await context.answerCallbackQuery();
   });
 
   bot.callbackQuery(/^trackedview:(\d+):(0x[a-fA-F0-9]{40})$/u, async (context) => {
@@ -1178,29 +1193,57 @@ export function formatTelegramUntrackReply(address: `0x${string}`, removed: bool
     : `❓ That CA was not on this chat watchlist: ${address}`;
 }
 
-export function formatTelegramTrackedListReply(items: TrackedTelegramAddress[]): string {
+/** A row of buttons per tracked CA (View Result + Rescan) means the keyboard grows without
+ * bound as a chat tracks more addresses — a 20+ CA watchlist produced a keyboard several
+ * screens tall. Fixed-size pages keep the message the same height no matter how many CAs a
+ * chat tracks. */
+export const TELEGRAM_TRACKED_PAGE_SIZE = 6;
+
+function trackedPageBounds(itemCount: number, page: number): { start: number; end: number; pageCount: number } {
+  const pageCount = Math.max(1, Math.ceil(itemCount / TELEGRAM_TRACKED_PAGE_SIZE));
+  const clampedPage = Math.min(Math.max(page, 0), pageCount - 1);
+  const start = clampedPage * TELEGRAM_TRACKED_PAGE_SIZE;
+  return { start, end: Math.min(start + TELEGRAM_TRACKED_PAGE_SIZE, itemCount), pageCount };
+}
+
+export function formatTelegramTrackedListReply(
+  items: TrackedTelegramAddress[],
+  page = 0
+): string {
   if (items.length === 0) {
     return "📌 No CAs are tracked in this chat yet. Use /track <contract address> or paste a CA.";
   }
 
+  const { start, end, pageCount } = trackedPageBounds(items.length, page);
+  const pageLine = pageCount > 1 ? ` · Page ${Math.floor(start / TELEGRAM_TRACKED_PAGE_SIZE) + 1}/${pageCount}` : "";
+
   return [
-    `📌 Tracked CAs (${items.length})`,
-    ...items.map(
-      (item, index) => `${index + 1}. ${item.address} | ${telegramChainName(item.chainId)}`
-    )
+    `📌 Tracked CAs (${items.length})${pageLine}`,
+    ...items
+      .slice(start, end)
+      .map((item, i) => `${start + i + 1}. ${item.address} | ${telegramChainName(item.chainId)}`)
   ].join("\n");
 }
 
 export function createTelegramTrackedListKeyboard(
-  items: TrackedTelegramAddress[]
+  items: TrackedTelegramAddress[],
+  page = 0
 ): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  items.forEach((item, index) => {
+  if (items.length === 0) return keyboard;
+
+  const { start, end, pageCount } = trackedPageBounds(items.length, page);
+  const clampedPage = Math.floor(start / TELEGRAM_TRACKED_PAGE_SIZE);
+  items.slice(start, end).forEach((item, i) => {
     keyboard
-      .text(`${index + 1}. 📋 View Result`, `trackedview:${item.chainId}:${item.address}`)
-      .text(`${index + 1}. 🔁 Rescan`, `trackedrescan:${item.chainId}:${item.address}`)
+      .text(`${start + i + 1}. 📋 View Result`, `trackedview:${item.chainId}:${item.address}`)
+      .text(`${start + i + 1}. 🔁 Rescan`, `trackedrescan:${item.chainId}:${item.address}`)
       .row();
   });
+  if (pageCount > 1) {
+    if (clampedPage > 0) keyboard.text("◀️ Prev", `trackedpage:${clampedPage - 1}`);
+    if (clampedPage < pageCount - 1) keyboard.text("▶️ Next", `trackedpage:${clampedPage + 1}`);
+  }
   return keyboard;
 }
 

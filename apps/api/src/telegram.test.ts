@@ -277,6 +277,39 @@ describe("telegram scan helpers", () => {
     ]);
   });
 
+  it("paginates the tracked list instead of growing the keyboard without bound", () => {
+    // Reproduces a real UX complaint: a chat tracking 12+ CAs produced a keyboard with two
+    // buttons per CA and no limit, several screens tall. Fixed-size pages keep it constant.
+    const tracked = Array.from({ length: 14 }, (_, i) => ({
+      chainId: 4663,
+      address: `0x${(i + 1).toString().padStart(40, "0")}` as const,
+      createdAt: "2026-07-11T00:00:00.000Z"
+    }));
+
+    const page0 = formatTelegramTrackedListReply(tracked, 0);
+    expect(page0).toContain("Tracked CAs (14)");
+    expect(page0).toContain("Page 1/3");
+    expect(page0).toContain("1. ");
+    expect(page0).toContain("6. ");
+    expect(page0).not.toContain("7. ");
+
+    const keyboard0 = createTelegramTrackedListKeyboard(tracked, 0);
+    const rows0 = keyboard0.inline_keyboard;
+    expect(rows0.length).toBe(7); // 6 CA rows + 1 nav row
+    const navRow0 = rows0[6]?.map((button) => button.text);
+    expect(navRow0).toEqual(["▶️ Next"]); // no Prev on the first page
+
+    const page1 = formatTelegramTrackedListReply(tracked, 1);
+    expect(page1).toContain("Page 2/3");
+    expect(page1).toContain("7. ");
+    expect(page1).toContain("12. ");
+    expect(page1).not.toContain("13. ");
+
+    const keyboard2 = createTelegramTrackedListKeyboard(tracked, 2);
+    const navRow2 = keyboard2.inline_keyboard.at(-1)?.map((button) => button.text);
+    expect(navRow2).toEqual(["◀️ Prev"]); // no Next on the last page
+  });
+
   it("formats result summaries without claiming a guarantee", () => {
     const result: ScanResultView = {
       scan: {
