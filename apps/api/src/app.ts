@@ -608,7 +608,7 @@ export async function buildApp({
       if (providedChainId) {
         chainId = providedChainId;
       } else {
-        const detected = await detectTokenChain(address as `0x${string}`);
+        const detected = await detectTokenChain(address);
         if (detected === null) {
           return reply.code(400).send({
             error: "no_token_found",

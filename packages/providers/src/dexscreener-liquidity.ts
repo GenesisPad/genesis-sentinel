@@ -1,5 +1,4 @@
 import { erc20Abi, getAddress } from "viem";
-import type { ChainAdapter } from "@genesis-sentinel/chain-adapters";
 import { fetchJson, isRecord, stringValue } from "./http.js";
 import type { LockerProvider } from "./locker.js";
 import type { DiscoveredPool, LiquidityProvider, LiquidityProviderCoverage } from "./types.js";
@@ -132,7 +131,7 @@ export function createDexScreenerLiquidityProvider(
 
           const quoteDecimals = await adapter
             .readContract<number>({
-              address: getAddress(quoteAddress as string),
+              address: getAddress(quoteAddress),
               abi: erc20Abi,
               functionName: "decimals"
             })
@@ -193,7 +192,7 @@ export function createDexScreenerLiquidityProvider(
           discovered.push({
             poolAddress: resolvedPairAddress,
             dex: dexLabel,
-            quoteTokenAddress: getAddress(quoteAddress as `0x${string}`),
+            quoteTokenAddress: getAddress(quoteAddress),
             quoteSymbol: quoteSymbol ?? "Unknown",
             quoteDecimals,
             liquidityData: {
