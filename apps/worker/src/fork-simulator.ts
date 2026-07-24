@@ -254,12 +254,21 @@ async function runGanacheForkTradeSimulation(
       deadline
     });
     const sellReceived = fullSell.received;
+    // A genuine revert (the router call itself failed, or the tx was mined with a failed
+    // status) is strong, unambiguous honeypot evidence. A sell that merely completed with zero
+    // quote token received is not — live-verified false positive on a real, actively-traded
+    // GenesisPad token whose real on-chain sells succeed: the fork's single-block buy → transfer
+    // → sell sequence against a token with its own embedded auto-swap-back logic can produce a
+    // zero-output swap that never reverts, which real, differently-timed mainnet trades don't
+    // reproduce. Only a real revert is reported as a confirmed honeypot; an unreverted
+    // zero-output sell is reported as unknown (null) rather than guessed as safe or dangerous.
+    const sellReverted = fullSell.reverted || partialSellTest.reverted;
 
     return {
       simulationTool: "0.1.0-ganache-fork",
       canBuy: true,
       canSell: sellReceived > 0n,
-      isHoneypot: sellReceived <= 0n,
+      isHoneypot: sellReceived <= 0n ? (sellReverted ? true : null) : false,
       buyTaxBps,
       sellTaxBps: fullSell.taxBps,
       buyTokenReceivedRaw: buyReceived.toString(),
@@ -273,7 +282,13 @@ async function runGanacheForkTradeSimulation(
       ...(fullSell.txHash ? { sellTxHash: fullSell.txHash } : {}),
       ...(fullSell.gasUsed ? { sellGasUsed: fullSell.gasUsed } : {}),
       ...(transferTest.txHash ? { transferTxHash: transferTest.txHash } : {}),
-      ...(sellReceived <= 0n ? { error: "Forked sell completed but returned no quote token." } : {})
+      ...(sellReceived <= 0n
+        ? {
+            error: sellReverted
+              ? "Forked sell transaction reverted."
+              : "Forked sell completed without reverting but returned no quote token — inconclusive, not a confirmed honeypot."
+          }
+        : {})
     };
   } catch (error) {
     return {
@@ -350,6 +365,11 @@ interface SellTestResult {
   succeeded: boolean;
   taxBps: number | null;
   received: bigint;
+  /** True only when the sell transaction itself threw (router call reverted, or the receipt
+   * indicated failure) — a strong, unambiguous honeypot signal. False when the transaction
+   * completed without reverting even if it happened to return zero quote token (see the
+   * `reverted: false` return path below for why that case must not be treated the same way). */
+  reverted: boolean;
   txHash?: `0x${string}`;
   gasUsed?: string;
 }
@@ -365,7 +385,7 @@ async function runSellTest(
   params: { tokenAddress: `0x${string}`; account: `0x${string}`; amount: bigint; deadline: bigint }
 ): Promise<SellTestResult> {
   if (params.amount <= 0n) {
-    return { succeeded: false, taxBps: null, received: 0n };
+    return { succeeded: false, taxBps: null, received: 0n, reverted: false };
   }
 
   const isV3 = input.dex === "Uniswap V3";
@@ -428,6 +448,12 @@ async function runSellTest(
           chain: null
         });
     const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+    // waitForTransactionReceipt resolves once the tx is mined regardless of outcome — a
+    // reverted-but-mined swap does not throw here, so status must be checked explicitly to
+    // catch it as a real revert rather than falling through to the ambiguous zero-output path.
+    if (receipt.status === "reverted") {
+      return { succeeded: false, taxBps: null, received: 0n, reverted: true, txHash, gasUsed: receipt.gasUsed.toString() };
+    }
     const quoteAfter = await publicClient.readContract({
       address: robinhoodWrappedNativeAddress,
       abi: erc20Abi,
@@ -440,11 +466,12 @@ async function runSellTest(
       succeeded: received > 0n,
       taxBps: calculateTaxBps(expectedOut, received),
       received,
+      reverted: false,
       txHash,
       gasUsed: receipt.gasUsed.toString()
     };
   } catch {
-    return { succeeded: false, taxBps: null, received: 0n };
+    return { succeeded: false, taxBps: null, received: 0n, reverted: true };
   }
 }
 

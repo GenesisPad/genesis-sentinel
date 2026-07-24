@@ -1755,6 +1755,13 @@ function readHoneypotStatus(result: ScanResultView): string | null {
   if (evidence === "ROUTE_QUOTE") {
     return "⚪ Unknown — only pool math was checked, no trade was executed";
   }
+  // A forked sell that completed without reverting but returned nothing is genuinely
+  // ambiguous — not a confirmed honeypot (see fork-simulator.ts's runSellTest for why a forked
+  // single-block buy/sell sequence can produce this for a token that sells fine on real
+  // mainnet), and not a clean bill of health either.
+  if (evidence === "FORK") {
+    return "⚪ Unknown — the forked sell was inconclusive, not a confirmed pass or fail";
+  }
   return null;
 }
 

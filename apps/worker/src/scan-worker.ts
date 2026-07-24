@@ -435,10 +435,15 @@ async function createRobinhoodRouteTradeSimulations(input: {
     buySimulation.revertReason = buyStaticCall.reason;
   }
 
+  // A fork sell that completed without reverting but returned nothing (forkResult.isHoneypot
+  // === null, see fork-simulator.ts) is genuinely ambiguous, not a confirmed failure — reported
+  // INCONCLUSIVE rather than FAILED so it isn't presented as a certain honeypot finding.
   const sellOutcome = forkResult
     ? forkResult.canSell
       ? "PASSED"
-      : "FAILED"
+      : forkResult.isHoneypot === null
+        ? "INCONCLUSIVE"
+        : "FAILED"
     : sellTransferCall.status === "REVERTED"
       ? "FAILED"
       : sellOutput > 0n
@@ -461,7 +466,14 @@ async function createRobinhoodRouteTradeSimulations(input: {
       sellLegTransferCall: sellTransferCall,
       forkSimulation: forkResult,
       sellTaxBps: forkResult?.sellTaxBps ?? null,
-      isHoneypot: forkResult?.isHoneypot ?? (sellTransferCall.status === "REVERTED" ? true : null)
+      // forkResult's own isHoneypot (which may legitimately be null) is authoritative over the
+      // lighter static-call fallback whenever a real fork actually ran — `??` would wrongly
+      // treat that null as "missing" and fall through to the static-call guess instead.
+      isHoneypot: forkResult
+        ? forkResult.isHoneypot
+        : sellTransferCall.status === "REVERTED"
+          ? true
+          : null
     },
     simulationTool: common.simulationTool
   };
@@ -1166,7 +1178,11 @@ export interface ForkTradeSimulatorResult {
   simulationTool: string;
   canBuy: boolean;
   canSell: boolean;
-  isHoneypot: boolean;
+  /** True only when a sell transaction genuinely reverted — a real, unambiguous honeypot
+   * signal. Null when a sell completed without reverting but still returned no quote token: a
+   * forked single-block buy/sell sequence can produce that result for a legitimate token (see
+   * fork-simulator.ts's runSellTest), so it is reported as unknown rather than guessed. */
+  isHoneypot: boolean | null;
   buyTaxBps: number | null;
   sellTaxBps: number | null;
   buyTokenReceivedRaw?: string;
