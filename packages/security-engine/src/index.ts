@@ -1,5 +1,8 @@
 import { toFunctionSelector } from "viem";
-import { riskLevelForScore } from "@genesis-sentinel/shared";
+import {
+  effectiveFindingsAfterOwnershipRenouncement,
+  riskLevelForScore
+} from "@genesis-sentinel/shared";
 import type {
   BytecodeReuseView,
   CheckOutcome,
@@ -133,7 +136,7 @@ interface SelectorRule {
 }
 
 const detectorVersion = "0.1.0";
-export const scoringVersion = "0.2.0-category-weighted-with-gap-reasons";
+export const scoringVersion = "0.3.0-renounced-owner-control-neutralization";
 export const simulationFoundationVersion = "0.1.0-unsupported";
 export const liquidityDiscoveryFoundationVersion = "0.1.0-unsupported";
 export const holderAnalysisFoundationVersion = "0.1.0-unsupported";
@@ -2778,7 +2781,15 @@ export function scoreFindings(
   detectorResults: DetectorResult[],
   scannerVersion: string
 ): ScoredRiskAssessment {
-  const findings = detectorResults.flatMap((result) => result.findings);
+  const ownershipRenounced = detectorResults.some((result) =>
+    result.checks.some(
+      (check) => check.code === "OWNERSHIP_RENOUNCED" && check.outcome === "PASSED"
+    )
+  );
+  const findings = effectiveFindingsAfterOwnershipRenouncement(
+    detectorResults.flatMap((result) => result.findings),
+    ownershipRenounced
+  );
   const unableToAssessReasons = collectUnableToAssessReasons(detectorResults);
 
   if (findings.length === 0) {

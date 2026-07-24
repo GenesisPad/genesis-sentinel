@@ -10,6 +10,7 @@ import type {
 import {
   buildDexScreenerUrl,
   buildTokenSecuritySummary,
+  effectiveFindingsAfterOwnershipRenouncement,
   formatCompactUsd,
   formatHumanDateTime,
   formatSupplyPercentage,
@@ -1040,7 +1041,10 @@ export function formatTelegramTrackedListReply(items: TrackedTelegramAddress[]):
 }
 
 export function formatTelegramResultReply(result: ScanResultView): string {
-  const topFindings = [...result.findings]
+  const topFindings = effectiveFindingsAfterOwnershipRenouncement(
+    result.findings,
+    result.token.ownershipStatus === "RENOUNCED"
+  )
     .sort((a, b) => severityRank(b.severity) - severityRank(a.severity))
     .slice(0, 3);
   const tax = readTaxData(result);
@@ -1386,7 +1390,12 @@ const criticalAlerts: { code: string; message: string }[] = [
 ];
 
 function criticalAlertBlock(result: ScanResultView): string | null {
-  const codes = new Set(result.findings.map((finding) => finding.code));
+  const codes = new Set(
+    effectiveFindingsAfterOwnershipRenouncement(
+      result.findings,
+      result.token.ownershipStatus === "RENOUNCED"
+    ).map((finding) => finding.code)
+  );
   const hits = criticalAlerts.filter((alert) => codes.has(alert.code));
   if (hits.length === 0) return null;
 

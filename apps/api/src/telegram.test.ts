@@ -846,6 +846,34 @@ describe("telegram report informativeness", () => {
     ...overrides
   });
 
+  it("does not show owner-only control flags as concerning after ownership is renounced", () => {
+    const result = baseResult({
+      token: {
+        chainId: 4663,
+        address: "0x0000000000000000000000000000000000000001",
+        ownershipStatus: "RENOUNCED"
+      },
+      findings: [
+        {
+          id: "blacklist-1",
+          code: "BLACKLIST_CAPABILITY_SURFACE",
+          detectorId: "blacklist-selector-patterns",
+          detectorVersion: "1.0.0",
+          title: "Blacklist capability surface detected",
+          severity: "HIGH",
+          category: "TRADING_SAFETY",
+          confidence: "MEDIUM",
+          description: "Owner-only blacklist capability.",
+          technicalExplanation: "Selector evidence.",
+          evidence: []
+        }
+      ]
+    });
+
+    expect(formatTelegramResultReply(result)).not.toContain("Blacklist capability");
+    expect(formatTelegramResultReply(result)).toContain("Controls: no concerning flags");
+  });
+
   const simulation = (tool: string, result: Record<string, unknown>) => [
     {
       id: "sim-buy",

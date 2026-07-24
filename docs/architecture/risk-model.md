@@ -51,7 +51,10 @@ Scoring version history:
 
 - `0.1.0-finding-weighted` — initial per-finding severity/confidence weighting, max-of-category
   overall score.
-- `0.2.0-category-weighted-with-gap-reasons` (current, Milestone 7) — same weighting and
+- `0.3.0-renounced-owner-control-neutralization` (current) — owner-dependent control-surface
+  findings are excluded when ownership is verifiably renounced, unless separate evidence shows
+  a surviving proxy admin, role, hidden recovery path, obfuscated authority, or external gate.
+- `0.2.0-category-weighted-with-gap-reasons` (Milestone 7) — same weighting and
   aggregation, plus: a `RiskAssessment` is always persisted, even when no findings exist (as an
   explicit `UNABLE_TO_ASSESS`/`score: null` result rather than no row at all); per-finding
   `findingContributions` are persisted alongside the aggregate so the score is reconstructible;

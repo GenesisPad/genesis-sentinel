@@ -100,6 +100,33 @@ describe("mapResultToReport", () => {
     expect(report.controls.canPause).toBe(false);
   });
 
+  it("does not render an owner-only blacklist flag as active after ownership is renounced", () => {
+    const blacklistFinding: SecurityFindingView = {
+      id: "f-blacklist",
+      code: "BLACKLIST_CAPABILITY_SURFACE",
+      detectorId: "blacklist-selector-patterns",
+      detectorVersion: "1.0.0",
+      title: "Blacklist capability",
+      severity: "HIGH",
+      category: "TRADING_SAFETY",
+      confidence: "MEDIUM",
+      description: "Owner-only blacklist selector.",
+      technicalExplanation: "Selector evidence.",
+      evidence: []
+    };
+    const report = mapResultToReport(
+      baseView({
+        token: { chainId: 4663, address: ADDRESS, ownershipStatus: "RENOUNCED" },
+        findings: [blacklistFinding]
+      })
+    );
+
+    expect(report.controls.ownershipRenounced).toBe(true);
+    expect(report.controls.canBlacklist).toBe(false);
+    expect(report.findings).toEqual([]);
+    expect(report.checks.high).toBe(0);
+  });
+
   it("leaves contract controls unknown before contract analysis has run", () => {
     const report = mapResultToReport(
       baseView({

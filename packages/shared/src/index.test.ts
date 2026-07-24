@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  effectiveFindingsAfterOwnershipRenouncement,
   assertRiskScore,
   buildDexScreenerUrl,
   buildMarketChartUrl,
@@ -18,6 +19,17 @@ import {
 } from "./index.js";
 
 describe("shared foundation contracts", () => {
+  it("neutralizes owner-only findings after renouncement but preserves alternate authority", () => {
+    const ownerOnly = { code: "BLACKLIST_CAPABILITY_SURFACE" };
+    expect(effectiveFindingsAfterOwnershipRenouncement([ownerOnly], true)).toEqual([]);
+    expect(
+      effectiveFindingsAfterOwnershipRenouncement(
+        [ownerOnly, { code: "SOURCE_PRIVILEGED_ROLE_CONTROL" }],
+        true
+      )
+    ).toHaveLength(2);
+  });
+
   it("creates stable service health metadata", () => {
     const health = createHealth("api");
 

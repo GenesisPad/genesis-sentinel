@@ -1,4 +1,5 @@
 import {
+  effectiveFindingsAfterOwnershipRenouncement,
   liquidityHealthTier,
   NEGLIGIBLE_LIQUIDITY_USD as SHARED_NEGLIGIBLE_LIQUIDITY_USD,
   selectPrimaryLiquidityPool,
@@ -556,6 +557,10 @@ export function mapResultToReport(view: ScanResultView): ScanReport {
   const chainId = chainIdFor(view.scan.chainId);
   const riskScore = view.risk.score;
   const token = deriveTokenMeta(view, chainId, view.scan.address);
+  const effectiveFindings = effectiveFindingsAfterOwnershipRenouncement(
+    view.findings,
+    token.ownershipStatus === "renounced"
+  );
   const walletCluster = extractWalletCluster(view);
   const devCluster = buildDevClusterSummary(view, walletCluster);
 
@@ -566,14 +571,14 @@ export function mapResultToReport(view: ScanResultView): ScanReport {
     riskScore,
     scoreExplanation: scoreExplanation(view),
     checks: {
-      critical: countBySeverity(view.findings, "critical"),
-      high: countBySeverity(view.findings, "high"),
-      medium: countBySeverity(view.findings, "medium"),
+      critical: countBySeverity(effectiveFindings, "critical"),
+      high: countBySeverity(effectiveFindings, "high"),
+      medium: countBySeverity(effectiveFindings, "medium"),
       passed: countPassed(view)
     },
     stages: deriveStages(view.scan.state),
-    findings: view.findings.map((finding) => mapFinding(finding, view.scan.address)),
-    controls: deriveControls(view.findings, view.scan.state, token.ownershipStatus),
+    findings: effectiveFindings.map((finding) => mapFinding(finding, view.scan.address)),
+    controls: deriveControls(effectiveFindings, view.scan.state, token.ownershipStatus),
     simulation: mapSimulations(view.simulations),
     liquidity: mapLiquidity(view),
     holders: mapHolders(view, devCluster),

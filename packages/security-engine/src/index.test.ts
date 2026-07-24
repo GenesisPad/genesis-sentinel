@@ -1598,7 +1598,7 @@ describe("risk scoring", () => {
       score: 60,
       level: "HIGH",
       confidence: "MEDIUM",
-      scoringVersion: "0.2.0-category-weighted-with-gap-reasons"
+      scoringVersion: "0.3.0-renounced-owner-control-neutralization"
     });
     expect(assessment.categoryScores[0]).toMatchObject({
       category: "CONTRACT_CONTROL",
@@ -1648,6 +1648,43 @@ describe("risk scoring", () => {
 
     expect(assessment.level).toBe("HIGH");
     expect(assessment.score).toBeGreaterThanOrEqual(60);
+  });
+
+  it("does not score ordinary owner-only capability flags after ownership is renounced", () => {
+    const detectorResults = [
+      {
+        detector: { id: "ownership-status", version: "0.1.0", name: "n", description: "d" },
+        checks: [
+          { code: "OWNERSHIP_RENOUNCED", outcome: "PASSED" as const, confidence: "HIGH" as const, evidence: [] }
+        ],
+        findings: []
+      },
+      {
+        detector: { id: "blacklist-selector-patterns", version: "0.1.0", name: "n", description: "d" },
+        checks: [
+          { code: "BLACKLIST_SELECTORS_PRESENT", outcome: "DETECTED" as const, confidence: "MEDIUM" as const, evidence: [] }
+        ],
+        findings: [
+          {
+            code: "BLACKLIST_CAPABILITY_SURFACE",
+            detectorId: "blacklist-selector-patterns",
+            detectorVersion: "0.1.0",
+            title: "Blacklist capability",
+            severity: "HIGH" as const,
+            category: "TRADING_SAFETY" as const,
+            confidence: "MEDIUM" as const,
+            description: "d",
+            technicalExplanation: "t",
+            evidence: []
+          }
+        ]
+      }
+    ];
+
+    const assessment = scoreFindings(detectorResults, "0.1.0-foundation");
+
+    expect(assessment.score).toBeNull();
+    expect(assessment.findingContributions).toEqual([]);
   });
 
   it("does not let locked liquidity erase a separate trading-safety (tax) finding (golden profile)", () => {

@@ -497,6 +497,54 @@ export interface TokenSecuritySummaryOptions {
   webAppUrl?: string;
 }
 
+const OWNER_DEPENDENT_CONTROL_FINDING_CODES = new Set([
+  "OWNERSHIP_CONTROL_SURFACE",
+  "BLACKLIST_CAPABILITY_SURFACE",
+  "PAUSE_CAPABILITY_SURFACE",
+  "MAX_TRANSACTION_CAPABILITY_SURFACE",
+  "COOLDOWN_CAPABILITY_SURFACE",
+  "TRADING_CONTROL_SURFACE",
+  "FEE_EXCLUSION_CAPABILITY_SURFACE",
+  "SOURCE_BLACKLIST_CONTROL",
+  "SOURCE_TRADING_COOLDOWN_CONTROL",
+  "SOURCE_TRADING_TOGGLE",
+  "SOURCE_TAX_OR_LIMIT_CONTROL",
+  "SOURCE_ROUTER_OR_PAIR_REPLACEMENT"
+]);
+
+const ALTERNATE_AUTHORITY_FINDING_CODES = new Set([
+  "PROXY_OR_UPGRADE_SURFACE",
+  "EIP1967_PROXY_DETECTED",
+  "EIP1967_BEACON_PROXY_DETECTED",
+  "PROXY_ADMIN_CONTROLLED",
+  "SOURCE_OWNERSHIP_RECOVERY_SURFACE",
+  "SOURCE_PRIVILEGED_ROLE_CONTROL",
+  "PRIVILEGED_ROLE_ACTIVE",
+  "SOURCE_OBFUSCATED_ADDRESS",
+  "RENOUNCED_BUT_EXTERNALLY_GATED",
+  "TRANSFER_GATE_ALLOWLIST"
+]);
+
+/**
+ * A burned owner makes ordinary onlyOwner-style knobs unreachable. Preserve their raw detector
+ * checks as technical evidence, but do not present or score them as active risks unless separate
+ * evidence shows another authority path survives renouncement.
+ */
+export function effectiveFindingsAfterOwnershipRenouncement<T extends { code: string }>(
+  findings: readonly T[],
+  ownershipRenounced: boolean
+): T[] {
+  if (
+    !ownershipRenounced ||
+    findings.some((finding) => ALTERNATE_AUTHORITY_FINDING_CODES.has(finding.code))
+  ) {
+    return [...findings];
+  }
+  return findings.filter(
+    (finding) => !OWNER_DEPENDENT_CONTROL_FINDING_CODES.has(finding.code)
+  );
+}
+
 const FINDING_CODES = {
   blacklist: ["BLACKLIST_CAPABILITY_SURFACE", "SOURCE_BLACKLIST_CONTROL"],
   hiddenOwner: ["SOURCE_OWNERSHIP_RECOVERY_SURFACE", "SOURCE_PRIVILEGED_ROLE_CONTROL"],
@@ -548,7 +596,30 @@ export function buildTokenSecuritySummary(
   result: ScanResultView,
   options: TokenSecuritySummaryOptions = {}
 ): TokenSecuritySummaryView {
-  const context = createSecuritySignalContext(result);
+  const ownershipRenounced = result.token.ownershipStatus === "RENOUNCED";
+  const effectiveFindings = effectiveFindingsAfterOwnershipRenouncement(
+    result.findings,
+    ownershipRenounced
+  );
+  const ownerControlsNeutralized =
+    ownershipRenounced && effectiveFindings.length < result.findings.length;
+  const context = createSecuritySignalContext(
+    { ...result, findings: effectiveFindings },
+    ownerControlsNeutralized
+      ? new Set([
+          "BLACKLIST_SELECTORS_PRESENT",
+          "PAUSE_SELECTORS_PRESENT",
+          "MAX_TRANSACTION_SELECTORS_PRESENT",
+          "COOLDOWN_SELECTORS_PRESENT",
+          "TRADING_CONTROL_SELECTORS_PRESENT",
+          "FEE_EXCLUSION_SELECTORS_PRESENT",
+          "SOURCE_BLACKLIST_CONTROL",
+          "SOURCE_TRADING_COOLDOWN_CONTROL",
+          "SOURCE_TRADING_TOGGLE",
+          "SOURCE_TAX_OR_LIMIT_CONTROL"
+        ])
+      : undefined
+  );
   const highIssueSeverities = new Set<FindingSeverity>(["HIGH", "CRITICAL"]);
   const fullAnalysisUrl = buildFullAnalysisUrl(
     options.webAppUrl,
@@ -567,7 +638,7 @@ export function buildTokenSecuritySummary(
     scannedAt: result.scan.completedAt ?? result.scan.submittedAt,
     product: "Genesis Sentinel",
     risk: result.risk,
-    issueCount: result.findings.filter((finding) => highIssueSeverities.has(finding.severity))
+    issueCount: effectiveFindings.filter((finding) => highIssueSeverities.has(finding.severity))
       .length,
     devCluster,
     deployerBalance,
@@ -679,11 +750,16 @@ interface SecuritySignalContext {
   checkCodesByOutcome: Map<CheckOutcome, Set<string>>;
 }
 
-function createSecuritySignalContext(result: ScanResultView): SecuritySignalContext {
+function createSecuritySignalContext(
+  result: ScanResultView,
+  ignoredDetectedCheckCodes?: ReadonlySet<string>
+): SecuritySignalContext {
   const checkCodesByOutcome = new Map<CheckOutcome, Set<string>>();
   for (const check of result.detectorChecks) {
     const codes = checkCodesByOutcome.get(check.outcome) ?? new Set<string>();
-    codes.add(check.code);
+    if (!(check.outcome === "DETECTED" && ignoredDetectedCheckCodes?.has(check.code))) {
+      codes.add(check.code);
+    }
     checkCodesByOutcome.set(check.outcome, codes);
   }
 
