@@ -16,6 +16,7 @@ import {
 } from "@genesis-sentinel/providers";
 import type {
   ContractSourceDetectorInput,
+  DetectorMetadata,
   DetectorResult,
   SimulationResult
 } from "@genesis-sentinel/security-engine";
@@ -253,6 +254,137 @@ function createHolderConcentrationDetectorResult(input: {
       }
     ],
     findings
+  };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/**
+ * Trade simulations confirm honeypot status but were never wired into scoring — a token could
+ * come back "🔴 Honeypot: Yes" while still scoring LOW, because scoreFindings only ever sees
+ * detector findings, and no detector previously read SimulationResult.result.isHoneypot. This
+ * converts a confirmed honeypot into a CRITICAL finding so it actually drives the risk score.
+ *
+ * Checks the BUY leg, not SELL: a forked run's isHoneypot is a single verdict shared by both
+ * legs, and it is only ever true for a genuinely failed BUY (or a setup/exception failure) — a
+ * reverted or zero-output SELL was live-verified as a route-specific false positive (a real
+ * token's on-chain sells all route through smart-order aggregators, never the bare Uniswap V2
+ * Router this fork test calls) and reports isHoneypot: null instead, see fork-simulator.ts. The
+ * SELL leg's isHoneypot can still be true, but only from the weaker non-forked static-call
+ * fallback (no fork ran at all), which is handled as a separate, lower-confidence signal below.
+ */
+function createHoneypotDetectorResult(input: {
+  address: `0x${string}`;
+  blockNumber: bigint;
+  simulations: SimulationResult[];
+}): DetectorResult | null {
+  const detector = {
+    id: "honeypot-simulation",
+    version: "0.1.0",
+    name: "Honeypot simulation",
+    description:
+      "Reads the isHoneypot verdict from trade simulations and turns a confirmed honeypot into a scored finding."
+  };
+
+  const buyRun = input.simulations.find((run) => run.kind === "BUY");
+  const buyIsHoneypot =
+    buyRun && isPlainRecord(buyRun.result) ? buyRun.result.isHoneypot : undefined;
+  const buyIsForked = buyRun?.simulationTool.includes("fork") ?? false;
+
+  if (buyIsForked && buyIsHoneypot === true) {
+    return buildHoneypotDetectorResult({
+      detector,
+      address: input.address,
+      blockNumber: input.blockNumber,
+      run: buyRun!,
+      confidence: "HIGH",
+      title: "Confirmed honeypot: buy transaction fails",
+      summary: "Forked buy/sell trade simulation confirmed the buy leg fails.",
+      description:
+        "A forked trade simulation attempted a real buy on a local chain snapshot and it failed (or the token received nothing), confirming this token cannot be bought at all.",
+      technicalExplanation:
+        "The fork trade simulator executed a buy transaction against the live pool state on a local chain snapshot; it reverted, or completed while transferring no tokens to the buyer."
+    });
+  }
+
+  // No fork ran at all: the only signal available is the sell-leg's static transfer call
+  // reverting. Weaker evidence (no real trade executed, and even a genuine forked sell revert
+  // was proven unreliable above) — kept at MEDIUM confidence rather than promoted to HIGH.
+  const sellRun = input.simulations.find((run) => run.kind === "SELL");
+  const sellIsHoneypot =
+    sellRun && isPlainRecord(sellRun.result) ? sellRun.result.isHoneypot : undefined;
+  const sellIsForked = sellRun?.simulationTool.includes("fork") ?? false;
+
+  if (!sellIsForked && sellIsHoneypot === true) {
+    return buildHoneypotDetectorResult({
+      detector,
+      address: input.address,
+      blockNumber: input.blockNumber,
+      run: sellRun!,
+      confidence: "MEDIUM",
+      title: "Likely honeypot: sell-leg static call reverted",
+      summary: "Sell-leg transfer static call reverted against live pool state.",
+      description:
+        "A static eth_call simulating the sell-leg token transfer reverted against live pool state. No real trade was executed, so this is a weaker signal than a forked simulation.",
+      technicalExplanation:
+        "A static eth_call simulating the sell-leg token transfer reverted against live pool state; no fork trade simulator was available to confirm with a real transaction."
+    });
+  }
+
+  return null;
+}
+
+function buildHoneypotDetectorResult(input: {
+  detector: DetectorMetadata;
+  address: `0x${string}`;
+  blockNumber: bigint;
+  run: SimulationResult;
+  confidence: "HIGH" | "MEDIUM";
+  title: string;
+  summary: string;
+  description: string;
+  technicalExplanation: string;
+}): DetectorResult {
+  const evidence = {
+    type: "SIMULATION" as const,
+    summary: input.summary,
+    address: input.address,
+    blockNumber: input.blockNumber,
+    data: {
+      simulationTool: input.run.simulationTool,
+      outcome: input.run.outcome,
+      revertReason: input.run.revertReason ?? null
+    }
+  };
+
+  return {
+    detector: input.detector,
+    checks: [
+      {
+        code: "HONEYPOT_SIMULATION_CONFIRMED",
+        outcome: "DETECTED",
+        confidence: input.confidence,
+        evidence: [evidence]
+      }
+    ],
+    findings: [
+      {
+        code: "CONFIRMED_HONEYPOT",
+        detectorId: input.detector.id,
+        detectorVersion: input.detector.version,
+        title: input.title,
+        severity: "CRITICAL",
+        category: "TRADING_SAFETY",
+        confidence: input.confidence,
+        description: input.description,
+        technicalExplanation: input.technicalExplanation,
+        evidence: [evidence],
+        recommendation:
+          "Treat this token as a confirmed or likely honeypot. Do not buy until an independent sell has been demonstrated to succeed."
+      }
+    ]
   };
 }
 
@@ -1753,6 +1885,21 @@ export async function processScanJob(
             : "Uniswap V2 route quote completed. Stateful fork simulation is used when the selected pool is native/WETH quoted."
       }
     });
+
+    const honeypotDetectorResult = createHoneypotDetectorResult({
+      address: target.address,
+      blockNumber,
+      simulations
+    });
+    if (honeypotDetectorResult) {
+      holderDetectorResults.push(honeypotDetectorResult);
+      await dependencies.scans.recordDetectorResult({
+        scanId: target.scanId,
+        result: honeypotDetectorResult,
+        startedAt: now(),
+        completedAt: now()
+      });
+    }
 
     await dependencies.scans.updateScanState({
       scanId: target.scanId,

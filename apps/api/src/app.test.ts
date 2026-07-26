@@ -129,6 +129,34 @@ function createInMemoryApiKeyRepository() {
       await Promise.resolve();
       usageEvents.push({ apiKeyId: input.apiKeyId, route: input.route, kind: input.kind });
     },
+    async listApiKeys() {
+      await Promise.resolve();
+      return Array.from(recordsById.values());
+    },
+    async getApiKeyUsageSummary(apiKeyId) {
+      await Promise.resolve();
+      const forKey = usageEvents.filter((event) => event.apiKeyId === apiKeyId);
+      const byKind: Record<ApiUsageKind, number> = {
+        CACHED_LOOKUP: 0,
+        FRESH_SCAN: 0,
+        DEEP_SIMULATION: 0,
+        PROVIDER_HEAVY: 0,
+        FAILED_REQUEST: 0,
+        RATE_LIMIT_EVENT: 0
+      };
+      for (const event of forKey) {
+        byKind[event.kind]++;
+      }
+      return {
+        apiKeyId,
+        totalRequests: forKey.length,
+        requestsLast24h: forKey.length,
+        requestsLast7d: forKey.length,
+        byKind,
+        errorCount: 0,
+        lastRequestAt: forKey.length > 0 ? new Date().toISOString() : null
+      };
+    },
     async recordAuditEvent(input) {
       await Promise.resolve();
       auditEvents.push({ type: input.type, ...(input.subject ? { subject: input.subject } : {}) });
@@ -538,6 +566,73 @@ describe("api foundation", () => {
       scopes: ["scan:read"],
       rateLimitPerMinute: 5_000
     });
+  });
+
+  it("lists API keys and reports per-key usage to admins only", async () => {
+    const { repository } = createInMemoryApiKeyRepository();
+    const app = await buildApp({
+      env: loadEnv({
+        NODE_ENV: "test",
+        LOG_LEVEL: "silent",
+        API_ADMIN_SECRET: "admin-secret-for-tests"
+      }),
+      logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
+      scanRepository,
+      scanQueue,
+      apiKeyRepository: repository,
+      getMarketDataProvider
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/api-keys",
+      payload: { name: "usage test key" }
+    });
+    const { key, id } = created.json<{ key: string; id: string }>();
+
+    await app.inject({
+      method: "GET",
+      url: "/v1/risk/4663/0x0000000000000000000000000000000000000003",
+      headers: { authorization: `Bearer ${key}` }
+    });
+
+    const unauthorizedList = await app.inject({ method: "GET", url: "/v1/api-keys" });
+    const list = await app.inject({
+      method: "GET",
+      url: "/v1/api-keys",
+      headers: { "x-admin-secret": "admin-secret-for-tests" }
+    });
+    const unauthorizedUsage = await app.inject({
+      method: "GET",
+      url: `/v1/api-keys/${id}/usage`
+    });
+    const usage = await app.inject({
+      method: "GET",
+      url: `/v1/api-keys/${id}/usage`,
+      headers: { "x-admin-secret": "admin-secret-for-tests" }
+    });
+    const missingUsage = await app.inject({
+      method: "GET",
+      url: "/v1/api-keys/does-not-exist/usage",
+      headers: { "x-admin-secret": "admin-secret-for-tests" }
+    });
+    await app.close();
+
+    expect(unauthorizedList.statusCode).toBe(403);
+    expect(list.statusCode).toBe(200);
+    expect(list.json<Array<{ id: string; name: string }>>()).toContainEqual(
+      expect.objectContaining({ id, name: "usage test key" })
+    );
+    expect(list.body).not.toContain("keyHash");
+
+    expect(unauthorizedUsage.statusCode).toBe(403);
+    expect(usage.statusCode).toBe(200);
+    expect(usage.json<{ apiKeyId: string; totalRequests: number }>()).toMatchObject({
+      apiKeyId: id,
+      totalRequests: 1
+    });
+
+    expect(missingUsage.statusCode).toBe(404);
   });
 
   it("returns the presented key's own record via GET /v1/api-keys/me, and 401s with no key", async () => {

@@ -213,8 +213,16 @@ export function createTelegramBot(options: {
   getAdminAnalytics?: TelegramGetAdminAnalytics;
   getRegisteredUsers?: TelegramGetRegisteredUsers;
   isTokenContract?: TelegramIsTokenContract;
+  /** Called for any error a handler throws (including new-group-alert delivery failures) and
+   * for group-alert delivery being skipped/degraded, so failures are visible instead of silently
+   * dropping that one group's notification. Defaults to console.error. */
+  onError?: (error: unknown, context: string) => void;
 }) {
   const bot = new Bot(options.token);
+  const onError = options.onError ?? ((error, context) => console.error(`[telegram:${context}]`, error));
+  // grammY swallows nothing on its own — an uncaught handler error otherwise surfaces only as a
+  // failed webhook POST for that single update, with no record of which chat/group was affected.
+  bot.catch((err) => onError(err.error, `update:${err.ctx.update.update_id}`));
   bot.api.config.use((previous, method, payload, signal) => {
     if (method === "sendMessage" || method === "editMessageText") {
       Object.assign(payload, telegramLinkPreviewOptions());
@@ -298,8 +306,15 @@ export function createTelegramBot(options: {
 
   bot.on("my_chat_member", async (context) => {
     const update = context.myChatMember;
+    const chatContext = `my_chat_member:${update.chat.id}`;
+    if (!options.newGroupAlertChatId) {
+      onError(
+        new Error("newGroupAlertChatId is not configured; skipping new-group alert."),
+        chatContext
+      );
+      return;
+    }
     if (
-      !options.newGroupAlertChatId ||
       !shouldSendNewGroupAlert({
         chatType: update.chat.type,
         oldStatus: update.old_chat_member.status,
@@ -314,21 +329,30 @@ export function createTelegramBot(options: {
       memberCount,
       botUsername: context.me.username
     });
-    const media = await options.getGroupAlertMedia?.().catch(() => null);
+    const media = await options.getGroupAlertMedia?.().catch((error) => {
+      onError(error, `${chatContext}:getGroupAlertMedia`);
+      return null;
+    });
     const mediaOptions = {
       caption: alert.text,
       parse_mode: "HTML" as const,
       reply_markup: alert.replyMarkup
     };
-    if (media?.type === "photo") {
-      await context.api.sendPhoto(options.newGroupAlertChatId, media.fileId, mediaOptions);
-    } else if (media?.type === "animation") {
-      await context.api.sendAnimation(options.newGroupAlertChatId, media.fileId, mediaOptions);
-    } else {
-      await context.api.sendMessage(options.newGroupAlertChatId, alert.text, {
-        parse_mode: "HTML",
-        reply_markup: alert.replyMarkup
-      });
+    try {
+      if (media?.type === "photo") {
+        await context.api.sendPhoto(options.newGroupAlertChatId, media.fileId, mediaOptions);
+      } else if (media?.type === "animation") {
+        await context.api.sendAnimation(options.newGroupAlertChatId, media.fileId, mediaOptions);
+      } else {
+        await context.api.sendMessage(options.newGroupAlertChatId, alert.text, {
+          parse_mode: "HTML",
+          reply_markup: alert.replyMarkup
+        });
+      }
+    } catch (error) {
+      // A blocked/kicked-from-alert-chat bot, a bad chat ID, or a Telegram flood-control 429
+      // must not be a silent, unrecorded loss of this join event.
+      onError(error, `${chatContext}:send`);
     }
   });
 
@@ -670,8 +694,9 @@ export function createTelegramBot(options: {
     }
 
     const tracked = await options.listTrackedAddresses(chat);
-    await context.reply(formatTelegramTrackedListReply(tracked, 0), {
-      reply_markup: createTelegramTrackedListKeyboard(tracked, 0)
+    const withSymbols = await enrichTrackedWithSymbols(tracked, options.getLatestScanResult);
+    await context.reply(formatTelegramTrackedListReply(withSymbols, 0), {
+      reply_markup: createTelegramTrackedListKeyboard(withSymbols, 0)
     });
   });
 
@@ -684,8 +709,9 @@ export function createTelegramBot(options: {
 
     const page = Number(context.match[1]);
     const tracked = await options.listTrackedAddresses(chat);
-    await context.editMessageText(formatTelegramTrackedListReply(tracked, page), {
-      reply_markup: createTelegramTrackedListKeyboard(tracked, page)
+    const withSymbols = await enrichTrackedWithSymbols(tracked, options.getLatestScanResult);
+    await context.editMessageText(formatTelegramTrackedListReply(withSymbols, page), {
+      reply_markup: createTelegramTrackedListKeyboard(withSymbols, page)
     });
     await context.answerCallbackQuery();
   });
@@ -1031,15 +1057,22 @@ export function parseCommandArgument(text: string): string | null {
   return argument.length > 0 ? argument : null;
 }
 
+const activeGroupMemberStatuses = new Set(["member", "administrator"]);
+
 export function shouldSendNewGroupAlert(input: {
   chatType: string;
   oldStatus: string;
   newStatus: string;
 }): boolean {
+  // Fire on any transition INTO active membership from a non-active status (left/kicked/
+  // restricted/etc), not just left/kicked specifically — Telegram can deliver my_chat_member
+  // with other prior statuses (e.g. restricted -> member) depending on how the bot was added,
+  // and narrowly matching only left/kicked silently dropped those joins. Excludes member ->
+  // administrator (a promotion, not a join) since old status is already active.
   return (
     (input.chatType === "group" || input.chatType === "supergroup") &&
-    (input.oldStatus === "left" || input.oldStatus === "kicked") &&
-    (input.newStatus === "member" || input.newStatus === "administrator")
+    !activeGroupMemberStatuses.has(input.oldStatus) &&
+    activeGroupMemberStatuses.has(input.newStatus)
   );
 }
 
@@ -1193,6 +1226,26 @@ export function formatTelegramUntrackReply(address: `0x${string}`, removed: bool
     : `❓ That CA was not on this chat watchlist: ${address}`;
 }
 
+export type TrackedTelegramAddressWithSymbol = TrackedTelegramAddress & {
+  symbol?: string | null;
+};
+
+/** Looks up each tracked address's latest scan result just for its token symbol, so the tracked
+ * list can show `$TICKER <truncated CA>` instead of the raw full address. Best-effort: a token
+ * with no completed scan yet (or no getLatestScanResult wired) just falls back to the address. */
+async function enrichTrackedWithSymbols(
+  items: TrackedTelegramAddress[],
+  getLatestScanResult?: TelegramGetLatestScanResult
+): Promise<TrackedTelegramAddressWithSymbol[]> {
+  if (!getLatestScanResult) return items;
+  return Promise.all(
+    items.map(async (item) => ({
+      ...item,
+      symbol: (await getLatestScanResult(item.chainId, item.address))?.token.symbol ?? null
+    }))
+  );
+}
+
 /** A row of buttons per tracked CA (View Result + Rescan) means the keyboard grows without
  * bound as a chat tracks more addresses — a 20+ CA watchlist produced a keyboard several
  * screens tall. Fixed-size pages keep the message the same height no matter how many CAs a
@@ -1207,7 +1260,7 @@ function trackedPageBounds(itemCount: number, page: number): { start: number; en
 }
 
 export function formatTelegramTrackedListReply(
-  items: TrackedTelegramAddress[],
+  items: TrackedTelegramAddressWithSymbol[],
   page = 0
 ): string {
   if (items.length === 0) {
@@ -1219,14 +1272,16 @@ export function formatTelegramTrackedListReply(
 
   return [
     `📌 Tracked CAs (${items.length})${pageLine}`,
-    ...items
-      .slice(start, end)
-      .map((item, i) => `${start + i + 1}. ${item.address} | ${telegramChainName(item.chainId)}`)
+    ...items.slice(start, end).map((item, i) => {
+      const symbol = item.symbol?.trim();
+      const label = symbol ? `$${symbol} ${shortenAddress(item.address)}` : shortenAddress(item.address);
+      return `${start + i + 1}. ${label} | ${telegramChainName(item.chainId)}`;
+    })
   ].join("\n");
 }
 
 export function createTelegramTrackedListKeyboard(
-  items: TrackedTelegramAddress[],
+  items: TrackedTelegramAddressWithSymbol[],
   page = 0
 ): InlineKeyboard {
   const keyboard = new InlineKeyboard();
@@ -1256,6 +1311,10 @@ export function formatTelegramResultReply(result: ScanResultView): string {
     result.findings,
     result.token.ownershipStatus === "RENOUNCED"
   )
+    // INFO findings (e.g. "launched via GenesisPad with liquidity locked") are evidence, not
+    // risk — they must never fill a "Top risks" slot just because few/no real risk findings
+    // exist. Matches the web report's TopRisks filtering.
+    .filter((f) => f.severity !== "INFO")
     .sort((a, b) => severityRank(b.severity) - severityRank(a.severity))
     .slice(0, 3);
   const tax = readTaxData(result);

@@ -2,11 +2,13 @@
 
 import { useMemo, useState } from "react";
 import {
+  BarChart3,
   Check,
   Clipboard,
   Eye,
   EyeOff,
   KeyRound,
+  ListRestart,
   Loader2,
   ShieldCheck,
   SlidersHorizontal
@@ -25,6 +27,33 @@ interface CreatedApiKey {
   rateLimitPerMinute: number;
   createdAt: string;
   key: string;
+}
+
+interface ApiKeyRecord {
+  id: string;
+  name: string;
+  prefix: string;
+  scopes: Scope[];
+  rateLimitPerMinute: number;
+  enabled: boolean;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+interface ApiKeyUsageSummary {
+  apiKeyId: string;
+  totalRequests: number;
+  requestsLast24h: number;
+  requestsLast7d: number;
+  byKind: Record<string, number>;
+  errorCount: number;
+  lastRequestAt: string | null;
+}
+
+function formatDate(value: string | null): string {
+  if (!value) return "Never";
+  return new Date(value).toLocaleString();
 }
 
 const DEFAULT_ENDPOINT = "/v1";
@@ -67,6 +96,79 @@ export function AdminApiKeys() {
   const [message, setMessage] = useState("");
   const [createdKey, setCreatedKey] = useState<CreatedApiKey | null>(null);
   const [copied, setCopied] = useState(false);
+
+  const [keys, setKeys] = useState<ApiKeyRecord[] | null>(null);
+  const [listStatus, setListStatus] = useState<"idle" | "loading" | "error">("idle");
+  const [listMessage, setListMessage] = useState("");
+  const [expandedKeyId, setExpandedKeyId] = useState<string | null>(null);
+  const [usageByKeyId, setUsageByKeyId] = useState<
+    Record<string, { status: "loading" | "error" | "loaded"; summary?: ApiKeyUsageSummary; message?: string }>
+  >({});
+
+  const canLoadKeys = useMemo(
+    () => apiBaseUrl.trim().length > 0 && adminSecret.trim().length > 0,
+    [adminSecret, apiBaseUrl]
+  );
+
+  async function loadKeys() {
+    if (!canLoadKeys) {
+      setListStatus("error");
+      setListMessage("Enter the API base URL and admin secret first.");
+      return;
+    }
+
+    setListStatus("loading");
+    setListMessage("");
+    try {
+      const response = await fetch(joinEndpoint(apiBaseUrl.trim(), "/api-keys"), {
+        headers: { "x-admin-secret": adminSecret }
+      });
+      const body = (await response.json().catch(() => [])) as ApiKeyRecord[] | { message?: string };
+      if (!response.ok) {
+        const errorBody = body as { message?: string };
+        throw new Error(errorBody.message ?? `Request failed with status ${response.status}`);
+      }
+      setKeys(body as ApiKeyRecord[]);
+      setListStatus("idle");
+    } catch (error) {
+      setListStatus("error");
+      setListMessage(error instanceof Error ? error.message : "Could not load API keys.");
+    }
+  }
+
+  async function toggleUsage(keyId: string) {
+    if (expandedKeyId === keyId) {
+      setExpandedKeyId(null);
+      return;
+    }
+    setExpandedKeyId(keyId);
+    if (usageByKeyId[keyId]?.status === "loaded") {
+      return;
+    }
+
+    setUsageByKeyId((current) => ({ ...current, [keyId]: { status: "loading" } }));
+    try {
+      const response = await fetch(joinEndpoint(apiBaseUrl.trim(), `/api-keys/${keyId}/usage`), {
+        headers: { "x-admin-secret": adminSecret }
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(body.message ?? `Request failed with status ${response.status}`);
+      }
+      setUsageByKeyId((current) => ({
+        ...current,
+        [keyId]: { status: "loaded", summary: body as ApiKeyUsageSummary }
+      }));
+    } catch (error) {
+      setUsageByKeyId((current) => ({
+        ...current,
+        [keyId]: {
+          status: "error",
+          message: error instanceof Error ? error.message : "Could not load usage."
+        }
+      }));
+    }
+  }
 
   const canSubmit = useMemo(
     () =>
@@ -142,6 +244,7 @@ export function AdminApiKeys() {
       setCreatedKey(body as CreatedApiKey);
       setStatus("success");
       setMessage("API key created. Store it now; Genesis Sentinel cannot show this key again.");
+      void loadKeys();
     } catch (error) {
       setStatus("error");
       setMessage(error instanceof Error ? error.message : "Could not create the API key.");
@@ -356,6 +459,143 @@ export function AdminApiKeys() {
             </div>
           ) : null}
         </div>
+      </section>
+
+      <section className="rounded-lg border border-border-strong bg-surface p-4 shadow-2xl shadow-black/25 sm:p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-4">
+          <div className="flex items-center gap-3 text-primary">
+            <span className="flex size-11 items-center justify-center rounded-xl border border-primary/30 bg-primary/10">
+              <BarChart3 className="size-5" aria-hidden="true" />
+            </span>
+            <div>
+              <h2 className="font-display text-xl font-bold text-foreground">Issued keys</h2>
+              <p className="mt-1 text-sm text-muted">
+                Every key generated on this instance, with per-key request analytics.
+              </p>
+            </div>
+          </div>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={!canLoadKeys || listStatus === "loading"}
+            onClick={() => {
+              void loadKeys();
+            }}
+          >
+            {listStatus === "loading" ? (
+              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <ListRestart className="size-4" aria-hidden="true" />
+            )}
+            {keys === null ? "Load keys" : "Refresh"}
+          </Button>
+        </div>
+
+        {listMessage ? (
+          <p className="mt-4 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">
+            {listMessage}
+          </p>
+        ) : null}
+
+        {keys === null ? (
+          <p className="mt-4 text-sm text-muted">
+            Enter the admin secret above, then load keys to see names, scopes, and usage.
+          </p>
+        ) : keys.length === 0 ? (
+          <p className="mt-4 text-sm text-muted">No API keys have been issued yet.</p>
+        ) : (
+          <div className="mt-4 flex flex-col gap-3">
+            {keys.map((item) => {
+              const usage = usageByKeyId[item.id];
+              const expanded = expandedKeyId === item.id;
+              return (
+                <div
+                  key={item.id}
+                  className="rounded-lg border border-border-strong bg-surface-deep p-4"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="flex items-center gap-2 text-sm font-bold text-foreground">
+                        {item.name}
+                        {item.revokedAt ? (
+                          <span className="rounded-full border border-danger/35 bg-danger/10 px-2 py-0.5 text-xs font-bold text-danger">
+                            Revoked
+                          </span>
+                        ) : !item.enabled ? (
+                          <span className="rounded-full border border-border-strong px-2 py-0.5 text-xs font-bold text-muted">
+                            Disabled
+                          </span>
+                        ) : null}
+                      </p>
+                      <p className="mt-1 font-mono text-xs text-muted">
+                        {item.prefix} · {item.scopes.join(", ")} · {item.rateLimitPerMinute} req/min
+                      </p>
+                      <p className="mt-1 text-xs text-muted">
+                        Created {formatDate(item.createdAt)} · Last used {formatDate(item.lastUsedAt)}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => {
+                        void toggleUsage(item.id);
+                      }}
+                    >
+                      {expanded ? "Hide usage" : "View usage"}
+                    </Button>
+                  </div>
+
+                  {expanded ? (
+                    <div className="mt-3 border-t border-border pt-3">
+                      {usage?.status === "loading" ? (
+                        <p className="text-sm text-muted">Loading usage…</p>
+                      ) : usage?.status === "error" ? (
+                        <p className="text-sm text-danger">{usage.message}</p>
+                      ) : usage?.summary ? (
+                        <div className="grid gap-3 sm:grid-cols-4">
+                          <div>
+                            <p className="text-xs text-muted">Total requests</p>
+                            <p className="text-lg font-bold text-foreground">
+                              {usage.summary.totalRequests.toLocaleString()}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-muted">Last 24h</p>
+                            <p className="text-lg font-bold text-foreground">
+                              {usage.summary.requestsLast24h.toLocaleString()}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-muted">Last 7d</p>
+                            <p className="text-lg font-bold text-foreground">
+                              {usage.summary.requestsLast7d.toLocaleString()}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-muted">Errors (4xx/5xx)</p>
+                            <p className="text-lg font-bold text-foreground">
+                              {usage.summary.errorCount.toLocaleString()}
+                            </p>
+                          </div>
+                          <div className="sm:col-span-4">
+                            <p className="text-xs text-muted">By usage kind</p>
+                            <p className="mt-1 font-mono text-xs text-secondary">
+                              {Object.entries(usage.summary.byKind)
+                                .filter(([, count]) => count > 0)
+                                .map(([kind, count]) => `${kind}: ${count}`)
+                                .join(" · ") || "No requests recorded yet."}
+                            </p>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </section>
     </main>
   );

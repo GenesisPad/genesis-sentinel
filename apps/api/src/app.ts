@@ -456,6 +456,7 @@ export async function buildApp({
           return result ? refreshVolatileFields(result) : null;
         },
         adminIds: env.TELEGRAM_ADMIN_IDS,
+        onError: (error, context) => app.log.error({ err: error, context }, "telegram bot error"),
         ...(env.GENESISPAD_MAIN_GROUP_CHAT_ID
           ? { newGroupAlertChatId: env.GENESISPAD_MAIN_GROUP_CHAT_ID }
           : {}),
@@ -1396,6 +1397,118 @@ export async function buildApp({
     }
   );
 
+  // Admin-only listing of every issued key, for the admin key-management panel. Requires
+  // X-Admin-Secret since there is no per-caller ownership model — any presented key can only
+  // read itself via /v1/api-keys/me, but the admin panel needs to see and name every key.
+  app.get(
+    "/v1/api-keys",
+    {
+      schema: {
+        description:
+          "Admin-only: list every issued API key (name, prefix, scopes, rate limit, timestamps). Requires X-Admin-Secret.",
+        tags: ["api-keys"],
+        response: {
+          200: {
+            description: "All issued keys, newest first.",
+            type: "array",
+            items: { type: "object", additionalProperties: true }
+          },
+          403: {
+            description: "Missing or invalid X-Admin-Secret.",
+            type: "object",
+            additionalProperties: true
+          },
+          503: {
+            description: "API key management is not configured on this instance.",
+            type: "object",
+            additionalProperties: true
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      if (!apiKeys) {
+        return reply.code(503).send({
+          error: "api_keys_not_configured",
+          message: "API key management is not available on this instance."
+        });
+      }
+      if (!isAdminRequest(request)) {
+        return reply.code(403).send({
+          error: "admin_required",
+          message: "Listing API keys requires X-Admin-Secret."
+        });
+      }
+
+      return apiKeys.listApiKeys();
+    }
+  );
+
+  // Admin-only usage analytics for a single key — total/24h/7d request counts, a breakdown by
+  // usage kind, and error count, sourced from the APIUsage rows already written on every request.
+  app.get(
+    "/v1/api-keys/:id/usage",
+    {
+      schema: {
+        description:
+          "Admin-only: request-volume analytics for a single API key. Requires X-Admin-Secret.",
+        tags: ["api-keys"],
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string" } }
+        },
+        response: {
+          200: {
+            description: "Aggregated usage counts for the key.",
+            type: "object",
+            additionalProperties: true
+          },
+          403: {
+            description: "Missing or invalid X-Admin-Secret.",
+            type: "object",
+            additionalProperties: true
+          },
+          404: {
+            description: "No API key exists with that id.",
+            type: "object",
+            additionalProperties: true
+          },
+          503: {
+            description: "API key management is not configured on this instance.",
+            type: "object",
+            additionalProperties: true
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      if (!apiKeys) {
+        return reply.code(503).send({
+          error: "api_keys_not_configured",
+          message: "API key management is not available on this instance."
+        });
+      }
+      if (!isAdminRequest(request)) {
+        return reply.code(403).send({
+          error: "admin_required",
+          message: "Viewing API key usage requires X-Admin-Secret."
+        });
+      }
+
+      const { id } = request.params as { id: string };
+      const keys = await apiKeys.listApiKeys();
+      if (!keys.some((key) => key.id === id)) {
+        return reply.code(404).send({
+          error: "api_key_not_found",
+          message: "No API key exists with that id."
+        });
+      }
+
+      return apiKeys.getApiKeyUsageSummary(id);
+    }
+  );
+
   // Self-lookup only, same constraint as DELETE below: there is no account/ownership model, so
   // a key can only read its own record via the presented key, never list or look up another.
   app.get(
@@ -1514,7 +1627,16 @@ export async function buildApp({
     }
 
     await ensureTelegramBotInitialized();
-    await telegramBot.handleUpdate(request.body as Parameters<typeof telegramBot.handleUpdate>[0]);
+    try {
+      await telegramBot.handleUpdate(
+        request.body as Parameters<typeof telegramBot.handleUpdate>[0]
+      );
+    } catch (error) {
+      // bot.catch() covers errors thrown by grammY handlers, but handleUpdate itself can still
+      // reject (e.g. a malformed update) — log it here rather than surfacing an opaque 500 with
+      // no record of which webhook delivery failed.
+      app.log.error({ err: error }, "telegram webhook handling failed");
+    }
     return { ok: true };
   });
 

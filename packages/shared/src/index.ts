@@ -1358,6 +1358,17 @@ export interface ApiKeyCreatedView extends ApiKeyView {
   key: string;
 }
 
+/** Aggregated request volume for a single API key, for the admin key-management panel. */
+export interface ApiKeyUsageSummary {
+  apiKeyId: string;
+  totalRequests: number;
+  requestsLast24h: number;
+  requestsLast7d: number;
+  byKind: Record<ApiUsageKind, number>;
+  errorCount: number;
+  lastRequestAt: string | null;
+}
+
 /** SSE event types for scan progress (GET /v1/scans/:scanId/events), matching the spec's
  * required event list. Polling (GET /v1/scans/:scanId) remains a full fallback. */
 export type ScanEventType =

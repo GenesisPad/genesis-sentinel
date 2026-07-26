@@ -11,6 +11,7 @@ import {
   normalizeEvmAddress,
   scannerVersion,
   supportedChains,
+  type ApiKeyUsageSummary,
   type ApiKeyView,
   type ApiUsageKind,
   type BytecodeReuseView,
@@ -1394,6 +1395,10 @@ export interface ApiKeyRepository {
   touchApiKeyLastUsed(id: string): Promise<void>;
   revokeApiKey(id: string): Promise<ApiKeyView | null>;
   recordApiUsage(input: RecordApiUsageInput): Promise<void>;
+  /** Admin listing of every issued key (newest first), for the admin key-management panel. */
+  listApiKeys(): Promise<ApiKeyView[]>;
+  /** Aggregated request-volume analytics for a single key, for the admin key-management panel. */
+  getApiKeyUsageSummary(apiKeyId: string): Promise<ApiKeyUsageSummary>;
   /** Lightweight audit trail for API-key lifecycle events (creation/revocation), reusing the
    * existing generic SecurityEvent table rather than a dedicated audit-log model. */
   recordAuditEvent(input: {
@@ -1480,6 +1485,53 @@ export function createApiKeyRepository(db: PrismaDatabase): ApiKeyRepository {
           units: input.units ?? 1
         }
       });
+    },
+
+    async listApiKeys() {
+      const records = await db.aPIKey.findMany({ orderBy: { createdAt: "desc" } });
+      return records.map(toApiKeyView);
+    },
+
+    async getApiKeyUsageSummary(apiKeyId) {
+      const now = new Date();
+      const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const since7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+      const [totalRequests, requestsLast24h, requestsLast7d, byKindGroups, errorCount, lastRequest] =
+        await Promise.all([
+          db.aPIUsage.count({ where: { apiKeyId } }),
+          db.aPIUsage.count({ where: { apiKeyId, createdAt: { gte: since24h } } }),
+          db.aPIUsage.count({ where: { apiKeyId, createdAt: { gte: since7d } } }),
+          db.aPIUsage.groupBy({ by: ["kind"], where: { apiKeyId }, _count: { _all: true } }),
+          db.aPIUsage.count({ where: { apiKeyId, status: { gte: 400 } } }),
+          db.aPIUsage.findFirst({
+            where: { apiKeyId },
+            orderBy: { createdAt: "desc" },
+            select: { createdAt: true }
+          })
+        ]);
+
+      const byKind: Record<ApiUsageKind, number> = {
+        CACHED_LOOKUP: 0,
+        FRESH_SCAN: 0,
+        DEEP_SIMULATION: 0,
+        PROVIDER_HEAVY: 0,
+        FAILED_REQUEST: 0,
+        RATE_LIMIT_EVENT: 0
+      };
+      for (const group of byKindGroups) {
+        byKind[group.kind as ApiUsageKind] = group._count._all;
+      }
+
+      return {
+        apiKeyId,
+        totalRequests,
+        requestsLast24h,
+        requestsLast7d,
+        byKind,
+        errorCount,
+        lastRequestAt: lastRequest?.createdAt.toISOString() ?? null
+      };
     },
 
     async recordAuditEvent(input) {
