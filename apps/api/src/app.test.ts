@@ -497,32 +497,7 @@ describe("api foundation", () => {
     });
   });
 
-  it("creates an API key, returning the plaintext key exactly once", async () => {
-    const { repository } = createInMemoryApiKeyRepository();
-    const app = await buildApp({
-      env: loadEnv({ NODE_ENV: "test", LOG_LEVEL: "silent" }),
-      logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
-      scanRepository,
-      scanQueue,
-      apiKeyRepository: repository,
-      getMarketDataProvider
-    });
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/api-keys",
-      payload: { name: "test integration" }
-    });
-    await app.close();
-
-    expect(response.statusCode).toBe(201);
-    const body = response.json<{ key: string; prefix: string; scopes: string[] }>();
-    expect(body.key).toMatch(new RegExp(`^${body.prefix}_[a-f0-9]{48}$`));
-    expect(body.scopes).toEqual(["scan:read"]);
-    expect(response.body).not.toContain("keyHash");
-  });
-
-  it("requires the admin secret for custom API-key scopes or limits", async () => {
+  it("creates an API key for an admin, returning the plaintext key exactly once", async () => {
     const { repository } = createInMemoryApiKeyRepository();
     const app = await buildApp({
       env: loadEnv({
@@ -537,6 +512,41 @@ describe("api foundation", () => {
       getMarketDataProvider
     });
 
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/api-keys",
+      headers: { "x-admin-secret": "admin-secret-for-tests" },
+      payload: { name: "test integration" }
+    });
+    await app.close();
+
+    expect(response.statusCode).toBe(201);
+    const body = response.json<{ key: string; prefix: string; scopes: string[] }>();
+    expect(body.key).toMatch(new RegExp(`^${body.prefix}_[a-f0-9]{48}$`));
+    expect(body.scopes).toEqual(["scan:read"]);
+    expect(response.body).not.toContain("keyHash");
+  });
+
+  it("requires the admin secret to create any API key, including a default scan:read key", async () => {
+    const { repository } = createInMemoryApiKeyRepository();
+    const app = await buildApp({
+      env: loadEnv({
+        NODE_ENV: "test",
+        LOG_LEVEL: "silent",
+        API_ADMIN_SECRET: "admin-secret-for-tests"
+      }),
+      logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
+      scanRepository,
+      scanQueue,
+      apiKeyRepository: repository,
+      getMarketDataProvider
+    });
+
+    const publicDefault = await app.inject({
+      method: "POST",
+      url: "/v1/api-keys",
+      payload: { name: "public default attempt" }
+    });
     const publicWrite = await app.inject({
       method: "POST",
       url: "/v1/api-keys",
@@ -559,6 +569,7 @@ describe("api foundation", () => {
     });
     await app.close();
 
+    expect(publicDefault.statusCode).toBe(403);
     expect(publicWrite.statusCode).toBe(403);
     expect(publicCustomLimit.statusCode).toBe(403);
     expect(adminCreated.statusCode, adminCreated.body).toBe(201);
@@ -566,6 +577,54 @@ describe("api foundation", () => {
       scopes: ["scan:read"],
       rateLimitPerMinute: 5_000
     });
+  });
+
+  it("lets an admin revoke any key by id, and rejects revocation without the admin secret", async () => {
+    const { repository } = createInMemoryApiKeyRepository();
+    const app = await buildApp({
+      env: loadEnv({
+        NODE_ENV: "test",
+        LOG_LEVEL: "silent",
+        API_ADMIN_SECRET: "admin-secret-for-tests"
+      }),
+      logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
+      scanRepository,
+      scanQueue,
+      apiKeyRepository: repository,
+      getMarketDataProvider
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/api-keys",
+      headers: { "x-admin-secret": "admin-secret-for-tests" },
+      payload: { name: "revoke-by-admin test" }
+    });
+    const { id, key } = created.json<{ id: string; key: string }>();
+
+    const unauthorizedRevoke = await app.inject({ method: "DELETE", url: `/v1/api-keys/${id}` });
+    const missingRevoke = await app.inject({
+      method: "DELETE",
+      url: "/v1/api-keys/does-not-exist",
+      headers: { "x-admin-secret": "admin-secret-for-tests" }
+    });
+    const revoke = await app.inject({
+      method: "DELETE",
+      url: `/v1/api-keys/${id}`,
+      headers: { "x-admin-secret": "admin-secret-for-tests" }
+    });
+    const afterRevoke = await app.inject({
+      method: "GET",
+      url: "/v1/risk/4663/0x0000000000000000000000000000000000000003",
+      headers: { authorization: `Bearer ${key}` }
+    });
+    await app.close();
+
+    expect(unauthorizedRevoke.statusCode).toBe(403);
+    expect(missingRevoke.statusCode).toBe(404);
+    expect(revoke.statusCode).toBe(200);
+    expect(revoke.json<{ id: string; revokedAt: string | null }>().revokedAt).not.toBeNull();
+    expect(afterRevoke.statusCode).toBe(401);
   });
 
   it("lists API keys and reports per-key usage to admins only", async () => {
@@ -586,6 +645,7 @@ describe("api foundation", () => {
     const created = await app.inject({
       method: "POST",
       url: "/v1/api-keys",
+      headers: { "x-admin-secret": "admin-secret-for-tests" },
       payload: { name: "usage test key" }
     });
     const { key, id } = created.json<{ key: string; id: string }>();
@@ -638,7 +698,11 @@ describe("api foundation", () => {
   it("returns the presented key's own record via GET /v1/api-keys/me, and 401s with no key", async () => {
     const { repository } = createInMemoryApiKeyRepository();
     const app = await buildApp({
-      env: loadEnv({ NODE_ENV: "test", LOG_LEVEL: "silent" }),
+      env: loadEnv({
+        NODE_ENV: "test",
+        LOG_LEVEL: "silent",
+        API_ADMIN_SECRET: "admin-secret-for-tests"
+      }),
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
       scanQueue,
@@ -649,6 +713,7 @@ describe("api foundation", () => {
     const created = await app.inject({
       method: "POST",
       url: "/v1/api-keys",
+      headers: { "x-admin-secret": "admin-secret-for-tests" },
       payload: { name: "self-lookup test" }
     });
     const { key, id } = created.json<{ key: string; id: string }>();
@@ -674,7 +739,11 @@ describe("api foundation", () => {
   it("authenticates a valid API key and rejects a revoked one", async () => {
     const { repository } = createInMemoryApiKeyRepository();
     const app = await buildApp({
-      env: loadEnv({ NODE_ENV: "test", LOG_LEVEL: "silent" }),
+      env: loadEnv({
+        NODE_ENV: "test",
+        LOG_LEVEL: "silent",
+        API_ADMIN_SECRET: "admin-secret-for-tests"
+      }),
       logger: createLogger({ NODE_ENV: "test", LOG_LEVEL: "silent" }, "api-test"),
       scanRepository,
       scanQueue,
@@ -685,6 +754,7 @@ describe("api foundation", () => {
     const created = await app.inject({
       method: "POST",
       url: "/v1/api-keys",
+      headers: { "x-admin-secret": "admin-secret-for-tests" },
       payload: { name: "revocation test" }
     });
     const { key, id } = created.json<{ key: string; id: string }>();

@@ -274,8 +274,8 @@ const ENDPOINTS: EndpointDoc[] = [
     group: "Risk and auth",
     summary: "Creates an API key and returns the plaintext key exactly once.",
     useWhen:
-      "Public callers can create read keys. Admins can generate partner keys with custom limits using X-Admin-Secret.",
-    auth: "Unauthenticated for default scan:read keys. Custom scopes or limits require X-Admin-Secret.",
+      "Admin-only. Contact us for a partner key rather than minting your own — this endpoint requires X-Admin-Secret.",
+    auth: "Requires X-Admin-Secret.",
     sample: `curl -X POST ${BASE_URL}/v1/api-keys \\
   -H "content-type: application/json" \\
   -H "x-admin-secret: $GENESIS_SENTINEL_ADMIN_SECRET" \\

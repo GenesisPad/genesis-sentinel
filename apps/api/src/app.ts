@@ -1272,18 +1272,18 @@ export async function buildApp({
     }
   );
 
-  // API-key self-service: creation is unauthenticated (anyone can request a key, same as most
-  // public developer APIs) but shares the anonymous rate limiter to bound abuse. The plaintext
-  // key is returned exactly once, in this response, and is never recoverable afterward — only
-  // its hash is stored.
+  // Admin-only key minting. Previously any caller could self-serve a scan:read key with no
+  // authentication at all, which defeats the point of an admin panel for issuing/tracking
+  // partner keys — a partner's own bot was observed minting a fresh key on every run instead of
+  // reusing the one key it was actually given. Every key must now be issued by an admin.
   app.post(
     "/v1/api-keys",
     {
       schema: {
         description:
-          "Create a new API key. The plaintext key is returned exactly once, in this response, and " +
-          "can never be recovered afterward — only its hash is stored. Unauthenticated but rate-limited " +
-          "by IP (shares the anonymous-scan limiter) to bound abuse.",
+          "Admin-only: create a new API key. The plaintext key is returned exactly once, in this " +
+          "response, and can never be recovered afterward — only its hash is stored. Requires " +
+          "X-Admin-Secret.",
         tags: ["api-keys"],
         body: {
           type: "object",
@@ -1294,8 +1294,7 @@ export async function buildApp({
             rateLimitPerMinute: {
               type: "integer",
               minimum: 1,
-              maximum: 100000,
-              description: "Admin-only. Custom per-key read/global limit and scan-write limit."
+              maximum: 100000
             }
           }
         },
@@ -1312,12 +1311,7 @@ export async function buildApp({
             additionalProperties: true
           },
           403: {
-            description: "Custom scopes or limits require the admin secret.",
-            type: "object",
-            additionalProperties: true
-          },
-          429: {
-            description: "Too many key-creation requests from this address.",
+            description: "Missing or invalid X-Admin-Secret.",
             type: "object",
             additionalProperties: true
           },
@@ -1337,15 +1331,10 @@ export async function buildApp({
         });
       }
 
-      const rateLimitResult = scanRateLimiter.check(
-        `anon:${request.ip}`,
-        ANONYMOUS_SCAN_RATE_LIMIT_PER_MINUTE
-      );
-      if (!rateLimitResult.allowed) {
-        return reply.code(429).send({
-          error: "rate_limited",
-          message: "Too many API key creation requests from this address.",
-          retryAfterSeconds: rateLimitResult.retryAfterSeconds
+      if (!isAdminRequest(request)) {
+        return reply.code(403).send({
+          error: "admin_required",
+          message: "Creating API keys requires X-Admin-Secret."
         });
       }
 
@@ -1359,17 +1348,6 @@ export async function buildApp({
 
       const requestedScopes = parsed.data.scopes ?? ["scan:read"];
       const requestedCustomLimit = parsed.data.rateLimitPerMinute;
-      const admin = isAdminRequest(request);
-      const requiresAdmin =
-        requestedScopes.some((scope) => scope !== "scan:read") ||
-        requestedCustomLimit !== undefined;
-      if (requiresAdmin && !admin) {
-        return reply.code(403).send({
-          error: "admin_required",
-          message:
-            "Custom API-key scopes or rate limits require X-Admin-Secret. Public key creation only issues scan:read keys at the default limit."
-        });
-      }
 
       const generated = generateApiKey();
       const created = await apiKeys.createApiKey({
@@ -1387,13 +1365,81 @@ export async function buildApp({
             name: created.name,
             prefix: created.prefix,
             scopes: created.scopes,
-            rateLimitPerMinute: created.rateLimitPerMinute,
-            createdBy: admin ? "admin" : "public"
+            rateLimitPerMinute: created.rateLimitPerMinute
           }
         })
         .catch(() => undefined);
 
       return reply.code(201).send({ ...created, key: generated.plaintext });
+    }
+  );
+
+  // Admin-only revocation by id — the self-service DELETE /v1/api-keys/me below requires
+  // presenting the key itself, which doesn't help an admin revoke a key they didn't keep (e.g. a
+  // partner's key, or cleaning up junk keys a misbehaving client minted before creation was
+  // locked down).
+  app.delete(
+    "/v1/api-keys/:id",
+    {
+      schema: {
+        description: "Admin-only: revoke any API key by id. Requires X-Admin-Secret.",
+        tags: ["api-keys"],
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string" } }
+        },
+        response: {
+          200: {
+            description: "The revoked key's record, with revokedAt set.",
+            type: "object",
+            additionalProperties: true
+          },
+          403: {
+            description: "Missing or invalid X-Admin-Secret.",
+            type: "object",
+            additionalProperties: true
+          },
+          404: {
+            description: "No API key exists with that id.",
+            type: "object",
+            additionalProperties: true
+          },
+          503: {
+            description: "API key management is not configured on this instance.",
+            type: "object",
+            additionalProperties: true
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      if (!apiKeys) {
+        return reply.code(503).send({
+          error: "api_keys_not_configured",
+          message: "API key management is not available on this instance."
+        });
+      }
+      if (!isAdminRequest(request)) {
+        return reply.code(403).send({
+          error: "admin_required",
+          message: "Revoking API keys requires X-Admin-Secret."
+        });
+      }
+
+      const { id } = request.params as { id: string };
+      const revoked = await apiKeys.revokeApiKey(id);
+      if (!revoked) {
+        return reply.code(404).send({
+          error: "api_key_not_found",
+          message: "No API key exists with that id."
+        });
+      }
+      await apiKeys
+        .recordAuditEvent({ type: "api_key.revoked", subject: id, metadata: { revokedBy: "admin" } })
+        .catch(() => undefined);
+
+      return revoked;
     }
   );
 

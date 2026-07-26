@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   BarChart3,
   Check,
@@ -11,11 +11,55 @@ import {
   ListRestart,
   Loader2,
   ShieldCheck,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Trash2,
+  X
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+
+const SESSION_STORAGE_KEY = "genesis-sentinel-admin-session";
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+interface StoredAdminSession {
+  apiBaseUrl: string;
+  adminSecret: string;
+  savedAt: number;
+}
+
+function loadStoredAdminSession(): StoredAdminSession | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredAdminSession>;
+    if (
+      typeof parsed.adminSecret !== "string" ||
+      typeof parsed.apiBaseUrl !== "string" ||
+      typeof parsed.savedAt !== "number"
+    ) {
+      return null;
+    }
+    if (Date.now() - parsed.savedAt > SESSION_TTL_MS) {
+      window.localStorage.removeItem(SESSION_STORAGE_KEY);
+      return null;
+    }
+    return parsed as StoredAdminSession;
+  } catch {
+    return null;
+  }
+}
+
+function saveAdminSession(session: StoredAdminSession) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+}
+
+function clearStoredAdminSession() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(SESSION_STORAGE_KEY);
+}
 
 type Scope = "scan:read" | "scan:write";
 
@@ -88,6 +132,7 @@ function joinEndpoint(base: string, path: string) {
 export function AdminApiKeys() {
   const [apiBaseUrl, setApiBaseUrl] = useState(DEFAULT_ENDPOINT);
   const [adminSecret, setAdminSecret] = useState("");
+  const [sessionRestored, setSessionRestored] = useState(false);
   const [showSecret, setShowSecret] = useState(false);
   const [name, setName] = useState(PRESETS[0].name);
   const [rateLimitPerMinute, setRateLimitPerMinute] = useState(String(PRESETS[0].limit));
@@ -104,6 +149,34 @@ export function AdminApiKeys() {
   const [usageByKeyId, setUsageByKeyId] = useState<
     Record<string, { status: "loading" | "error" | "loaded"; summary?: ApiKeyUsageSummary; message?: string }>
   >({});
+  const [revokeConfirmId, setRevokeConfirmId] = useState<string | null>(null);
+  const [revokingId, setRevokingId] = useState<string | null>(null);
+
+  // Remembers the API base URL + admin secret in this browser for 30 days, so the admin doesn't
+  // have to re-enter the secret every visit. Never sent anywhere but the API itself; "Forget"
+  // below clears it immediately.
+  useEffect(() => {
+    const stored = loadStoredAdminSession();
+    if (stored) {
+      setApiBaseUrl(stored.apiBaseUrl);
+      setAdminSecret(stored.adminSecret);
+    }
+    setSessionRestored(true);
+  }, []);
+
+  useEffect(() => {
+    if (!sessionRestored) return;
+    if (adminSecret.trim().length === 0) {
+      clearStoredAdminSession();
+      return;
+    }
+    saveAdminSession({ apiBaseUrl, adminSecret, savedAt: Date.now() });
+  }, [sessionRestored, apiBaseUrl, adminSecret]);
+
+  function forgetSession() {
+    clearStoredAdminSession();
+    setAdminSecret("");
+  }
 
   const canLoadKeys = useMemo(
     () => apiBaseUrl.trim().length > 0 && adminSecret.trim().length > 0,
@@ -169,6 +242,41 @@ export function AdminApiKeys() {
           message: error instanceof Error ? error.message : "Could not load usage."
         }
       }));
+    }
+  }
+
+  async function revokeKey(keyId: string) {
+    if (revokeConfirmId !== keyId) {
+      setRevokeConfirmId(keyId);
+      return;
+    }
+    setRevokeConfirmId(null);
+    setRevokingId(keyId);
+    try {
+      const response = await fetch(joinEndpoint(apiBaseUrl.trim(), `/api-keys/${keyId}`), {
+        method: "DELETE",
+        headers: { "x-admin-secret": adminSecret }
+      });
+      const body = (await response.json().catch(() => ({}))) as Partial<ApiKeyRecord> & {
+        message?: string;
+      };
+      if (!response.ok) {
+        throw new Error(body.message ?? `Request failed with status ${response.status}`);
+      }
+      setKeys((current) =>
+        current
+          ? current.map((item) =>
+              item.id === keyId
+                ? { ...item, enabled: false, revokedAt: body.revokedAt ?? new Date().toISOString() }
+                : item
+            )
+          : current
+      );
+    } catch (error) {
+      setListStatus("error");
+      setListMessage(error instanceof Error ? error.message : "Could not revoke the key.");
+    } finally {
+      setRevokingId(null);
     }
   }
 
@@ -324,7 +432,10 @@ export function AdminApiKeys() {
             </label>
 
             <label className="grid gap-2">
-              <span className="text-sm font-bold text-secondary">Admin secret</span>
+              <span className="flex items-center justify-between text-sm font-bold text-secondary">
+                Admin secret
+                <span className="text-xs font-normal text-muted">Remembered on this device for 30 days</span>
+              </span>
               <span className="flex items-center gap-2 rounded-lg border border-border-strong bg-surface-deep px-3 py-2">
                 <Input
                   value={adminSecret}
@@ -346,6 +457,18 @@ export function AdminApiKeys() {
                     <Eye className="size-4" aria-hidden="true" />
                   )}
                 </Button>
+                {adminSecret ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={forgetSession}
+                    aria-label="Forget saved admin secret"
+                    title="Forget saved admin secret"
+                  >
+                    <X className="size-4" aria-hidden="true" />
+                  </Button>
+                ) : null}
               </span>
             </label>
 
@@ -536,16 +659,51 @@ export function AdminApiKeys() {
                         Created {formatDate(item.createdAt)} · Last used {formatDate(item.lastUsedAt)}
                       </p>
                     </div>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="secondary"
-                      onClick={() => {
-                        void toggleUsage(item.id);
-                      }}
-                    >
-                      {expanded ? "Hide usage" : "View usage"}
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          void toggleUsage(item.id);
+                        }}
+                      >
+                        {expanded ? "Hide usage" : "View usage"}
+                      </Button>
+                      {!item.revokedAt ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={revokeConfirmId === item.id ? "primary" : "ghost"}
+                          className={
+                            revokeConfirmId === item.id
+                              ? "border-danger bg-danger text-white hover:bg-danger/90"
+                              : "text-danger hover:bg-danger/10"
+                          }
+                          disabled={revokingId === item.id}
+                          onClick={() => {
+                            void revokeKey(item.id);
+                          }}
+                        >
+                          {revokingId === item.id ? (
+                            <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                          ) : (
+                            <Trash2 className="size-4" aria-hidden="true" />
+                          )}
+                          {revokeConfirmId === item.id ? "Confirm revoke?" : "Revoke"}
+                        </Button>
+                      ) : null}
+                      {revokeConfirmId === item.id ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setRevokeConfirmId(null)}
+                        >
+                          Cancel
+                        </Button>
+                      ) : null}
+                    </div>
                   </div>
 
                   {expanded ? (
