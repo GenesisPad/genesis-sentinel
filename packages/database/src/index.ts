@@ -1520,7 +1520,7 @@ export function createApiKeyRepository(db: PrismaDatabase): ApiKeyRepository {
         RATE_LIMIT_EVENT: 0
       };
       for (const group of byKindGroups) {
-        byKind[group.kind as ApiUsageKind] = group._count._all;
+        byKind[group.kind] = group._count._all;
       }
 
       return {

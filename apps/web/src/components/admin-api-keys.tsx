@@ -151,7 +151,9 @@ export function AdminApiKeys() {
       const response = await fetch(joinEndpoint(apiBaseUrl.trim(), `/api-keys/${keyId}/usage`), {
         headers: { "x-admin-secret": adminSecret }
       });
-      const body = await response.json().catch(() => ({}));
+      const body = (await response.json().catch(() => ({}))) as Partial<ApiKeyUsageSummary> & {
+        message?: string;
+      };
       if (!response.ok) {
         throw new Error(body.message ?? `Request failed with status ${response.status}`);
       }
