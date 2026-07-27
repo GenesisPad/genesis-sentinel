@@ -5,7 +5,9 @@ import type { ScanRepository } from "@genesis-sentinel/database";
 import type { ScanJobData } from "@genesis-sentinel/queue";
 import {
   getProviderSet,
+  robinhoodChainId,
   robinhoodUniswapV2RouterAddress,
+  robinhoodUniswapV4PoolManagerAddress,
   robinhoodWrappedNativeAddress,
   type DiscoveredPool,
   type HolderSnapshotResult as DiscoveredHolderSnapshot,
@@ -402,7 +404,8 @@ async function createRobinhoodRouteTradeSimulations(input: {
     input.pools.filter(
       (candidate) =>
         candidate.liquidityData.protocol === "UNISWAP_V2" ||
-        candidate.liquidityData.protocol === "UNISWAP_V3"
+        candidate.liquidityData.protocol === "UNISWAP_V3" ||
+        candidate.liquidityData.protocol === "UNISWAP_V4"
     )
   );
   if (!pool) {
@@ -414,57 +417,96 @@ async function createRobinhoodRouteTradeSimulations(input: {
   }
 
   const isV3 = pool.liquidityData.protocol === "UNISWAP_V3";
-  const reserveToken = isV3
-    ? bigintFromRecord(pool.liquidityData, "tokenBalanceRaw")
-    : bigintFromRecord(pool.liquidityData, "reserveTokenRaw");
-  const reserveQuote = isV3
-    ? bigintFromRecord(pool.liquidityData, "quoteBalanceRaw")
-    : bigintFromRecord(pool.liquidityData, "reserveQuoteRaw");
-  if (!reserveToken || !reserveQuote || reserveToken <= 0n || reserveQuote <= 0n) {
+  const isV4 = pool.liquidityData.protocol === "UNISWAP_V4";
+  // V4 has no per-pool reserves at all (the PoolManager singleton custodies every pool's
+  // tokens) — gate on the pool's own active liquidity instead of a reserve balance.
+  const v4Liquidity = isV4 ? (bigintFromRecord(pool.liquidityData, "liquidityRaw") ?? 0n) : null;
+  if (isV4 && (!v4Liquidity || v4Liquidity <= 0n)) {
     return createUnsupportedTradeSimulations({
       chainId: input.chainId,
       tokenAddress: input.tokenAddress,
       blockNumber: input.blockNumber
     });
   }
+  const reserveToken = isV4
+    ? 0n
+    : isV3
+      ? bigintFromRecord(pool.liquidityData, "tokenBalanceRaw")
+      : bigintFromRecord(pool.liquidityData, "reserveTokenRaw");
+  const reserveQuote = isV4
+    ? 0n
+    : isV3
+      ? bigintFromRecord(pool.liquidityData, "quoteBalanceRaw")
+      : bigintFromRecord(pool.liquidityData, "reserveQuoteRaw");
+  if (!isV4 && (!reserveToken || !reserveQuote || reserveToken <= 0n || reserveQuote <= 0n)) {
+    return createUnsupportedTradeSimulations({
+      chainId: input.chainId,
+      tokenAddress: input.tokenAddress,
+      blockNumber: input.blockNumber
+    });
+  }
+  // Definite from here on: the isV4 branch always assigns 0n, and the non-V4 branch already
+  // returned above if either value was missing/non-positive.
+  const finalReserveToken: bigint = reserveToken ?? 0n;
+  const finalReserveQuote: bigint = reserveQuote ?? 0n;
 
-  const buyQuoteAmount = reserveQuote / 1_000n > 0n ? reserveQuote / 1_000n : 1n;
-  const sellTokenAmount = reserveToken / 1_000n > 0n ? reserveToken / 1_000n : 1n;
+  // V4 has no reserves to derive a probe amount from; use a fixed nominal amount instead
+  // (matched to the fork simulator's own config.nativeAmountWei scale for the actual trade —
+  // this route-quote-tier amount only feeds the lighter, non-forked baseline estimate below).
+  const nominalV4QuoteAmount = 100_000_000_000_000_000n; // 0.1 WETH-scale unit
+  const nominalV4TokenAmount = 1_000_000_000_000_000_000n; // 1 whole token, 18-decimals-scale
+  const buyQuoteAmount = isV4
+    ? nominalV4QuoteAmount
+    : finalReserveQuote / 1_000n > 0n
+      ? finalReserveQuote / 1_000n
+      : 1n;
+  const sellTokenAmount = isV4
+    ? nominalV4TokenAmount
+    : finalReserveToken / 1_000n > 0n
+      ? finalReserveToken / 1_000n
+      : 1n;
 
-  // V3 has no constant-product reserves; approximate expected output from the pool's current
-  // spot price (sqrtPriceX96) instead. This ignores price impact/concentrated-liquidity depth,
-  // same spirit as the V2 constant-product estimate — both are baselines for tax-percentage
-  // comparison against the fork simulation's real measured output, not a precise quote.
-  const feeTier = numberFromRecord(pool.liquidityData, "feeTier") ?? undefined;
+  // V3/V4 have no constant-product reserves; approximate expected output from the pool's
+  // current spot price (sqrtPriceX96) instead — both use the exact same concentrated-liquidity
+  // price representation. This ignores price impact/tick depth, same spirit as the V2
+  // constant-product estimate — both are baselines for tax-percentage comparison against the
+  // fork simulation's real measured output, not a precise quote.
+  // V4 stores its fee tier under "fee", not "feeTier" — see robinhood-liquidity.ts's V4 pool
+  // discovery.
+  const feeTier =
+    (isV4 ? numberFromRecord(pool.liquidityData, "fee") : numberFromRecord(pool.liquidityData, "feeTier")) ??
+    undefined;
+  const v4Currency0 = isV4 ? addressValue(pool.liquidityData.currency0) : null;
   let buyOutput: bigint;
   let sellOutput: bigint;
-  if (isV3) {
+  if (isV3 || isV4) {
     const sqrtPriceX96 = bigintFromRecord(pool.liquidityData, "sqrtPriceX96Raw") ?? 0n;
-    const token0 = addressValue(pool.liquidityData.token0);
+    const token0 = isV4 ? v4Currency0 : addressValue(pool.liquidityData.token0);
     const tokenIsToken0 = token0 !== null && token0 === input.tokenAddress.toLowerCase();
     buyOutput = getV3SpotAmountOut(buyQuoteAmount, sqrtPriceX96, !tokenIsToken0);
     sellOutput = getV3SpotAmountOut(sellTokenAmount, sqrtPriceX96, tokenIsToken0);
   } else {
-    buyOutput = getAmountOut(buyQuoteAmount, reserveQuote, reserveToken);
-    sellOutput = getAmountOut(sellTokenAmount, reserveToken, reserveQuote);
+    buyOutput = getAmountOut(buyQuoteAmount, finalReserveQuote, finalReserveToken);
+    sellOutput = getAmountOut(sellTokenAmount, finalReserveToken, finalReserveQuote);
   }
-  const buyStaticCall = isV3
-    ? {
-        status: "SKIPPED" as const,
-        reason:
-          "Static eth_call pre-check is only implemented for the Uniswap V2 router; V3 relies on the fork simulation result when enabled."
-      }
-    : pool.quoteTokenAddress.toLowerCase() === robinhoodWrappedNativeAddress.toLowerCase()
-      ? await staticCallRouterNativeBuy(input.adapter, {
-          tokenAddress: input.tokenAddress,
-          blockNumber: input.blockNumber,
-          amountInRaw: buyQuoteAmount,
-          expectedTokenOutRaw: buyOutput
-        })
-      : {
+  const buyStaticCall =
+    isV3 || isV4
+      ? {
           status: "SKIPPED" as const,
-          reason: "Router static buy is only configured for native/WETH quote pools."
-        };
+          reason:
+            "Static eth_call pre-check is only implemented for the Uniswap V2 router; V3/V4 rely on the fork simulation result when enabled."
+        }
+      : pool.quoteTokenAddress.toLowerCase() === robinhoodWrappedNativeAddress.toLowerCase()
+        ? await staticCallRouterNativeBuy(input.adapter, {
+            tokenAddress: input.tokenAddress,
+            blockNumber: input.blockNumber,
+            amountInRaw: buyQuoteAmount,
+            expectedTokenOutRaw: buyOutput
+          })
+        : {
+            status: "SKIPPED" as const,
+            reason: "Router static buy is only configured for native/WETH quote pools."
+          };
   const sellTransferCall = await staticCallSellLegTransfer(input.adapter, {
     tokenAddress: input.tokenAddress,
     pairAddress: pool.poolAddress,
@@ -477,6 +519,12 @@ async function createRobinhoodRouteTradeSimulations(input: {
   // with nothing anywhere saying the simulator had failed rather than been skipped.
   let forkStatus: "EXECUTED" | "NOT_CONFIGURED" | "UNSUPPORTED_POOL" | "FAILED" = "NOT_CONFIGURED";
   let forkFailureReason: string | null = null;
+  const v4PoolManagerAddress = isV4 ? addressValue(pool.liquidityData.poolManagerAddress) : null;
+  const v4StateViewAddress = isV4 ? addressValue(pool.liquidityData.stateViewAddress) : null;
+  const v4PoolId = isV4 ? (pool.liquidityData.poolId as `0x${string}` | undefined) : undefined;
+  const v4Currency1 = isV4 ? addressValue(pool.liquidityData.currency1) : null;
+  const v4TickSpacing = isV4 ? numberFromRecord(pool.liquidityData, "tickSpacing") : null;
+  const v4Hooks = isV4 ? addressValue(pool.liquidityData.hooks) : null;
   const forkResult = input.forkTradeSimulator
     ? await input
         .forkTradeSimulator({
@@ -488,10 +536,17 @@ async function createRobinhoodRouteTradeSimulations(input: {
           ...(feeTier !== undefined ? { feeTier } : {}),
           quoteTokenAddress: pool.quoteTokenAddress,
           quoteSymbol: pool.quoteSymbol,
-          reserveTokenRaw: reserveToken,
-          reserveQuoteRaw: reserveQuote,
+          reserveTokenRaw: finalReserveToken,
+          reserveQuoteRaw: finalReserveQuote,
           buyQuoteAmountRaw: buyQuoteAmount,
-          expectedBuyTokenOutRaw: buyOutput
+          expectedBuyTokenOutRaw: buyOutput,
+          ...(v4PoolManagerAddress ? { v4PoolManagerAddress } : {}),
+          ...(v4StateViewAddress ? { v4StateViewAddress } : {}),
+          ...(v4PoolId ? { v4PoolId } : {}),
+          ...(v4Currency0 ? { v4Currency0 } : {}),
+          ...(v4Currency1 ? { v4Currency1 } : {}),
+          ...(v4TickSpacing !== null ? { v4TickSpacing } : {}),
+          ...(v4Hooks ? { v4Hooks } : {})
         })
         .catch((error: unknown) => {
           forkFailureReason = errorMessage(error);
@@ -512,7 +567,11 @@ async function createRobinhoodRouteTradeSimulations(input: {
     blockNumber: input.blockNumber,
     simulationTool:
       forkResult?.simulationTool ??
-      (isV3 ? "0.1.0-uniswap-v3-route-quote" : "0.1.0-uniswap-v2-route-quote"),
+      (isV4
+        ? "0.1.0-uniswap-v4-route-quote"
+        : isV3
+          ? "0.1.0-uniswap-v3-route-quote"
+          : "0.1.0-uniswap-v2-route-quote"),
     poolAddress: pool.poolAddress,
     dex: pool.dex,
     quoteTokenAddress: pool.quoteTokenAddress,
@@ -550,8 +609,8 @@ async function createRobinhoodRouteTradeSimulations(input: {
     result: {
       isRouteAvailable: buyOutput > 0n,
       expectedTokenOutRaw: buyOutput.toString(),
-      reserveTokenRaw: reserveToken.toString(),
-      reserveQuoteRaw: reserveQuote.toString(),
+      reserveTokenRaw: finalReserveToken.toString(),
+      reserveQuoteRaw: finalReserveQuote.toString(),
       staticCall: buyStaticCall,
       forkSimulation: forkResult,
       buyTaxBps: forkResult?.buyTaxBps ?? null,
@@ -593,8 +652,8 @@ async function createRobinhoodRouteTradeSimulations(input: {
     result: {
       isRouteAvailable: sellOutput > 0n,
       expectedQuoteOutRaw: sellOutput.toString(),
-      reserveTokenRaw: reserveToken.toString(),
-      reserveQuoteRaw: reserveQuote.toString(),
+      reserveTokenRaw: finalReserveToken.toString(),
+      reserveQuoteRaw: finalReserveQuote.toString(),
       sellLegTransferCall: sellTransferCall,
       forkSimulation: forkResult,
       sellTaxBps: forkResult?.sellTaxBps ?? null,
@@ -1293,10 +1352,11 @@ export interface ForkTradeSimulatorInput {
   tokenAddress: `0x${string}`;
   blockNumber: bigint;
   poolAddress: `0x${string}`;
-  /** "Uniswap V2" or "Uniswap V3" (per DiscoveredPool.dex) — selects which router/swap ABI the
-   * fork simulator uses. */
+  /** "Uniswap V2", "Uniswap V3", or "Uniswap V4" (per DiscoveredPool.dex) — selects which
+   * router/swap mechanism the fork simulator uses. */
   dex: string;
-  /** Uniswap V3 fee tier for the discovered pool. Required when `dex` is "Uniswap V3". */
+  /** Uniswap V3/V4 fee tier for the discovered pool. Required when `dex` is "Uniswap V3" or
+   * "Uniswap V4". */
   feeTier?: number;
   quoteTokenAddress: `0x${string}`;
   quoteSymbol: string;
@@ -1304,6 +1364,17 @@ export interface ForkTradeSimulatorInput {
   reserveQuoteRaw: bigint;
   buyQuoteAmountRaw: bigint;
   expectedBuyTokenOutRaw: bigint;
+  /** Uniswap V4 PoolKey identity fields plus the PoolManager singleton's own address — required
+   * when `dex` is "Uniswap V4". V4 has no per-pool contract to route a swap through; the fork
+   * simulator instead deploys a small helper contract that executes the PoolManager's
+   * unlock/settle/take flow directly (see fork-simulator.ts's V4SwapHelper). */
+  v4PoolManagerAddress?: `0x${string}`;
+  v4StateViewAddress?: `0x${string}`;
+  v4PoolId?: `0x${string}`;
+  v4Currency0?: `0x${string}`;
+  v4Currency1?: `0x${string}`;
+  v4TickSpacing?: number;
+  v4Hooks?: `0x${string}`;
 }
 
 export interface ForkTradeSimulatorResult {
@@ -1569,13 +1640,25 @@ export async function processScanJob(
     // against a real false positive ($GEN): ~1% of supply sent to the name-tagged GenesisLocker
     // contract was being reported as "transferred to another wallet" alongside genuinely
     // unlabeled recipients, when it's the opposite of a risk.
+    //
+    // Uniswap V4's PoolManager singleton is a second, distinct case a per-pool address list
+    // cannot cover: V4 doesn't hold tokens per-pool the way V2/V3 pairs do — EVERY V4 pool on
+    // the chain is custodied by this one shared contract. `pool.poolAddress` for a V4 pool is a
+    // synthetic address derived from its poolId (see poolIdToAddress in robinhood-liquidity.ts),
+    // never the real holder — so excluding only that derived address left the actual PoolManager
+    // address unrecognized as infrastructure. Live-verified false positive: a token whose only
+    // liquidity was a V4 pool had its LP-provisioning balance in the PoolManager reported as
+    // "deployer transferred supply to another wallet."
     const knownInfrastructureAddresses = new Set(
       [
         ...(discoveredPools ?? []).map((pool) => pool.poolAddress.toLowerCase()),
         ...(providers?.locker.lockerAddresses?.map((address) => address.toLowerCase()) ??
           (providers?.locker.lockerAddress
             ? [providers.locker.lockerAddress.toLowerCase()]
-            : []))
+            : [])),
+        ...(target.chainId === robinhoodChainId
+          ? [robinhoodUniswapV4PoolManagerAddress.toLowerCase()]
+          : [])
       ]
     );
     const relatedWalletEdges = await buildRelatedWalletEdges({

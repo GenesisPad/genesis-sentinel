@@ -14,6 +14,7 @@ import type {
   ForkTradeSimulatorInput,
   ForkTradeSimulatorResult
 } from "./scan-worker.js";
+import { v4SwapHelperAbi, v4SwapHelperBytecode } from "./contracts/v4-swap-helper.generated.js";
 
 const forkPrivateKey =
   "0x59c6995e998f97a5a0044966f0945384919a58a7c5b7ac3998c1c39a754e0b82" as const;
@@ -45,7 +46,14 @@ const v3PoolAbi = parseAbi([
   "function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, uint8, bool)",
   "function token0() view returns (address)"
 ]);
+const v4StateViewAbi = parseAbi([
+  "function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)"
+]);
 const uniswapV3PriceQ192 = 2n ** 192n;
+// TickMath.MIN_SQRT_RATIO + 1 / MAX_SQRT_RATIO - 1 — the standard Uniswap V3/V4 sqrtPriceLimitX96
+// bounds for an unlimited-slippage swap in each direction (strictly beyond either bound reverts).
+const v4MinSqrtPriceLimit = 4295128740n;
+const v4MaxSqrtPriceLimit = 1461446703485210103287273052203988822378723970341n;
 
 /** Same spot-price approximation as scan-worker.ts's route-quote tier — used here only to
  * compute an expected-output baseline for tax-percentage comparison against the fork's real
@@ -128,6 +136,10 @@ async function runGanacheForkTradeSimulation(
     const publicClient = createPublicClient({ chain, transport: http(localRpcUrl) });
     const walletClient = createWalletClient({ account, chain, transport: http(localRpcUrl) });
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 3_600);
+
+    if (input.dex === "Uniswap V4") {
+      return await runV4ForkTradeSimulation(publicClient, walletClient, account, input, config);
+    }
 
     const isV3 = input.dex === "Uniswap V3";
     if (isV3 && !input.feeTier) {
@@ -305,6 +317,341 @@ async function runGanacheForkTradeSimulation(
   } finally {
     await server.close().catch(() => undefined);
   }
+}
+
+/**
+ * Uniswap V4 has no per-pool router contract to call — every pool's tokens are custodied by a
+ * single shared `PoolManager`, and a swap requires the caller itself to be a contract
+ * implementing the unlock/settle/take callback flow (see contracts/V4SwapHelper.sol, which
+ * mirrors Uniswap v4-core's real IPoolManager/PoolKey/SwapParams/BalanceDelta types exactly).
+ * This deploys that helper fresh on the fork and drives buy/sell through it, reusing the same
+ * transfer-test and honeypot/tax semantics as the V2/V3 path above. Validated end-to-end against
+ * the real, live Robinhood Chain PoolManager (both a plain pool and a hook-enabled pool) before
+ * being wired in — see git history for the manual validation this was built against.
+ */
+async function runV4ForkTradeSimulation(
+  publicClient: ReturnType<typeof createPublicClient>,
+  walletClient: ReturnType<typeof createWalletClient>,
+  account: ReturnType<typeof privateKeyToAccount>,
+  input: ForkTradeSimulatorInput,
+  config: { rpcUrl: string; nativeAmountWei: bigint }
+): Promise<ForkTradeSimulatorResult> {
+  if (
+    !input.v4PoolManagerAddress ||
+    !input.v4Currency0 ||
+    !input.v4Currency1 ||
+    input.feeTier === undefined ||
+    input.v4TickSpacing === undefined ||
+    !input.v4Hooks
+  ) {
+    return {
+      simulationTool: "0.1.0-ganache-fork",
+      canBuy: false,
+      canSell: false,
+      isHoneypot: true,
+      buyTaxBps: null,
+      sellTaxBps: null,
+      error: "Missing Uniswap V4 pool key fields; cannot execute a fork swap for this pool."
+    };
+  }
+
+  const poolKey = {
+    currency0: input.v4Currency0,
+    currency1: input.v4Currency1,
+    fee: input.feeTier,
+    tickSpacing: input.v4TickSpacing,
+    hooks: input.v4Hooks
+  };
+  // Buying means giving the quote currency and receiving the token; V4's zeroForOne means
+  // "give currency0, receive currency1" — so buying is zeroForOne only when the token being
+  // scanned is currency1 (i.e. the quote is currency0).
+  const tokenIsCurrency1 = input.tokenAddress.toLowerCase() === input.v4Currency1.toLowerCase();
+  const buyZeroForOne = tokenIsCurrency1;
+
+  try {
+    const deployTxHash = await walletClient.deployContract({
+      abi: v4SwapHelperAbi,
+      bytecode: v4SwapHelperBytecode,
+      args: [input.v4PoolManagerAddress],
+      chain: null,
+      account
+    });
+    const deployReceipt = await publicClient.waitForTransactionReceipt({ hash: deployTxHash });
+    if (!deployReceipt.contractAddress) {
+      return {
+        simulationTool: "0.1.0-ganache-fork",
+        canBuy: false,
+        canSell: false,
+        isHoneypot: true,
+        buyTaxBps: null,
+        sellTaxBps: null,
+        error: "V4 swap helper deployment did not return a contract address."
+      };
+    }
+    const helperAddress = deployReceipt.contractAddress;
+
+    const tokenBeforeBuy = await publicClient.readContract({
+      address: input.tokenAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [account.address]
+    });
+
+    await walletClient.writeContract({
+      address: robinhoodWrappedNativeAddress,
+      abi: wethAbi,
+      functionName: "deposit",
+      value: config.nativeAmountWei,
+      gas: 200_000n,
+      chain: null,
+      account
+    });
+    const wethTransferTx = await walletClient.writeContract({
+      address: robinhoodWrappedNativeAddress,
+      abi: erc20Abi,
+      functionName: "transfer",
+      args: [helperAddress, config.nativeAmountWei],
+      gas: 100_000n,
+      chain: null,
+      account
+    });
+    await publicClient.waitForTransactionReceipt({ hash: wethTransferTx });
+
+    const buyTxHash = await walletClient.writeContract({
+      address: helperAddress,
+      abi: v4SwapHelperAbi,
+      functionName: "swap",
+      args: [
+        poolKey,
+        buyZeroForOne,
+        config.nativeAmountWei,
+        buyZeroForOne ? v4MinSqrtPriceLimit : v4MaxSqrtPriceLimit,
+        account.address
+      ],
+      gas: 5_000_000n,
+      chain: null,
+      account
+    });
+    const buyReceipt = await publicClient.waitForTransactionReceipt({ hash: buyTxHash });
+    if (buyReceipt.status === "reverted") {
+      return {
+        simulationTool: "0.1.0-ganache-fork",
+        canBuy: false,
+        canSell: false,
+        isHoneypot: true,
+        buyTaxBps: null,
+        sellTaxBps: null,
+        buyTxHash,
+        buyGasUsed: buyReceipt.gasUsed.toString(),
+        error: "Forked V4 buy transaction reverted."
+      };
+    }
+    const tokenAfterBuy = await publicClient.readContract({
+      address: input.tokenAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [account.address]
+    });
+    const buyReceived = tokenAfterBuy - tokenBeforeBuy;
+    if (buyReceived <= 0n) {
+      return {
+        simulationTool: "0.1.0-ganache-fork",
+        canBuy: false,
+        canSell: false,
+        isHoneypot: true,
+        buyTaxBps: null,
+        sellTaxBps: null,
+        buyTxHash,
+        buyGasUsed: buyReceipt.gasUsed.toString(),
+        buyTokenReceivedRaw: buyReceived.toString(),
+        error: "Forked V4 buy completed but received no tokens."
+      };
+    }
+
+    const expectedForkBuyOut = await expectedV4SpotAmountOut(
+      publicClient,
+      input,
+      config.nativeAmountWei,
+      !buyZeroForOne
+    );
+    const buyTaxBps = calculateTaxBps(expectedForkBuyOut, buyReceived);
+
+    const transferTestAmount = buyReceived / 10n > 0n ? buyReceived / 10n : buyReceived;
+    const transferTest = await runTransferTest(publicClient, walletClient, {
+      tokenAddress: input.tokenAddress,
+      from: account.address,
+      amount: transferTestAmount
+    });
+
+    const remainingAfterTransfer = buyReceived - (transferTest.succeeded ? transferTestAmount : 0n);
+    const partialSellAmount =
+      remainingAfterTransfer / 10n > 0n ? remainingAfterTransfer / 10n : remainingAfterTransfer;
+    const partialSellTest = await runV4SellTest(publicClient, walletClient, account, input, {
+      helperAddress,
+      poolKey,
+      buyZeroForOne,
+      amount: partialSellAmount
+    });
+
+    const remainderForFullSell =
+      remainingAfterTransfer - (partialSellTest.succeeded ? partialSellAmount : 0n);
+    const fullSell = await runV4SellTest(publicClient, walletClient, account, input, {
+      helperAddress,
+      poolKey,
+      buyZeroForOne,
+      amount: remainderForFullSell > 0n ? remainderForFullSell : remainingAfterTransfer
+    });
+    const sellReceived = fullSell.received;
+    // Same reasoning as the V2/V3 path: a sell-leg failure (reverted or zero-output) is not
+    // trustworthy standalone honeypot evidence, so it is reported as unknown (null) rather than
+    // guessed. Only a failed BUY is still reported as a confirmed honeypot.
+    const sellReverted = fullSell.reverted || partialSellTest.reverted;
+
+    return {
+      simulationTool: "0.1.0-ganache-fork",
+      canBuy: true,
+      canSell: sellReceived > 0n,
+      isHoneypot: sellReceived <= 0n ? null : false,
+      buyTaxBps,
+      sellTaxBps: fullSell.taxBps,
+      buyTokenReceivedRaw: buyReceived.toString(),
+      sellQuoteReceivedRaw: sellReceived.toString(),
+      buyTxHash,
+      buyGasUsed: buyReceipt.gasUsed.toString(),
+      partialSellSucceeded: partialSellTest.succeeded,
+      partialSellTaxBps: partialSellTest.taxBps,
+      transferSucceeded: transferTest.succeeded,
+      transferTaxBps: transferTest.taxBps,
+      ...(fullSell.txHash ? { sellTxHash: fullSell.txHash } : {}),
+      ...(fullSell.gasUsed ? { sellGasUsed: fullSell.gasUsed } : {}),
+      ...(transferTest.txHash ? { transferTxHash: transferTest.txHash } : {}),
+      ...(sellReceived <= 0n
+        ? {
+            error: sellReverted
+              ? "Forked V4 sell transaction reverted — inconclusive, not a confirmed honeypot."
+              : "Forked V4 sell completed without reverting but returned no quote token — inconclusive, not a confirmed honeypot."
+          }
+        : {})
+    };
+  } catch (error) {
+    return {
+      simulationTool: "0.1.0-ganache-fork",
+      canBuy: false,
+      canSell: false,
+      isHoneypot: true,
+      buyTaxBps: null,
+      sellTaxBps: null,
+      error: error instanceof Error ? error.message : "Forked V4 trade simulation failed."
+    };
+  }
+}
+
+/** V4 counterpart to runSellTest — sells `amount` of the token through the deployed
+ * V4SwapHelper instead of a router. */
+async function runV4SellTest(
+  publicClient: ReturnType<typeof createPublicClient>,
+  walletClient: ReturnType<typeof createWalletClient>,
+  account: ReturnType<typeof privateKeyToAccount>,
+  input: ForkTradeSimulatorInput,
+  params: {
+    helperAddress: `0x${string}`;
+    poolKey: { currency0: `0x${string}`; currency1: `0x${string}`; fee: number; tickSpacing: number; hooks: `0x${string}` };
+    buyZeroForOne: boolean;
+    amount: bigint;
+  }
+): Promise<SellTestResult> {
+  if (params.amount <= 0n) {
+    return { succeeded: false, taxBps: null, received: 0n, reverted: false };
+  }
+
+  const sellZeroForOne = !params.buyZeroForOne;
+
+  try {
+    const transferTxHash = await walletClient.writeContract({
+      address: input.tokenAddress,
+      abi: erc20Abi,
+      functionName: "transfer",
+      args: [params.helperAddress, params.amount],
+      gas: 200_000n,
+      account: account.address,
+      chain: null
+    });
+    await publicClient.waitForTransactionReceipt({ hash: transferTxHash });
+
+    const expectedOut = await expectedV4SpotAmountOut(publicClient, input, params.amount, sellZeroForOne);
+    const quoteBefore = await publicClient.readContract({
+      address: robinhoodWrappedNativeAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [account.address]
+    });
+
+    const txHash = await walletClient.writeContract({
+      address: params.helperAddress,
+      abi: v4SwapHelperAbi,
+      functionName: "swap",
+      args: [
+        params.poolKey,
+        sellZeroForOne,
+        params.amount,
+        sellZeroForOne ? v4MinSqrtPriceLimit : v4MaxSqrtPriceLimit,
+        account.address
+      ],
+      gas: 5_000_000n,
+      account: account.address,
+      chain: null
+    });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+    if (receipt.status === "reverted") {
+      return { succeeded: false, taxBps: null, received: 0n, reverted: true, txHash, gasUsed: receipt.gasUsed.toString() };
+    }
+
+    const quoteAfter = await publicClient.readContract({
+      address: robinhoodWrappedNativeAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [account.address]
+    });
+    const received = quoteAfter - quoteBefore;
+
+    return {
+      succeeded: received > 0n,
+      taxBps: calculateTaxBps(expectedOut, received),
+      received,
+      reverted: false,
+      txHash,
+      gasUsed: receipt.gasUsed.toString()
+    };
+  } catch {
+    return { succeeded: false, taxBps: null, received: 0n, reverted: true };
+  }
+}
+
+/** Reads the V4 pool's live sqrtPriceX96 via StateView and applies the same spot-price
+ * approximation used for V3 — both share the identical concentrated-liquidity price
+ * representation, so getV3SpotAmountOut applies unchanged. `zeroForOneDirection` describes the
+ * swap direction to price (true = currency0 in, currency1 out). */
+async function expectedV4SpotAmountOut(
+  publicClient: ReturnType<typeof createPublicClient>,
+  input: ForkTradeSimulatorInput,
+  amountIn: bigint,
+  zeroForOneDirection: boolean
+): Promise<bigint> {
+  if (!input.v4StateViewAddress || !input.v4PoolId) {
+    return 0n;
+  }
+  const slot0 = await publicClient
+    .readContract({
+      address: input.v4StateViewAddress,
+      abi: v4StateViewAbi,
+      functionName: "getSlot0",
+      args: [input.v4PoolId]
+    })
+    .catch(() => null);
+  if (!slot0) {
+    return 0n;
+  }
+  return getV3SpotAmountOut(amountIn, slot0[0], zeroForOneDirection);
 }
 
 interface TransferTestResult {

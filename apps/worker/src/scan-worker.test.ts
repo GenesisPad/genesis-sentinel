@@ -595,6 +595,111 @@ describe("scan worker orchestration", () => {
     expect(calls).toContain("detector:deployer-history:0");
   });
 
+  it("does not report supply seeded into the Uniswap V4 PoolManager as a wallet transfer", async () => {
+    // Reproduces a real, live scan bug ($MAGAVERSE): V4 doesn't hold tokens per-pool the way
+    // V2/V3 pairs do — every V4 pool on the chain is custodied by this one shared PoolManager
+    // singleton. The per-pool address exclusion (the previous test above) only ever covers a
+    // synthetic, poolId-derived address for V4 pools, never the real PoolManager address that
+    // actually holds the tokens — so normal LP provisioning into a V4 pool was reported as
+    // "deployer transferred supply to another wallet."
+    const { repository, calls } = createRepository();
+    const tokenAddress = "0x0000000000000000000000000000000000000001";
+    const deployerAddress = "0x0000000000000000000000000000000000000dd1";
+    const v4PoolManagerAddress = "0x8366a39cc670b4001a1121b8f6a443a643e40951";
+    const totalSupplyRaw = 1_000_000_000_000_000_000_000n;
+
+    function addressToTopic(address: string): `0x${string}` {
+      return `0x${address.toLowerCase().slice(2).padStart(64, "0")}`;
+    }
+    const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = fetchUrl(input);
+      const body = url.includes(`/addresses/${deployerAddress}/transactions`)
+        ? { items: [] }
+        : url.includes(`/addresses/${tokenAddress}`)
+          ? { creator_address_hash: deployerAddress, is_verified: true }
+          : url.includes("/holders")
+            ? {
+                items: [
+                  {
+                    address: { hash: v4PoolManagerAddress, is_contract: true },
+                    value: totalSupplyRaw.toString()
+                  }
+                ]
+              }
+            : url.includes(`/tokens/${tokenAddress}`)
+              ? {
+                  name: "Token",
+                  symbol: "TOK",
+                  decimals: "18",
+                  total_supply: totalSupplyRaw.toString(),
+                  holders_count: "1"
+                }
+              : url.includes("/tokens/")
+                ? { exchange_rate: "1" }
+                : { items: [] };
+
+      return Promise.resolve(
+        new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } })
+      );
+    });
+
+    await processScanJob(
+      {
+        data: { scanId: "scan-v4-pool-seed", chainId: 4663, address: tokenAddress }
+      },
+      {
+        scans: repository,
+        getChainAdapter() {
+          return createAdapter("0x6000", {
+            name: "Robinhood Chain",
+            onReadContract(parameters) {
+              if (parameters.functionName === "getPair") {
+                return "0x0000000000000000000000000000000000000000";
+              }
+              if (parameters.functionName === "getPool") {
+                return "0x0000000000000000000000000000000000000000";
+              }
+              return undefined;
+            },
+            onGetLogs(parameters) {
+              // No V4 pool Initialize event exists for this test — the fix must not depend on a
+              // V4 pool actually being discovered, only on the PoolManager's real address being
+              // known infrastructure. Only answer the deployer's outgoing Transfer-log scan.
+              if (
+                parameters.topics?.[0] === transferTopic &&
+                parameters.topics?.[1] === addressToTopic(deployerAddress)
+              ) {
+                return [
+                  {
+                    address: tokenAddress,
+                    topics: [
+                      transferTopic,
+                      addressToTopic(deployerAddress),
+                      addressToTopic(v4PoolManagerAddress)
+                    ],
+                    data: `0x${totalSupplyRaw.toString(16)}`,
+                    blockNumber: 100n
+                  }
+                ];
+              }
+              return [];
+            },
+            onTraceCall() {
+              return "0x";
+            }
+          });
+        },
+        now: () => new Date("2026-07-11T00:00:00.000Z")
+      }
+    );
+
+    // Zero deployer-history findings confirms the transfer to the real PoolManager address was
+    // filtered out as known infrastructure, not reported as a suspicious wallet relationship.
+    expect(calls).toContain("detector:deployer-history:0");
+  });
+
   it("runs Uniswap V3 route-quote trade simulation from the pool's spot price", async () => {
     const { repository, calls } = createRepository();
     const tokenAddress = "0x0000000000000000000000000000000000000001";
@@ -675,7 +780,7 @@ describe("scan worker orchestration", () => {
     expect(calls).toContain("stage:SIMULATING_TRADES:SUCCEEDED");
   });
 
-  it("records Robinhood Uniswap V4 PoolManager pools from initialization logs", async () => {
+  it("runs Uniswap V4 route-quote trade simulation from the pool's spot price", async () => {
     const { repository, calls } = createRepository();
     const tokenAddress = "0x0000000000000000000000000000000000000001";
     const wethAddress = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
@@ -786,9 +891,12 @@ describe("scan worker orchestration", () => {
     );
 
     expect(calls).toContain("liquidity:0x1234567890abcdef1234567890abcdef12345678");
-    expect(calls).toContain("simulation:BUY:UNSUPPORTED");
-    expect(calls).toContain("simulation:SELL:UNSUPPORTED");
-    expect(calls).toContain("stage:SIMULATING_TRADES:SKIPPED");
+    // No forkTradeSimulator is wired in this test, so this exercises the lighter route-quote
+    // tier: liquidityRaw > 0 gates the pool in, and the spot price (sqrtPriceX96 = 2^96, i.e.
+    // price = 1) produces a positive expected output for both legs.
+    expect(calls).toContain("simulation:BUY:PASSED");
+    expect(calls).toContain("simulation:SELL:PASSED");
+    expect(calls).toContain("stage:SIMULATING_TRADES:SUCCEEDED");
   });
 
   it("marks sell failed when holder transfer to pair reverts in static call", async () => {
