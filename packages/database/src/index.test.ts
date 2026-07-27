@@ -1,9 +1,51 @@
-import { describe, expect, it } from "vitest";
-import { checkPostgres, toScanProgress, toScanResultView } from "./index.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  checkPostgres,
+  createTelegramActivityLeaderboardRepository,
+  toScanProgress,
+  toScanResultView,
+  type PrismaDatabase
+} from "./index.js";
 
 describe("database readiness", () => {
   it("exposes a postgres dependency check", () => {
     expect(typeof checkPostgres).toBe("function");
+  });
+
+  it("normalizes leaderboard rows and requests stable top-ten user ordering", async () => {
+    const queryRaw = vi.fn().mockResolvedValue([
+      { id: 10n, label: "alice", count: 12 },
+      { id: 20n, label: null, count: 12n }
+    ]);
+    const repository = createTelegramActivityLeaderboardRepository({
+      $queryRaw: queryRaw
+    } as unknown as PrismaDatabase);
+
+    await expect(
+      repository.getLeaderboard("users", new Date("2026-07-20T00:00:00.000Z"))
+    ).resolves.toEqual([
+      { id: "10", label: "alice", count: 12 },
+      { id: "20", label: null, count: 12 }
+    ]);
+
+    const query = queryRaw.mock.calls[0]?.[0] as { sql: string };
+    expect(query.sql).toContain('activity."telegramUserId" IS NOT NULL');
+    expect(query.sql).toContain('activity."createdAt" >=');
+    expect(query.sql).toContain('ORDER BY count DESC, activity."telegramUserId" ASC');
+    expect(query.sql).toContain("LIMIT 10");
+  });
+
+  it("filters group leaderboards to originating group chats before limiting", async () => {
+    const queryRaw = vi.fn().mockResolvedValue([]);
+    const repository = createTelegramActivityLeaderboardRepository({
+      $queryRaw: queryRaw
+    } as unknown as PrismaDatabase);
+    await repository.getLeaderboard("groups");
+
+    const query = queryRaw.mock.calls[0]?.[0] as { sql: string };
+    expect(query.sql).toContain("INNER JOIN");
+    expect(query.sql).toContain("chats.type IN ('group', 'supergroup')");
+    expect(query.sql).toContain('ORDER BY count DESC, activity."telegramChatId" ASC');
   });
 
   it("maps scans without adding risk output", () => {

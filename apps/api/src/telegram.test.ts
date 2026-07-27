@@ -7,6 +7,7 @@ import {
   createTelegramScanLimiter,
   createTelegramSectionKeyboard,
   createTelegramTrackedListKeyboard,
+  formatTelegramActivityLeaderboard,
   formatScanStageMessage,
   formatTelegramProgressReply,
   formatTelegramRateLimitReply,
@@ -21,6 +22,8 @@ import {
   parseScanAddress,
   resolveChartUrl,
   shouldAutoScanTelegramAddress,
+  telegramActivityAction,
+  telegramLeaderboardRangeStart,
   telegramLinkPreviewOptions,
   telegramFullReportUrl,
   TELEGRAM_BOT_COMMANDS,
@@ -44,6 +47,7 @@ describe("telegram scan helpers", () => {
         "track",
         "stats",
         "users",
+        "leaderboard",
         "charts",
         "activitychart",
         "scanschart"
@@ -86,6 +90,50 @@ describe("telegram scan helpers", () => {
     expect(isTelegramAdmin(542602805, admins)).toBe(true);
     expect(isTelegramAdmin(8747821953, admins)).toBe(false);
     expect(isTelegramAdmin(undefined, admins)).toBe(false);
+  });
+
+  it("classifies only command, button, and text-message activity", () => {
+    expect(
+      telegramActivityAction({ message: { text: "/SCAN@SentinelBot 0x123" } } as never)
+    ).toBe("command:scan");
+    expect(telegramActivityAction({ callbackQuery: { data: "trackedpage:2" } } as never)).toBe(
+      "button:trackedpage:2"
+    );
+    expect(telegramActivityAction({ message: { text: "hello" } } as never)).toBe("message:text");
+    expect(telegramActivityAction({ message: { photo: [] } } as never)).toBeUndefined();
+  });
+
+  it("calculates exact activity leaderboard windows and leaves all-time unbounded", () => {
+    const now = new Date("2026-07-27T12:00:00.000Z");
+    expect(telegramLeaderboardRangeStart("24h", now)?.toISOString()).toBe(
+      "2026-07-26T12:00:00.000Z"
+    );
+    expect(telegramLeaderboardRangeStart("7d", now)?.toISOString()).toBe(
+      "2026-07-20T12:00:00.000Z"
+    );
+    expect(telegramLeaderboardRangeStart("30d", now)?.toISOString()).toBe(
+      "2026-06-27T12:00:00.000Z"
+    );
+    expect(telegramLeaderboardRangeStart("all", now)).toBeUndefined();
+  });
+
+  it("renders ranked users and groups safely with the selected range", () => {
+    const users = formatTelegramActivityLeaderboard("users", "7d", [
+      { id: "10", label: "alice", count: 1234 },
+      { id: "20", label: null, count: 2 }
+    ]);
+    expect(users).toContain("Most Active Users");
+    expect(users).toContain("Last 7d - Top 10");
+    expect(users).toContain("1. @alice");
+    expect(users).toContain("1,234 interactions");
+    expect(users).toContain("2. User 20");
+
+    const groups = formatTelegramActivityLeaderboard("groups", "all", [
+      { id: "-100", label: "Alpha & <Beta>", count: 9 }
+    ]);
+    expect(groups).toContain("Most Active Groups");
+    expect(groups).toContain("All time");
+    expect(groups).toContain("Alpha &amp; &lt;Beta&gt;");
   });
 
   it("extracts a valid contract address from scan commands", () => {

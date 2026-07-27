@@ -59,6 +59,7 @@ export type TelegramRecordActivity = (input: {
   username?: string;
   chatId: bigint;
   chatType: string;
+  chatTitle?: string;
   action: string;
 }) => Promise<void>;
 export type TelegramGetAdminAnalytics = () => Promise<TelegramAnalytics>;
@@ -72,6 +73,17 @@ export type TelegramGetRegisteredUsers = (
   page: number,
   pageSize: number
 ) => Promise<TelegramRegisteredUsersPage>;
+export type TelegramActivityLeaderboardKind = "users" | "groups";
+export interface TelegramActivityLeaderboardEntry {
+  id: string;
+  label: string | null;
+  count: number;
+}
+export type TelegramGetActivityLeaderboard = (
+  kind: TelegramActivityLeaderboardKind,
+  range: TelegramChartRange,
+  now: Date
+) => Promise<TelegramActivityLeaderboardEntry[]>;
 export type TelegramTokenContractStatus =
   | { kind: "SUPPORTED"; chainId: number; chainName: string }
   | { kind: "UNSUPPORTED_CHAIN"; chainName: string }
@@ -91,6 +103,7 @@ export const TELEGRAM_BOT_COMMANDS = [
   { command: "setgroupalertmedia", description: "Admin: set global new-group alert media" },
   { command: "stats", description: "Admin: web and Telegram traffic statistics" },
   { command: "users", description: "Admin: browse registered Telegram users" },
+  { command: "leaderboard", description: "Admin: most active users and groups" },
   { command: "charts", description: "Admin: open analytics charts" },
   { command: "activitychart", description: "Admin: web and bot activity chart" },
   { command: "scanschart", description: "Admin: scan traffic by source" },
@@ -212,6 +225,7 @@ export function createTelegramBot(options: {
   recordActivity?: TelegramRecordActivity;
   getAdminAnalytics?: TelegramGetAdminAnalytics;
   getRegisteredUsers?: TelegramGetRegisteredUsers;
+  getActivityLeaderboard?: TelegramGetActivityLeaderboard;
   isTokenContract?: TelegramIsTokenContract;
   /** Called for any error a handler throws (including new-group-alert delivery failures) and
    * for group-alert delivery being skipped/degraded, so failures are visible instead of silently
@@ -238,18 +252,17 @@ export function createTelegramBot(options: {
   const pendingGroupAlertMediaAdmins = new Set<number>();
 
   bot.use(async (context, next) => {
-    if (context.chat && options.recordActivity) {
-      const action = context.callbackQuery
-        ? `button:${context.callbackQuery.data}`
-        : context.message?.text?.startsWith("/")
-          ? `command:${context.message.text.split(/\s+/u)[0]?.slice(1).toLowerCase()}`
-          : "message:text";
+    const action = telegramActivityAction(context);
+    if (context.chat && action && options.recordActivity) {
       await options
         .recordActivity({
           ...(context.from ? { userId: BigInt(context.from.id) } : {}),
           ...(context.from?.username ? { username: context.from.username } : {}),
           chatId: BigInt(context.chat.id),
           chatType: context.chat.type,
+          ...(context.chat.type !== "private" && "title" in context.chat && context.chat.title
+            ? { chatTitle: context.chat.title }
+            : {}),
           action
         })
         .catch(() => undefined);
@@ -512,6 +525,34 @@ export function createTelegramBot(options: {
   bot.command("users", (context) => showRegisteredUsers(context, 1));
   bot.callbackQuery(/^adminusers:(\d+)$/u, (context) =>
     showRegisteredUsers(context, Number(context.match[1]))
+  );
+  const showActivityLeaderboard = async (
+    context: Context,
+    kind: TelegramActivityLeaderboardKind,
+    range: TelegramChartRange
+  ) => {
+    if (!(await requireAdmin(context))) return;
+    if (!options.getActivityLeaderboard) {
+      await context.reply("Activity leaderboards are not configured.");
+      return;
+    }
+    const entries = await options.getActivityLeaderboard(kind, range, new Date());
+    const text = formatTelegramActivityLeaderboard(kind, range, entries);
+    const replyMarkup = activityLeaderboardKeyboard(kind, range);
+    if (context.callbackQuery) {
+      await context.editMessageText(text, { parse_mode: "HTML", reply_markup: replyMarkup });
+      await context.answerCallbackQuery({ text: "Leaderboard refreshed." });
+    } else {
+      await context.reply(text, { parse_mode: "HTML", reply_markup: replyMarkup });
+    }
+  };
+  bot.command("leaderboard", (context) => showActivityLeaderboard(context, "users", "7d"));
+  bot.callbackQuery(/^adminleaderboard:(users|groups):(24h|7d|30d|all)$/u, (context) =>
+    showActivityLeaderboard(
+      context,
+      context.match[1] as TelegramActivityLeaderboardKind,
+      context.match[2] as TelegramChartRange
+    )
   );
   bot.callbackQuery(/^adminchart:(activity|scans|users):(24h|7d|30d|all)$/u, (context) =>
     showAdminChart(
@@ -1427,6 +1468,65 @@ function adminChartsMenuKeyboard(includeStatsRefresh = false): InlineKeyboard {
   return includeStatsRefresh
     ? keyboard.row().text("🔄 Refresh Stats", "adminstats")
     : keyboard;
+}
+
+export function telegramActivityAction(context: Context): string | undefined {
+  if (context.callbackQuery) return `button:${context.callbackQuery.data}`;
+  const text = context.message?.text;
+  if (text === undefined) return undefined;
+  if (!text.startsWith("/")) return "message:text";
+  return `command:${text.split(/\s+/u)[0]?.slice(1).split("@")[0]?.toLowerCase()}`;
+}
+
+export function telegramLeaderboardRangeStart(
+  range: TelegramChartRange,
+  now: Date
+): Date | undefined {
+  if (range === "all") return undefined;
+  const duration =
+    range === "24h" ? 86_400_000 : range === "7d" ? 604_800_000 : 2_592_000_000;
+  return new Date(now.getTime() - duration);
+}
+
+export function formatTelegramActivityLeaderboard(
+  kind: TelegramActivityLeaderboardKind,
+  range: TelegramChartRange,
+  entries: TelegramActivityLeaderboardEntry[]
+): string {
+  const title = kind === "users" ? "Most Active Users" : "Most Active Groups";
+  const period = range === "all" ? "All time" : `Last ${range}`;
+  const rows = entries.map((entry, index) => {
+    const fallback = kind === "users" ? `User ${entry.id}` : `Group ${entry.id}`;
+    const label = escapeTelegramHtml(
+      entry.label
+        ? `${kind === "users" ? "@" : ""}${entry.label.replace(/^@/u, "")}`
+        : fallback
+    );
+    return `<b>${index + 1}. ${label}</b> - ${entry.count.toLocaleString("en-US")} interactions`;
+  });
+  return [
+    `<b>${title}</b>`,
+    `${period} - Top 10`,
+    "",
+    rows.join("\n") || "No activity in this period."
+  ].join("\n");
+}
+
+function activityLeaderboardKeyboard(
+  kind: TelegramActivityLeaderboardKind,
+  selected: TelegramChartRange
+): InlineKeyboard {
+  const keyboard = new InlineKeyboard()
+    .text(`${kind === "users" ? "\u2713 " : ""}Users`, `adminleaderboard:users:${selected}`)
+    .text(`${kind === "groups" ? "\u2713 " : ""}Groups`, `adminleaderboard:groups:${selected}`)
+    .row();
+  for (const range of ["24h", "7d", "30d", "all"] as const) {
+    keyboard.text(
+      `${selected === range ? "\u2713 " : ""}${range === "all" ? "All" : range}`,
+      `adminleaderboard:${kind}:${range}`
+    );
+  }
+  return keyboard;
 }
 
 export function formatTelegramRegisteredUsers(result: TelegramRegisteredUsersPage): string {

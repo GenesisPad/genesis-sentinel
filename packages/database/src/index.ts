@@ -152,6 +152,21 @@ export interface TelegramGroupAlertMediaRepository {
   setMedia(media: TelegramGroupAlertMedia): Promise<void>;
 }
 
+export type TelegramActivityLeaderboardKind = "users" | "groups";
+
+export interface TelegramActivityLeaderboardEntry {
+  id: string;
+  label: string | null;
+  count: number;
+}
+
+export interface TelegramActivityLeaderboardRepository {
+  getLeaderboard(
+    kind: TelegramActivityLeaderboardKind,
+    since?: Date
+  ): Promise<TelegramActivityLeaderboardEntry[]>;
+}
+
 export interface ScanTarget {
   scanId: string;
   chainId: number;
@@ -1368,6 +1383,58 @@ export function createTelegramGroupAlertMediaRepository(
         create: { key: settingKey, value: media },
         update: { value: media }
       });
+    }
+  };
+}
+
+/** Aggregates directly in Postgres so filtering group chats happens before the top-ten limit.
+ * The numeric Telegram id is the final ordering key, making equal-count results deterministic. */
+export function createTelegramActivityLeaderboardRepository(
+  db: PrismaDatabase
+): TelegramActivityLeaderboardRepository {
+  return {
+    async getLeaderboard(kind, since) {
+      const sinceFilter = since
+        ? Prisma.sql`AND activity."createdAt" >= ${since}`
+        : Prisma.empty;
+      const rows =
+        kind === "users"
+          ? await db.$queryRaw<Array<{ id: bigint; label: string | null; count: number | bigint }>>(
+              Prisma.sql`
+                SELECT activity."telegramUserId" AS id,
+                       users.username AS label,
+                       COUNT(*)::integer AS count
+                FROM "TelegramActivity" AS activity
+                LEFT JOIN "TelegramUser" AS users
+                  ON users."telegramUserId" = activity."telegramUserId"
+                WHERE activity."telegramUserId" IS NOT NULL
+                  ${sinceFilter}
+                GROUP BY activity."telegramUserId", users.username
+                ORDER BY count DESC, activity."telegramUserId" ASC
+                LIMIT 10
+              `
+            )
+          : await db.$queryRaw<Array<{ id: bigint; label: string | null; count: number | bigint }>>(
+              Prisma.sql`
+                SELECT activity."telegramChatId" AS id,
+                       chats.title AS label,
+                       COUNT(*)::integer AS count
+                FROM "TelegramActivity" AS activity
+                INNER JOIN "TelegramChat" AS chats
+                  ON chats."telegramChatId" = activity."telegramChatId"
+                WHERE chats.type IN ('group', 'supergroup')
+                  ${sinceFilter}
+                GROUP BY activity."telegramChatId", chats.title
+                ORDER BY count DESC, activity."telegramChatId" ASC
+                LIMIT 10
+              `
+            );
+
+      return rows.map((row) => ({
+        id: row.id.toString(),
+        label: row.label,
+        count: Number(row.count)
+      }));
     }
   };
 }

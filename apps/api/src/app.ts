@@ -16,6 +16,7 @@ import {
   createApiKeyRepository,
   createPrismaClient,
   createScanRepository,
+  createTelegramActivityLeaderboardRepository,
   createTelegramGroupAlertMediaRepository,
   createTelegramTrackingRepository,
   type ApiKeyRepository,
@@ -43,6 +44,7 @@ import { submitScanRequest } from "./scan-service.js";
 import {
   createTelegramBot,
   createTelegramScanLimiter,
+  telegramLeaderboardRangeStart,
   TELEGRAM_BOT_COMMANDS,
   type TelegramGetAdminAnalytics,
   type TelegramGetRegisteredUsers,
@@ -125,13 +127,16 @@ export async function buildApp({
   const prisma = scanRepository ? undefined : createPrismaClient(env.DATABASE_URL);
   const scans = scanRepository ?? createScanRepository(prisma!);
   const telegramTracking = prisma ? createTelegramTrackingRepository(prisma) : null;
+  const telegramActivityLeaderboard = prisma
+    ? createTelegramActivityLeaderboardRepository(prisma)
+    : null;
   const telegramGroupAlertMedia = prisma
     ? createTelegramGroupAlertMediaRepository(prisma)
     : null;
   const recordTelegramActivity: TelegramRecordActivity | undefined = prisma
     ? async (input) => {
         await prisma.$transaction(async (transaction) => {
-          if (input.userId) {
+          if (input.userId !== undefined) {
             await transaction.telegramUser.upsert({
               where: { telegramUserId: input.userId },
               create: {
@@ -143,12 +148,19 @@ export async function buildApp({
           }
           await transaction.telegramChat.upsert({
             where: { telegramChatId: input.chatId },
-            create: { telegramChatId: input.chatId, type: input.chatType },
-            update: { type: input.chatType }
+            create: {
+              telegramChatId: input.chatId,
+              type: input.chatType,
+              ...(input.chatTitle ? { title: input.chatTitle } : {})
+            },
+            update: {
+              type: input.chatType,
+              ...(input.chatTitle ? { title: input.chatTitle } : {})
+            }
           });
           await transaction.telegramActivity.create({
             data: {
-              ...(input.userId ? { telegramUserId: input.userId } : {}),
+              ...(input.userId !== undefined ? { telegramUserId: input.userId } : {}),
               telegramChatId: input.chatId,
               action: input.action
             }
@@ -475,6 +487,15 @@ export async function buildApp({
         ...(recordTelegramActivity ? { recordActivity: recordTelegramActivity } : {}),
         ...(getTelegramAdminAnalytics ? { getAdminAnalytics: getTelegramAdminAnalytics } : {}),
         ...(getTelegramRegisteredUsers ? { getRegisteredUsers: getTelegramRegisteredUsers } : {}),
+        ...(telegramActivityLeaderboard
+          ? {
+              getActivityLeaderboard: (kind, range, now) =>
+                telegramActivityLeaderboard.getLeaderboard(
+                  kind,
+                  telegramLeaderboardRangeStart(range, now)
+                )
+            }
+          : {}),
         ...(telegramTracking
           ? {
               trackAddress: ((input) =>

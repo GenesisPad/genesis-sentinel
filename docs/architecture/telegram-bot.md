@@ -17,6 +17,7 @@ Stage 12 turns the Telegram boundary into a usable command workflow while keepin
 Admin-only operational commands:
 
 - `/stats`: current Telegram, tracking, and scan totals.
+- `/leaderboard`: top 10 most-active Telegram users or groups, with 24-hour, 7-day, 30-day, and all-time filters (7 days by default).
 - `/charts`: chart menu.
 - `/activitychart`: Telegram interactions over time.
 - `/scanschart`: Sentinel scans over time.
