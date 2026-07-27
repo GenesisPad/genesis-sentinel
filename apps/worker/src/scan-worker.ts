@@ -44,7 +44,7 @@ import {
   type LedgerReconciliation,
   type PoolReserveSample
 } from "@genesis-sentinel/security-engine";
-import { scannerVersion } from "@genesis-sentinel/shared";
+import { NEGLIGIBLE_LIQUIDITY_USD as negligibleLiquidityUsd, scannerVersion } from "@genesis-sentinel/shared";
 import type { BytecodeReuseView, RelatedWalletEdge } from "@genesis-sentinel/shared";
 
 const sentinelStaticCallWallet = "0x0000000000000000000000000000000000001001" as const;
@@ -385,6 +385,253 @@ function buildHoneypotDetectorResult(input: {
         evidence: [evidence],
         recommendation:
           "Treat this token as a confirmed or likely honeypot. Do not buy until an independent sell has been demonstrated to succeed."
+      }
+    ]
+  };
+}
+
+/**
+ * Buy/sell tax percentages are measured by trade simulation (fork-simulator.ts) and shown
+ * directly in the report ("Buy Tax 40.0%"), but were never converted into a scored finding — the
+ * only tax-related detector is SOURCE_TAX_OR_LIMIT_CONTROL, a static source-pattern match for a
+ * mutable tax *setter* function, fixed at MEDIUM regardless of the actual measured rate, and it
+ * never fires at all for a token with a hardcoded (no-setter) tax of any size. A token measured
+ * at e.g. 40% sell tax previously contributed nothing to the score. Thresholds mirror the report
+ * UI's own tax color-coding (quick-answers.tsx) so a "bad"-colored tax always shows up in the
+ * score too, not just the color.
+ */
+function createTaxDetectorResult(input: {
+  address: `0x${string}`;
+  blockNumber: bigint;
+  simulations: SimulationResult[];
+}): DetectorResult | null {
+  const detector = {
+    id: "measured-trade-tax",
+    version: "0.1.0",
+    name: "Measured trade tax",
+    description:
+      "Reads the buy/sell tax percentages measured by trade simulation and scores extreme values that a static source-code check cannot catch (e.g. a hardcoded, non-adjustable high tax)."
+  };
+
+  const readTaxBps = (kind: "BUY" | "SELL", field: string): number | null => {
+    const run = input.simulations.find((candidate) => candidate.kind === kind);
+    if (!run || !isPlainRecord(run.result)) return null;
+    const value = run.result[field];
+    return typeof value === "number" ? value : null;
+  };
+  const buyTaxBps = readTaxBps("BUY", "buyTaxBps");
+  const sellTaxBps = readTaxBps("SELL", "sellTaxBps");
+  const maxTaxBps = Math.max(buyTaxBps ?? 0, sellTaxBps ?? 0);
+
+  // Below 5% is normal for many legitimate launch-tax tokens; not worth a scored finding.
+  if (maxTaxBps < 500) {
+    return null;
+  }
+
+  const severity: "CRITICAL" | "HIGH" | "MEDIUM" =
+    maxTaxBps >= 5000 ? "CRITICAL" : maxTaxBps >= 2000 ? "HIGH" : "MEDIUM";
+  const pct = (maxTaxBps / 100).toFixed(1);
+  const leg = (sellTaxBps ?? 0) >= (buyTaxBps ?? 0) ? "sell" : "buy";
+  const evidence = {
+    type: "SIMULATION" as const,
+    summary: `Measured ${leg} tax of ${pct}% from trade simulation.`,
+    address: input.address,
+    blockNumber: input.blockNumber,
+    data: { buyTaxBps, sellTaxBps }
+  };
+
+  return {
+    detector,
+    checks: [
+      {
+        code: "MEASURED_TAX_HIGH",
+        outcome: "DETECTED",
+        confidence: "HIGH",
+        evidence: [evidence]
+      }
+    ],
+    findings: [
+      {
+        code: "MEASURED_TAX_HIGH",
+        detectorId: detector.id,
+        detectorVersion: detector.version,
+        title:
+          severity === "CRITICAL"
+            ? `Extreme ${leg} tax measured: ${pct}%`
+            : `High ${leg} tax measured: ${pct}%`,
+        severity,
+        category: "TRADING_SAFETY",
+        confidence: "HIGH",
+        description: `A real trade simulation measured a ${leg} tax of ${pct}% — this is what a buyer or seller actually receives after fees, not a claim from source code.`,
+        technicalExplanation:
+          "buyTaxBps/sellTaxBps compare the fork simulation's real measured output against the expected pre-tax output for the same trade amount.",
+        evidence: [evidence],
+        recommendation:
+          severity === "CRITICAL"
+            ? "Treat this token as having a near-total or total value extraction on trade. Verify the exact tax before any purchase."
+            : "Confirm the tax rate is intentional and disclosed before trading; a tax this high materially erodes returns."
+      }
+    ]
+  };
+}
+
+/**
+ * "LP locked/burned" is displayed in the report as a safety signal (quick-answers.tsx) but, per
+ * ADR 0036, was only ever wired into the UI's tone/color — never into the score. A pool whose LP
+ * token the deployer still fully controls (never locked or burned) means that deployer can pull
+ * the entire pool at will regardless of how clean everything else about the contract is. Only
+ * applies to Uniswap V2 pools — V3/V4 liquidity isn't a burnable/lockable LP token in this
+ * codebase's model, so this is correctly silent (not a false "unlocked" flag) for V3/V4-only
+ * tokens.
+ */
+function createLpLockDetectorResult(input: {
+  address: `0x${string}`;
+  blockNumber: bigint;
+  pools: DiscoveredPool[];
+}): DetectorResult | null {
+  const v2Pools = input.pools.filter((pool) => pool.liquidityData.protocol === "UNISWAP_V2");
+  if (v2Pools.length === 0) {
+    return null;
+  }
+
+  // If a token has multiple V2 pools, the most protected one is the relevant signal — a rug only
+  // needs one fully-unlocked pool holding real liquidity to be pulled, but a holder can also
+  // reasonably rely on whichever pool is best protected as evidence the deployer took the step.
+  const bestProtectedPct = Math.max(
+    ...v2Pools.map((pool) => numberFromRecord(pool.liquidityData, "lpBurnedOrLockedPct") ?? 0)
+  );
+  const deepestPool = selectDeepestPool(v2Pools);
+  const deepestLiquidityUsd = deepestPool
+    ? numberFromRecord(deepestPool.liquidityData, "totalLiquidityUsd")
+    : null;
+
+  // A pool with negligible liquidity has nothing meaningful left to protect either way — this
+  // finding is about a real, non-trivial pool the deployer could still drain, not dust.
+  if (deepestLiquidityUsd !== null && deepestLiquidityUsd < negligibleLiquidityUsd) {
+    return null;
+  }
+  if (bestProtectedPct >= 50) {
+    return null;
+  }
+
+  const detector = {
+    id: "lp-lock-status",
+    version: "0.1.0",
+    name: "LP lock/burn status",
+    description:
+      "Reads the on-chain-measured burned-or-locked percentage of the Uniswap V2 LP token supply."
+  };
+  const evidence = {
+    type: "LIQUIDITY_DATA" as const,
+    summary: `Best-protected V2 pool has ${bestProtectedPct.toFixed(1)}% of its LP token supply burned or locked.`,
+    address: input.address,
+    blockNumber: input.blockNumber,
+    data: { bestProtectedPct, poolCount: v2Pools.length }
+  };
+
+  return {
+    detector,
+    checks: [
+      {
+        code: "LP_NOT_LOCKED_OR_BURNED",
+        outcome: "DETECTED",
+        confidence: "HIGH",
+        evidence: [evidence]
+      }
+    ],
+    findings: [
+      {
+        code: "LP_NOT_LOCKED_OR_BURNED",
+        detectorId: detector.id,
+        detectorVersion: detector.version,
+        title:
+          bestProtectedPct <= 0
+            ? "Liquidity is not locked or burned at all"
+            : "Most of the liquidity pool token is not locked or burned",
+        severity: bestProtectedPct <= 0 ? "HIGH" : "MEDIUM",
+        category: "LIQUIDITY_SAFETY",
+        confidence: "HIGH",
+        description: `Only ${bestProtectedPct.toFixed(1)}% of the LP token supply for this token's Uniswap V2 pool(s) is burned or locked. Whoever holds the rest of the LP token can remove that share of the pool's liquidity at any time.`,
+        technicalExplanation:
+          "lpBurnedOrLockedPct is measured directly from the LP token's balanceOf known burn addresses plus any confirmed third-party locker contract balance, not inferred.",
+        evidence: [evidence],
+        recommendation:
+          "Treat unlocked liquidity as removable at any time by whoever holds the LP token, regardless of how the rest of the contract looks."
+      }
+    ]
+  };
+}
+
+/**
+ * Negligible liquidity relative to reality (not to market cap — a market cap can be unavailable
+ * or itself meaningless for a dead pool) was, per ADR 0036, only ever wired into the report UI's
+ * "Liquidity" answer tone/color — never into the score. A token can look "LOW RISK" while its
+ * only pool holds a few cents, meaning a buyer of any real size cannot exit at all. Sums
+ * totalLiquidityUsd across every discovered pool (not just the one selected for simulation) so a
+ * token isn't flagged just because its *deepest* pool is thin while it also has real liquidity
+ * elsewhere.
+ */
+function createNegligibleLiquidityDetectorResult(input: {
+  address: `0x${string}`;
+  blockNumber: bigint;
+  pools: DiscoveredPool[];
+}): DetectorResult | null {
+  const knownLiquidityUsd = input.pools
+    .map((pool) => numberFromRecord(pool.liquidityData, "totalLiquidityUsd"))
+    .filter((value): value is number => value !== null);
+  // Silent, not a clean bill of health, when USD liquidity couldn't be priced for any pool at
+  // all (e.g. no discovered pools, or a quote token with no available USD price) — this detector
+  // only speaks when it actually has a dollar figure to judge.
+  if (input.pools.length === 0 || knownLiquidityUsd.length === 0) {
+    return null;
+  }
+
+  const totalLiquidityUsd = knownLiquidityUsd.reduce((sum, value) => sum + value, 0);
+  if (totalLiquidityUsd >= negligibleLiquidityUsd) {
+    return null;
+  }
+
+  const detector = {
+    id: "negligible-liquidity",
+    version: "0.1.0",
+    name: "Negligible liquidity",
+    description: `Flags total discovered pool liquidity under the $${negligibleLiquidityUsd} floor used elsewhere in the report (ADR 0036) as a scored finding, not just a UI color.`
+  };
+  const formattedUsd =
+    totalLiquidityUsd < 1 ? totalLiquidityUsd.toFixed(4) : totalLiquidityUsd.toFixed(2);
+  const evidence = {
+    type: "LIQUIDITY_DATA" as const,
+    summary: `Total discovered liquidity across ${input.pools.length} pool(s) is $${formattedUsd}.`,
+    address: input.address,
+    blockNumber: input.blockNumber,
+    data: { totalLiquidityUsd, poolCount: input.pools.length }
+  };
+
+  return {
+    detector,
+    checks: [
+      {
+        code: "NEGLIGIBLE_LIQUIDITY",
+        outcome: "DETECTED",
+        confidence: "HIGH",
+        evidence: [evidence]
+      }
+    ],
+    findings: [
+      {
+        code: "NEGLIGIBLE_LIQUIDITY",
+        detectorId: detector.id,
+        detectorVersion: detector.version,
+        title: "Liquidity is negligible",
+        severity: "CRITICAL",
+        category: "LIQUIDITY_SAFETY",
+        confidence: "HIGH",
+        description: `Total discovered liquidity across every pool for this token is $${formattedUsd} — not enough for a real trade of any size to be sold back out without collapsing the price. A successful tiny buy/sell simulation does not mean this token is tradeable at any meaningful size.`,
+        technicalExplanation:
+          "totalLiquidityUsd is summed across every discovered pool from on-chain reserve/balance reads priced against the quote token's known USD rate — not an inference.",
+        evidence: [evidence],
+        recommendation:
+          "Do not treat a passing buy/sell simulation as proof this token is tradeable — the pool cannot absorb a real-sized position."
       }
     ]
   };
@@ -1979,6 +2226,51 @@ export async function processScanJob(
       await dependencies.scans.recordDetectorResult({
         scanId: target.scanId,
         result: honeypotDetectorResult,
+        startedAt: now(),
+        completedAt: now()
+      });
+    }
+
+    const taxDetectorResult = createTaxDetectorResult({
+      address: target.address,
+      blockNumber,
+      simulations
+    });
+    if (taxDetectorResult) {
+      holderDetectorResults.push(taxDetectorResult);
+      await dependencies.scans.recordDetectorResult({
+        scanId: target.scanId,
+        result: taxDetectorResult,
+        startedAt: now(),
+        completedAt: now()
+      });
+    }
+
+    const negligibleLiquidityDetectorResult = createNegligibleLiquidityDetectorResult({
+      address: target.address,
+      blockNumber,
+      pools: discoveredPools ?? []
+    });
+    if (negligibleLiquidityDetectorResult) {
+      holderDetectorResults.push(negligibleLiquidityDetectorResult);
+      await dependencies.scans.recordDetectorResult({
+        scanId: target.scanId,
+        result: negligibleLiquidityDetectorResult,
+        startedAt: now(),
+        completedAt: now()
+      });
+    }
+
+    const lpLockDetectorResult = createLpLockDetectorResult({
+      address: target.address,
+      blockNumber,
+      pools: discoveredPools ?? []
+    });
+    if (lpLockDetectorResult) {
+      holderDetectorResults.push(lpLockDetectorResult);
+      await dependencies.scans.recordDetectorResult({
+        scanId: target.scanId,
+        result: lpLockDetectorResult,
         startedAt: now(),
         completedAt: now()
       });

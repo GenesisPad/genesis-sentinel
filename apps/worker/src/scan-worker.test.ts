@@ -490,6 +490,148 @@ describe("scan worker orchestration", () => {
     });
   });
 
+  it("scores an unlocked, unburned LP token as a risk finding on a real (non-negligible) pool", async () => {
+    // Per ADR 0036, "LP locked/burned" only ever drove the report UI's tone/color for the
+    // Quick Answers card — it was never converted into a scored finding, so a token whose
+    // deployer can pull 100% of a real, sizeable pool at any time scored no differently than one
+    // with genuinely locked liquidity.
+    const { repository, calls } = createRepository();
+    const tokenAddress = "0x0000000000000000000000000000000000000001";
+    const pairAddress = "0x00000000000000000000000000000000000000f1";
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = fetchUrl(input);
+      const body = url.includes("/holders")
+        ? { items: [] }
+        : url.includes("/tokens/0x0000000000000000000000000000000000000001")
+          ? {
+              name: "Token",
+              symbol: "TOK",
+              decimals: "18",
+              total_supply: "1000000000000000000000",
+              holders_count: "1"
+            }
+          : url.includes("/tokens/")
+            ? { exchange_rate: "1" }
+            : url.includes("/addresses/")
+              ? { is_verified: true }
+              : { items: [] };
+
+      return Promise.resolve(
+        new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } })
+      );
+    });
+
+    await processScanJob(
+      {
+        data: { scanId: "scan-lp-unlocked", chainId: 4663, address: tokenAddress }
+      },
+      {
+        scans: repository,
+        getChainAdapter() {
+          return createAdapter("0x6000", {
+            name: "Robinhood Chain",
+            onReadContract(parameters) {
+              if (parameters.functionName === "getPair") {
+                return parameters.args?.[1] === "0x0bd7d308f8e1639fab988df18a8011f41eacad73"
+                  ? pairAddress
+                  : "0x0000000000000000000000000000000000000000";
+              }
+              if (parameters.functionName === "getReserves") {
+                // Large, well-above-negligible WETH-side reserve ($2,000 at the mocked
+                // exchange_rate of 1) so this test isolates the LP-lock finding from the
+                // separate negligible-liquidity finding.
+                return [1_000_000_000_000_000_000_000n, 1_000_000_000_000_000_000_000n, 0];
+              }
+              if (parameters.functionName === "token0") return tokenAddress;
+              if (parameters.functionName === "totalSupply") return 1000n;
+              // Every LP-token balanceOf (burn addresses, locker contract) returns 0 — nothing
+              // burned or locked.
+              if (parameters.functionName === "balanceOf") return 0n;
+              return undefined;
+            }
+          });
+        },
+        now: () => new Date("2026-07-11T00:00:00.000Z")
+      }
+    );
+
+    expect(calls).toContain("detector:lp-lock-status:1");
+    expect(calls.some((call) => /^risk:(HIGH|CRITICAL):/u.test(call))).toBe(true);
+  });
+
+  it("scores a high measured sell tax from trade simulation", async () => {
+    // Per the audit: the only tax-related detector matches a mutable tax-setter *function* in
+    // source, fixed at MEDIUM regardless of the real rate, and never fires for a hardcoded
+    // (no-setter) tax at all. A token measured at e.g. 45% sell tax by a real fork simulation
+    // previously contributed nothing to the score.
+    const { repository, calls } = createRepository();
+    const tokenAddress = "0x0000000000000000000000000000000000000001";
+    const pairAddress = "0x00000000000000000000000000000000000000f1";
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = fetchUrl(input);
+      const body = url.includes("/holders")
+        ? { items: [] }
+        : url.includes("/tokens/0x0000000000000000000000000000000000000001")
+          ? {
+              name: "Token",
+              symbol: "TOK",
+              decimals: "18",
+              total_supply: "1000000000000000000000",
+              holders_count: "1"
+            }
+          : url.includes("/tokens/")
+            ? { exchange_rate: "1" }
+            : url.includes("/addresses/")
+              ? { is_verified: true }
+              : { items: [] };
+
+      return Promise.resolve(
+        new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } })
+      );
+    });
+
+    await processScanJob(
+      {
+        data: { scanId: "scan-high-tax", chainId: 4663, address: tokenAddress }
+      },
+      {
+        scans: repository,
+        getChainAdapter() {
+          return createAdapter("0x6000", {
+            name: "Robinhood Chain",
+            onReadContract(parameters) {
+              if (parameters.functionName === "getPair") {
+                return parameters.args?.[1] === "0x0bd7d308f8e1639fab988df18a8011f41eacad73"
+                  ? pairAddress
+                  : "0x0000000000000000000000000000000000000000";
+              }
+              if (parameters.functionName === "getReserves") {
+                return [1_000_000_000_000_000_000_000n, 1_000_000_000_000_000_000_000n, 0];
+              }
+              if (parameters.functionName === "token0") return tokenAddress;
+              if (parameters.functionName === "totalSupply") return 1000n;
+              if (parameters.functionName === "balanceOf") return 0n;
+              return undefined;
+            }
+          });
+        },
+        forkTradeSimulator: () =>
+          Promise.resolve({
+            simulationTool: "0.1.0-ganache-fork",
+            canBuy: true,
+            canSell: true,
+            isHoneypot: false,
+            buyTaxBps: 100,
+            sellTaxBps: 4500
+          }),
+        now: () => new Date("2026-07-11T00:00:00.000Z")
+      }
+    );
+
+    expect(calls).toContain("detector:measured-trade-tax:1");
+    expect(calls.some((call) => /^risk:(HIGH|CRITICAL):/u.test(call))).toBe(true);
+  });
+
   it("does not report the deployer seeding its own liquidity pool as a supply transfer to a wallet", async () => {
     // Reproduces a real, live scan bug: the deployer sends ~100% of supply to the token's own
     // pool to seed trading (completely normal launch behavior), but the wallet-clustering
@@ -778,6 +920,81 @@ describe("scan worker orchestration", () => {
     expect(calls).toContain("simulation:BUY:PASSED");
     expect(calls).toContain("simulation:SELL:PASSED");
     expect(calls).toContain("stage:SIMULATING_TRADES:SUCCEEDED");
+  });
+
+  it("scores negligible liquidity as CRITICAL even when buy/sell simulation passes", async () => {
+    // Reproduces a real, live scan bug: a token with $0.27 total pool liquidity against a $5.48k
+    // market cap scored 5/100 "LOW RISK" — a passing route-quote buy/sell simulation for a tiny
+    // probe amount says nothing about whether a real-sized position could ever be sold back out,
+    // and (per ADR 0036) "negligible liquidity" was only ever wired into the UI's color, never
+    // into the score.
+    const { repository, calls } = createRepository();
+    const tokenAddress = "0x0000000000000000000000000000000000000001";
+    const poolAddress = "0x00000000000000000000000000000000000000f3";
+    const wethAddress = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = fetchUrl(input);
+      const body = url.includes("/holders")
+        ? { items: [] }
+        : url.includes(`/tokens/${wethAddress}`)
+          ? { exchange_rate: "1" }
+          : url.includes("/tokens/")
+            ? {
+                name: "Token",
+                symbol: "TOK",
+                decimals: "18",
+                total_supply: "1000000000000000000000",
+                holders_count: "1"
+              }
+            : url.includes("/addresses/")
+              ? { is_verified: true }
+              : { items: [] };
+
+      return Promise.resolve(
+        new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } })
+      );
+    });
+
+    await processScanJob(
+      {
+        data: { scanId: "scan-negligible-liquidity", chainId: 4663, address: tokenAddress }
+      },
+      {
+        scans: repository,
+        getChainAdapter() {
+          return createAdapter("0x6000", {
+            name: "Robinhood Chain",
+            onReadContract(parameters) {
+              if (parameters.functionName === "getPool") {
+                return parameters.args?.[1] === wethAddress && parameters.args?.[2] === 3000
+                  ? poolAddress
+                  : "0x0000000000000000000000000000000000000000";
+              }
+              if (parameters.functionName === "liquidity") return 123456n;
+              if (parameters.functionName === "slot0") {
+                return [79_228_162_514_264_337_593_543_950_336n, 0, 0, 0, 0, 0, true];
+              }
+              if (parameters.functionName === "token0") return tokenAddress;
+              if (parameters.functionName === "token1") return wethAddress;
+              if (parameters.functionName === "fee") return 3000;
+              // WETH-side balance of the pool is a tiny 270 wei (~$0.00000000000000027 at the
+              // mocked exchange_rate of 1) — negligible by any measure, matching the reported
+              // $0.27-liquidity scenario in spirit (a few-hundred-wei-scale pool).
+              if (parameters.functionName === "balanceOf") {
+                return parameters.address === tokenAddress ? 1_000_000n : 270n;
+              }
+              return undefined;
+            }
+          });
+        },
+        now: () => new Date("2026-07-11T00:00:00.000Z")
+      }
+    );
+
+    expect(calls).toContain("simulation:BUY:PASSED");
+    expect(calls).toContain("simulation:SELL:PASSED");
+    expect(calls).toContain("detector:negligible-liquidity:1");
+    expect(calls.some((call) => call.startsWith("risk:CRITICAL:"))).toBe(true);
   });
 
   it("runs Uniswap V4 route-quote trade simulation from the pool's spot price", async () => {
