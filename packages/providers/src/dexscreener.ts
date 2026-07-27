@@ -1,3 +1,4 @@
+import { NEGLIGIBLE_LIQUIDITY_USD } from "@genesis-sentinel/shared";
 import {
   decimalStringValue,
   fetchJson,
@@ -149,6 +150,10 @@ function median(values: number[]): number | null {
   return prevValue === undefined ? midValue : (prevValue + midValue) / 2;
 }
 
+function pairLiquidityUsd(pair: Record<string, unknown>): number {
+  return numberValue(isRecord(pair.liquidity) ? pair.liquidity.usd : undefined) ?? 0;
+}
+
 /**
  * A single manipulated pool can report a wildly implausible price and a fabricated
  * multi-billion-dollar liquidity figure to game naive "highest liquidity" selection — seen live
@@ -156,9 +161,27 @@ function median(values: number[]): number | null {
  * $1.27B of liquidity while every other pair agreed on ~$0.03. Since genuine pools for the same
  * token largely agree on price, an outlier more than 10x away from the median price across all
  * pairs is dropped before ranking by liquidity, rather than trusting liquidity figures alone.
+ *
+ * Live-verified failure mode of that same filter, on a different token: several near-empty
+ * "dust" pools (each under $1 of real liquidity, one or two lifetime trades) reported prices
+ * wildly different from the token's one genuinely liquid, actively-traded $45k pool — a dead
+ * pool's quoted price is close to meaningless, barely any trade volume moved it anywhere. With
+ * three dust pools outnumbering the single real pool, they dominated the median, and the real
+ * pool's *correct* price got discarded as the "outlier" instead, leaving a $0.05 dust pool
+ * picked as "best". The median reference price is now computed only from pairs with at least
+ * $NEGLIGIBLE_LIQUIDITY_USD of liquidity behind them — a price with no real liquidity backing it
+ * shouldn't get a vote in "what's the real price" — falling back to every pair only if none has
+ * meaningful liquidity at all. The plausibility filter itself still applies to every pair.
  */
 function selectBestPair(pairs: Record<string, unknown>[]): Record<string, unknown> | null {
-  const prices = pairs.map(pairPriceUsd).filter((price): price is number => price !== null);
+  const pairsWithMeaningfulLiquidity = pairs.filter(
+    (pair) => pairLiquidityUsd(pair) >= NEGLIGIBLE_LIQUIDITY_USD
+  );
+  const pricingReferencePairs =
+    pairsWithMeaningfulLiquidity.length > 0 ? pairsWithMeaningfulLiquidity : pairs;
+  const prices = pricingReferencePairs
+    .map(pairPriceUsd)
+    .filter((price): price is number => price !== null);
   const medianPrice = median(prices);
 
   const plausiblePairs =
@@ -170,10 +193,6 @@ function selectBestPair(pairs: Record<string, unknown>[]): Record<string, unknow
         });
   const candidates = plausiblePairs.length > 0 ? plausiblePairs : pairs;
 
-  const sorted = [...candidates].sort((a, b) => {
-    const aLiquidity = numberValue(isRecord(a.liquidity) ? a.liquidity.usd : undefined) ?? 0;
-    const bLiquidity = numberValue(isRecord(b.liquidity) ? b.liquidity.usd : undefined) ?? 0;
-    return bLiquidity - aLiquidity;
-  });
+  const sorted = [...candidates].sort((a, b) => pairLiquidityUsd(b) - pairLiquidityUsd(a));
   return sorted[0] ?? null;
 }

@@ -56,8 +56,6 @@ honeypot detector (same stage, same `holderDetectorResults` list feeding `scoreF
   tests in `apps/worker/src/scan-worker.test.ts` reproduce each scenario: a negligible-liquidity
   pool with a passing simulation (asserts `risk:CRITICAL:*`), an unlocked LP token on a
   non-negligible pool, and a 45%-measured-sell-tax fork result.
-- `HOOD4663`'s next rescan should land at CRITICAL, not 5/100 — its liquidity alone now drives the
-  category max.
 - Known remaining gap, not addressed here: Uniswap V4 pools don't yet get a `totalLiquidityUsd`
   figure at all (V4 has no simple reserves to price from a balance read), so a V4-only token's
   liquidity still can't trigger the negligible-liquidity finding. Computing it would require
@@ -66,4 +64,33 @@ honeypot detector (same stage, same `holderDetectorResults` list feeding `scoreF
 - Ratio-based liquidity tiers (thin liquidity relative to market cap, above the absolute $250
   floor) remain UI-only (`liquidityHealthTier`'s "low"/"medium" brackets) — only the absolute-
   dollar floor was scored here, since it's the simpler, more robust signal (works even when
-  market cap is unavailable) and is what the reported case actually needed.
+  market cap is unavailable).
+
+## Addendum: `HOOD4663`'s actual root cause was a different bug entirely
+
+Verifying this fix live against `HOOD4663` after deploy turned up something important: its
+**real** on-chain liquidity is ~$45k (`/v1/scans/:id/result`'s raw, unrefreshed pool data:
+`totalLiquidityUsd: 36727.92` computed directly from live reserves), not $0.27/$0.05 as
+originally reported. My new `negligible-liquidity` detector correctly stayed silent — that
+liquidity genuinely isn't negligible, so the LOW score for *this specific token* was actually
+close to right, and the three scoring gaps above, while real and worth fixing, weren't what was
+wrong with this exact example.
+
+The $0.05/$0.27 figure the user saw was itself a bug, in
+`packages/providers/src/dexscreener.ts`'s `selectBestPair`. `HOOD4663` has one actively-traded
+$45k V3 pool plus three near-empty V4 "dust" pools (each under $1 of liquidity, one or two
+lifetime trades). `selectBestPair`'s outlier defense (added for a different, real incident — one
+rogue pair reporting a fabricated multi-billion-dollar price/liquidity) computed a median
+reference price across *all* pairs equally, with no regard for how much liquidity backed each
+quoted price. With three meaningless dust-pool prices outnumbering the one real pool, the median
+skewed toward the dust pools, and the real pool's *correct* price got discarded as the "outlier"
+— leaving only dust pools as "plausible," and the highest-liquidity dust pool ($0.05) picked as
+"best." This is the actual number the report showed and the actual number `market-refresh.ts`
+was overwriting the accurate on-chain figure with on every cached read.
+
+Fixed in the same commit: the median reference price is now computed only from pairs with at
+least `NEGLIGIBLE_LIQUIDITY_USD` ($250) of liquidity behind them — a price with no real liquidity
+backing it shouldn't get a vote in "what's the real price" — falling back to every pair only if
+none has meaningful liquidity at all. The plausibility filter itself still applies to every pair,
+so the original rogue-pair defense this replaced is unchanged for that case (new regression test
+in `dexscreener.test.ts` confirms both scenarios independently).

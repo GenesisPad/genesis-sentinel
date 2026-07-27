@@ -92,6 +92,50 @@ describe("createDexScreenerMarketDataProvider", () => {
     expect(result?.liquidityUsd).toBe(1_400_000);
   });
 
+  it("does not let several near-empty dust pools outvote the one genuinely liquid pool's price", async () => {
+    // Reproduces a real, live bug ($HOOD4663): one actively-traded $45k pool plus three
+    // near-empty "dust" V4 pools (each well under $1 of liquidity, one or two lifetime trades).
+    // The dust pools' near-meaningless quoted prices used to dominate the outlier-filtering
+    // median, causing the real pool's *correct* price to be discarded as the outlier and a
+    // $0.05 dust pool picked as "best" instead.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse([
+        {
+          baseToken: { address: tokenAddress, name: "Real Pool", symbol: "TOK" },
+          liquidity: { usd: 45025.29 },
+          priceUsd: "0.0001666",
+          marketCap: 166660,
+          volume: { h24: 109959.62 }
+        },
+        {
+          baseToken: { address: tokenAddress, name: "Dust Pool A", symbol: "TOK" },
+          liquidity: { usd: 0.05 },
+          priceUsd: "0.000001326",
+          volume: { h24: 0.34 }
+        },
+        {
+          baseToken: { address: tokenAddress, name: "Dust Pool B", symbol: "TOK" },
+          liquidity: { usd: 0.01 },
+          priceUsd: "0.0000002288",
+          volume: { h24: 0.39 }
+        },
+        {
+          baseToken: { address: tokenAddress, name: "Dust Pool C", symbol: "TOK" },
+          liquidity: { usd: 0 },
+          priceUsd: "0.0000002559",
+          volume: { h24: 0.35 }
+        }
+      ])
+    );
+
+    const provider = createDexScreenerMarketDataProvider(config);
+    const result = await provider.getMarketProfile({ chainId: 4663, address: tokenAddress });
+
+    expect(result?.name).toBe("Real Pool");
+    expect(result?.priceUsd).toBe("0.0001666");
+    expect(result?.liquidityUsd).toBe(45025.29);
+  });
+
   it("returns null when no pairs are returned", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse([]));
     const provider = createDexScreenerMarketDataProvider(config);
