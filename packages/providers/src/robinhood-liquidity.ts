@@ -602,10 +602,15 @@ async function resolveV3PositionCustody(
       continue;
     }
     existing.totalAmount += mint.amount;
-    const existingBlock = existing.log.blockNumber;
-    if (mint.log.blockNumber !== null && (existingBlock === null || mint.log.blockNumber < existingBlock)) {
+    if (isEarlierLog(mint.log, existing.log)) {
       existing.log = mint.log;
     }
+  }
+
+  function isEarlierLog(a: ChainLog, b: ChainLog): boolean {
+    if (a.blockNumber === null || b.blockNumber === null) return false;
+    if (a.blockNumber !== b.blockNumber) return a.blockNumber < b.blockNumber;
+    return (a.logIndex ?? 0) < (b.logIndex ?? 0);
   }
 
   const rankedGroups = [...groups.values()]
@@ -659,9 +664,27 @@ async function resolveOneV3Position(
       topics: [erc721TransferTopic, zeroAddressTopic]
     })
     .catch(() => []);
-  const mintTransfer = transferLogs.find(
-    (log) => log.transactionHash === mintLog.transactionHash && log.topics.length >= 4
-  );
+  // A multicall batching several mint() calls in one transaction emits several pool-level Mint
+  // logs AND several NFT-mint Transfer logs in that same tx — taking "the first Transfer in this
+  // tx" pairs every one of those Mints with the SAME (wrong) tokenId. The periphery contract's
+  // mint() calls pool.mint() before minting the NFT, so within one sub-call the Transfer's log
+  // index always immediately follows its own Mint's log index; picking the closest Transfer
+  // AFTER this specific Mint log correctly pairs each position with its own tokenId. Live-
+  // verified bug: without this, three unrelated positions in the same batch tx all resolved to
+  // the first Transfer's tokenId, and the real UNCX-locked position never appeared at all.
+  const mintLogIndex = mintLog.logIndex;
+  const mintTransfer =
+    mintLogIndex === null
+      ? undefined
+      : transferLogs
+          .filter(
+            (log) =>
+              log.transactionHash === mintLog.transactionHash &&
+              log.topics.length >= 4 &&
+              log.logIndex !== null &&
+              log.logIndex > mintLogIndex
+          )
+          .sort((a, b) => (a.logIndex ?? 0) - (b.logIndex ?? 0))[0];
   if (!mintTransfer) {
     return unresolved();
   }
