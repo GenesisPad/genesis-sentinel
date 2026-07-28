@@ -27,11 +27,10 @@ jobs:
           CONTABO_SSH_KEY: ${{ secrets.CONTABO_SSH_KEY }}
           API_ADMIN_SECRET: ${{ secrets.API_ADMIN_SECRET }}
           TELEGRAM_ADMIN_IDS: ${{ secrets.TELEGRAM_ADMIN_IDS }}
-          DWELLIR_API_KEY: ${{ secrets.DWELLIR_API_KEY }}
         run: |
           set -e
           missing=0
-          for key in CONTABO_HOST CONTABO_USER CONTABO_SSH_KEY API_ADMIN_SECRET DWELLIR_API_KEY; do
+          for key in CONTABO_HOST CONTABO_USER CONTABO_SSH_KEY API_ADMIN_SECRET; do
             if [ -z "${!key}" ]; then
               echo "Missing GitHub secret: $key"
               missing=1
@@ -104,6 +103,7 @@ jobs:
             REDIS_URL=
             ROBINHOOD_RPC_URL=
             ROBINHOOD_FALLBACK_RPC_URLS=
+            DWELLIR_API_KEY=
             ARC_RPC_URL=https://rpc.blockdaemon.mainnet.arc.io
             ARC_FALLBACK_RPC_URLS=
             STABLE_RPC_URL=https://stable.drpc.org
@@ -123,6 +123,16 @@ jobs:
             SENTRY_DSN=
             ENV
               echo "Created $ENV_FILE. Fill DATABASE_URL and REDIS_URL, then rerun deploy."
+              exit 1
+            fi
+
+            # Prefer a GitHub Actions secret when configured, otherwise read the key from the
+            # server's persisted production environment. Do not print the credential.
+            if [ -z "${DWELLIR_API_KEY:-}" ]; then
+              DWELLIR_API_KEY="$(sed -n 's/^DWELLIR_API_KEY=//p' "$ENV_FILE" | tail -n 1)"
+            fi
+            if [ -z "$DWELLIR_API_KEY" ]; then
+              echo "Missing DWELLIR_API_KEY in GitHub Actions secrets and $ENV_FILE"
               exit 1
             fi
 
