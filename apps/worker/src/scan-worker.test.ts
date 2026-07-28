@@ -632,6 +632,65 @@ describe("scan worker orchestration", () => {
     expect(calls.some((call) => /^risk:(HIGH|CRITICAL):/u.test(call))).toBe(true);
   });
 
+  it("scores a zero-allowance pool transferFrom bypass as critical after ownership renouncement", async () => {
+    const { repository, calls } = createRepository();
+    const tokenAddress = "0x0000000000000000000000000000000000000001";
+    const pairAddress = "0x00000000000000000000000000000000000000f1";
+    const deployerAddress = "0x0000000000000000000000000000000000000dd1";
+    let probedAuthorities: `0x${string}`[] | undefined;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = fetchUrl(input);
+      const body = url.includes(`/addresses/${tokenAddress}`)
+        ? { creator_address_hash: deployerAddress, is_verified: false }
+        : url.includes("/holders") ? { items: [] }
+          : url.includes(`/tokens/${tokenAddress}`)
+            ? { name: "Rug Token", symbol: "RUG", decimals: "9", total_supply: "1000000000000000000", holders_count: "1" }
+            : url.includes("/tokens/") ? { exchange_rate: "1" } : { items: [] };
+      return Promise.resolve(new Response(JSON.stringify(body), {
+        status: 200, headers: { "content-type": "application/json" }
+      }));
+    });
+
+    await processScanJob(
+      { data: { scanId: "scan-pool-seizure", chainId: 4663, address: tokenAddress } },
+      {
+        scans: repository,
+        getChainAdapter() {
+          return createAdapter("0x6000", {
+            name: "Robinhood Chain",
+            ownerAddress: "0x0000000000000000000000000000000000000000",
+            onReadContract(parameters) {
+              if (parameters.functionName === "getPair") {
+                return parameters.args?.[1] === "0x0bd7d308f8e1639fab988df18a8011f41eacad73"
+                  ? pairAddress : "0x0000000000000000000000000000000000000000";
+              }
+              if (parameters.functionName === "getReserves") return [10n ** 18n, 10n ** 18n, 0];
+              if (parameters.functionName === "token0") return tokenAddress;
+              if (parameters.functionName === "totalSupply") return 1_000_000n;
+              if (parameters.functionName === "allowance" || parameters.functionName === "balanceOf") return 0n;
+              return undefined;
+            },
+            onTraceCall(parameters) {
+              return parameters.data?.startsWith("0x23b872dd") ? `0x${"0".repeat(63)}1` : "0x";
+            }
+          });
+        },
+        forkTradeSimulator(input) {
+          probedAuthorities = input.privilegedAddresses;
+          return Promise.resolve({
+            simulationTool: "0.1.0-ganache-fork", canBuy: true, canSell: true,
+            isHoneypot: false, buyTaxBps: 0, sellTaxBps: 0
+          });
+        },
+        now: () => new Date("2026-07-28T00:00:00.000Z")
+      }
+    );
+
+    expect(probedAuthorities).toContain(deployerAddress);
+    expect(calls).toContain("detector:pool-balance-seizure-simulation:1");
+    expect(calls.some((call) => /^risk:CRITICAL:(9[8-9]|100)$/u.test(call))).toBe(true);
+  });
+
   it("does not report the deployer seeding its own liquidity pool as a supply transfer to a wallet", async () => {
     // Reproduces a real, live scan bug: the deployer sends ~100% of supply to the token's own
     // pool to seed trading (completely normal launch behavior), but the wallet-clustering

@@ -47,6 +47,11 @@ import {
 import { NEGLIGIBLE_LIQUIDITY_USD as negligibleLiquidityUsd, scannerVersion } from "@genesis-sentinel/shared";
 import type { BytecodeReuseView, RelatedWalletEdge } from "@genesis-sentinel/shared";
 
+const poolTransferFromProbeAbi = parseAbi([
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function transferFrom(address from, address to, uint256 value) returns (bool)"
+]);
+
 const sentinelStaticCallWallet = "0x0000000000000000000000000000000000001001" as const;
 
 const ownableAbi = parseAbi(["function owner() view returns (address)"]);
@@ -390,6 +395,73 @@ function buildHoneypotDetectorResult(input: {
   };
 }
 
+/** A renounced owner is not protection when transferFrom has a separate deployer/role bypass.
+ * Debiting a V2 pair with zero allowance enables the attacker to sync an artificial price and
+ * sell the seized tokens back for the quote reserve, even when the LP tokens are burned. */
+function createPoolBalanceSeizureDetectorResult(input: {
+  address: `0x${string}`;
+  blockNumber: bigint;
+  simulations: SimulationResult[];
+}): DetectorResult | null {
+  const run = input.simulations.find((candidate) => candidate.kind === "BUY");
+  if (!run || !isPlainRecord(run.result)) return null;
+  const directProbe = run.result.poolTransferFromBypass;
+  const forkProbe = isPlainRecord(run.result.forkSimulation)
+    ? run.result.forkSimulation.poolTransferFromBypass
+    : undefined;
+  const probe = isPlainRecord(directProbe) ? directProbe : forkProbe;
+  if (!isPlainRecord(probe) || probe.detected !== true) return null;
+
+  const caller = typeof probe.caller === "string" ? probe.caller : "unknown privileged address";
+  const poolAddress = typeof probe.poolAddress === "string" ? probe.poolAddress : "unknown pool";
+  const amountRaw = typeof probe.amountRaw === "string" ? probe.amountRaw : "unknown";
+  const detector: DetectorMetadata = {
+    id: "pool-balance-seizure-simulation",
+    version: "0.1.0",
+    name: "Pool balance seizure simulation",
+    description: "Tests whether a known privileged address can transfer tokens out of a liquidity pair without allowance."
+  };
+  const evidence = {
+    type: "SIMULATION" as const,
+    summary: "A privileged address can move tokens out of the liquidity pool with zero allowance.",
+    address: input.address,
+    blockNumber: input.blockNumber,
+    data: {
+      caller,
+      poolAddress,
+      amountRaw,
+      allowanceRaw: probe.allowanceRaw ?? null,
+      poolBalanceBeforeRaw: probe.poolBalanceBeforeRaw ?? null,
+      poolBalanceAfterRaw: probe.poolBalanceAfterRaw ?? null,
+      transactionHash: probe.transactionHash ?? null,
+      simulationTool: probe.probeType ?? run.simulationTool
+    }
+  };
+
+  return {
+    detector,
+    checks: [{
+      code: "POOL_BALANCE_SEIZURE_CONFIRMED",
+      outcome: "DETECTED",
+      confidence: "HIGH",
+      evidence: [evidence]
+    }],
+    findings: [{
+      code: "POOL_BALANCE_SEIZURE_BACKDOOR",
+      detectorId: detector.id,
+      detectorVersion: detector.version,
+      title: "Confirmed backdoor can seize tokens from the liquidity pool",
+      severity: "CRITICAL",
+      category: "LIQUIDITY_SAFETY",
+      confidence: "HIGH",
+      description: `${caller} can debit pool ${poolAddress} through transferFrom despite having zero allowance.`,
+      technicalExplanation: "This ERC-20 allowance bypass can remove the token reserve, distort the price through sync(), then drain the quote reserve by selling the seized tokens back. LP locks or burned LP tokens do not prevent it.",
+      evidence: [evidence],
+      recommendation: "Do not trade this token. Renounced ownership and burned LP tokens do not neutralize this independently authorized backdoor."
+    }]
+  };
+}
+
 /**
  * Buy/sell tax percentages are measured by trade simulation (fork-simulator.ts) and shown
  * directly in the report ("Buy Tax 40.0%"), but were never converted into a scored finding — the
@@ -646,6 +718,7 @@ async function createRobinhoodRouteTradeSimulations(input: {
   tokenDecimals: number | null;
   pools: DiscoveredPool[];
   holderSnapshot: DiscoveredHolderSnapshot | null;
+  privilegedAddresses?: `0x${string}`[];
 }): Promise<SimulationResult[]> {
   const pool = selectDeepestPool(
     input.pools.filter(
@@ -761,6 +834,16 @@ async function createRobinhoodRouteTradeSimulations(input: {
     amountRaw: sellTokenAmount,
     holderSnapshot: input.holderSnapshot
   });
+  const poolTransferFromBypass =
+    !isV3 && !isV4 && input.privilegedAddresses?.length
+      ? await staticCallPoolTransferFromBypass(input.adapter, {
+          tokenAddress: input.tokenAddress,
+          pairAddress: pool.poolAddress,
+          blockNumber: input.blockNumber,
+          pairBalanceRaw: finalReserveToken,
+          privilegedAddresses: input.privilegedAddresses
+        })
+      : undefined;
   // Why the fork did or didn't run is recorded rather than swallowed. Silently discarding this
   // hid a fork-simulator crash for every scan: honeypot and tax simply read "unknown" forever
   // with nothing anywhere saying the simulator had failed rather than been skipped.
@@ -787,6 +870,7 @@ async function createRobinhoodRouteTradeSimulations(input: {
           reserveQuoteRaw: finalReserveQuote,
           buyQuoteAmountRaw: buyQuoteAmount,
           expectedBuyTokenOutRaw: buyOutput,
+          ...(input.privilegedAddresses?.length ? { privilegedAddresses: input.privilegedAddresses } : {}),
           ...(v4PoolManagerAddress ? { v4PoolManagerAddress } : {}),
           ...(v4StateViewAddress ? { v4StateViewAddress } : {}),
           ...(v4PoolId ? { v4PoolId } : {}),
@@ -860,6 +944,7 @@ async function createRobinhoodRouteTradeSimulations(input: {
       reserveQuoteRaw: finalReserveQuote.toString(),
       staticCall: buyStaticCall,
       forkSimulation: forkResult,
+      ...(poolTransferFromBypass ? { poolTransferFromBypass } : {}),
       buyTaxBps: forkResult?.buyTaxBps ?? null,
       isHoneypot: forkResult?.isHoneypot ?? null
     },
@@ -952,6 +1037,61 @@ async function createRobinhoodRouteTradeSimulations(input: {
         };
 
   return [buySimulation, sellSimulation, transferSimulation];
+}
+
+async function staticCallPoolTransferFromBypass(
+  adapter: ChainAdapter,
+  input: {
+    tokenAddress: `0x${string}`;
+    pairAddress: `0x${string}`;
+    blockNumber: bigint;
+    pairBalanceRaw: bigint;
+    privilegedAddresses: `0x${string}`[];
+  }
+): Promise<Record<string, unknown>> {
+  const amount = input.pairBalanceRaw / 1_000n > 0n ? input.pairBalanceRaw / 1_000n : 1n;
+  const candidates = [...new Set(input.privilegedAddresses.map((address) => address.toLowerCase()))] as `0x${string}`[];
+  let tested = false;
+
+  for (const caller of candidates) {
+    try {
+      const allowance = await adapter.readContract<bigint>({
+        address: input.tokenAddress,
+        abi: poolTransferFromProbeAbi,
+        functionName: "allowance",
+        args: [input.pairAddress, caller],
+        blockNumber: input.blockNumber
+      });
+      if (allowance !== 0n || !adapter.traceCall) continue;
+      tested = true;
+      const result = await adapter.traceCall({
+        from: caller,
+        to: input.tokenAddress,
+        data: encodeFunctionData({
+          abi: poolTransferFromProbeAbi,
+          functionName: "transferFrom",
+          args: [input.pairAddress, caller, amount]
+        }),
+        blockNumber: input.blockNumber
+      });
+      if (typeof result.raw === "string" && /^0x0*1$/iu.test(result.raw)) {
+        return {
+          tested: true,
+          detected: true,
+          caller,
+          poolAddress: input.pairAddress,
+          amountRaw: amount.toString(),
+          allowanceRaw: allowance.toString(),
+          poolBalanceBeforeRaw: input.pairBalanceRaw.toString(),
+          probeType: "historical-eth-call"
+        };
+      }
+    } catch {
+      // A standards-compliant ERC-20 is expected to revert this zero-allowance call.
+    }
+  }
+
+  return { tested, detected: false, poolAddress: input.pairAddress, probeType: "historical-eth-call" };
 }
 
 function selectDeepestPool(pools: DiscoveredPool[]): DiscoveredPool | null {
@@ -1611,6 +1751,8 @@ export interface ForkTradeSimulatorInput {
   reserveQuoteRaw: bigint;
   buyQuoteAmountRaw: bigint;
   expectedBuyTokenOutRaw: bigint;
+  /** Known authority candidates used only for a zero-allowance V2 pair debit probe. */
+  privilegedAddresses?: `0x${string}`[];
   /** Uniswap V4 PoolKey identity fields plus the PoolManager singleton's own address — required
    * when `dex` is "Uniswap V4". V4 has no per-pool contract to route a swap through; the fork
    * simulator instead deploys a small helper contract that executes the PoolManager's
@@ -1652,6 +1794,18 @@ export interface ForkTradeSimulatorResult {
   transferSucceeded?: boolean;
   transferTaxBps?: number | null;
   transferTxHash?: `0x${string}`;
+  poolTransferFromBypass?: {
+    tested: boolean;
+    detected: boolean;
+    caller?: `0x${string}`;
+    poolAddress: `0x${string}`;
+    amountRaw?: string;
+    allowanceRaw?: string;
+    poolBalanceBeforeRaw?: string;
+    poolBalanceAfterRaw?: string;
+    transactionHash?: `0x${string}`;
+    error?: string;
+  };
 }
 
 export type ForkTradeSimulator = (
@@ -2184,7 +2338,15 @@ export async function processScanJob(
             blockNumber,
             tokenDecimals: tokenProfile.decimals,
             pools: discoveredPools,
-            holderSnapshot
+            holderSnapshot,
+            privilegedAddresses: [...new Set(
+              [effectiveDeployerAddress, ownerAddressForEdges]
+                .filter((address): address is `0x${string}` =>
+                  address !== null && address !== undefined &&
+                  address.toLowerCase() !== "0x0000000000000000000000000000000000000000"
+                )
+                .map((address) => address.toLowerCase() as `0x${string}`)
+            )]
           })
         : createUnsupportedTradeSimulations({
             chainId: target.chainId,
@@ -2226,6 +2388,21 @@ export async function processScanJob(
       await dependencies.scans.recordDetectorResult({
         scanId: target.scanId,
         result: honeypotDetectorResult,
+        startedAt: now(),
+        completedAt: now()
+      });
+    }
+
+    const poolBalanceSeizureDetectorResult = createPoolBalanceSeizureDetectorResult({
+      address: target.address,
+      blockNumber,
+      simulations
+    });
+    if (poolBalanceSeizureDetectorResult) {
+      holderDetectorResults.push(poolBalanceSeizureDetectorResult);
+      await dependencies.scans.recordDetectorResult({
+        scanId: target.scanId,
+        result: poolBalanceSeizureDetectorResult,
         startedAt: now(),
         completedAt: now()
       });
