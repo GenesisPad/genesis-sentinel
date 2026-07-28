@@ -453,6 +453,56 @@ interface V3PositionCustodyResolution {
   currentOwnerIsContract: boolean | null;
 }
 
+// Commercial RPC providers (Dwellir included) reject eth_getLogs over an unbounded range —
+// querying fromBlock 0 against a chain at block 21M+ is not a "slow query", it is a rejected
+// request. Live-verified gap: this exact fromBlock:0n query against production silently
+// resolved to zero logs (caught by the blanket .catch below) for a real pool, so
+// v3PositionCustodyDetector reported DATA_UNAVAILABLE and never flagged $PIPEDOG at all.
+// Scanning backward in bounded chunks finds a recently created pool's Mint(s) in only a few
+// requests while staying under typical provider range caps.
+const v3MintLogChunkBlocks = 2_000n;
+const v3MintLogMaxChunks = 50;
+
+/**
+ * Scans backward from the current block in bounded windows for this pool's Mint events,
+ * stopping one chunk after the first hit (to also capture a mint just before it) rather than
+ * scanning the pool's entire history once its liquidity-creation window has been located. A
+ * pool older than ~100,000 blocks (chunk size x max chunks) without any Mint found in that
+ * window returns no logs — a known limitation, not a claim that no Mint ever happened.
+ */
+async function fetchV3PoolMintLogs(
+  adapter: ChainAdapter,
+  poolAddress: `0x${string}`,
+  blockNumber: bigint
+): Promise<ChainLog[]> {
+  const collected: ChainLog[] = [];
+  let toBlock = blockNumber;
+  let chunksScanned = 0;
+  let foundAtChunk = -1;
+
+  while (chunksScanned < v3MintLogMaxChunks) {
+    const fromBlock = toBlock > v3MintLogChunkBlocks ? toBlock - v3MintLogChunkBlocks + 1n : 0n;
+    const logs = await adapter
+      .getLogs({
+        address: poolAddress,
+        fromBlock,
+        toBlock,
+        topics: [uniswapV3PoolMintTopic]
+      })
+      .catch(() => []);
+    collected.push(...logs);
+    chunksScanned += 1;
+    if (logs.length > 0 && foundAtChunk === -1) {
+      foundAtChunk = chunksScanned;
+    }
+    if (foundAtChunk !== -1 && chunksScanned >= foundAtChunk + 1) break;
+    if (fromBlock === 0n) break;
+    toBlock = fromBlock - 1n;
+  }
+
+  return collected;
+}
+
 /**
  * Determines who currently controls a Uniswap V3 pool's liquidity: the largest historical
  * Mint's `owner` (normally the NonfungiblePositionManager that wraps positions as NFTs, but a
@@ -480,14 +530,7 @@ async function resolveV3PositionCustody(
     currentOwnerIsContract: null
   };
 
-  const mintLogs = await adapter
-    .getLogs({
-      address: poolAddress,
-      fromBlock: 0n,
-      toBlock: blockNumber,
-      topics: [uniswapV3PoolMintTopic]
-    })
-    .catch(() => []);
+  const mintLogs = await fetchV3PoolMintLogs(adapter, poolAddress, blockNumber);
   if (mintLogs.length === 0) return unresolved;
 
   const decodedMints = mintLogs
