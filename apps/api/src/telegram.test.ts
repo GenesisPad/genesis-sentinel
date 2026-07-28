@@ -699,6 +699,57 @@ describe("telegram scan helpers", () => {
     expect(reply).toContain("Dex: Paid");
   });
 
+  it("shows the project's DexScreener social/website links as plain hyperlinked text, not buttons", () => {
+    const result: ScanResultView = {
+      scan: {
+        scanId: "scan-socials",
+        chainId: 4663,
+        address: "0x0000000000000000000000000000000000000003",
+        state: "COMPLETED",
+        scannerVersion: "0.1.0-foundation",
+        submittedAt: "2026-07-27T00:00:00.000Z",
+        message: "Scan state is COMPLETED."
+      },
+      token: {
+        chainId: 4663,
+        address: "0x0000000000000000000000000000000000000003",
+        name: "Social Token",
+        symbol: "SOC",
+        socials: [
+          { type: "telegram", url: "https://t.me/example" },
+          { type: "twitter", url: "https://x.com/example" },
+          { type: "discord", url: "https://discord.gg/example" }
+        ],
+        websites: [{ label: "Website", url: "https://example.com" }]
+      },
+      detectorChecks: [],
+      findings: [],
+      liquidity: { status: "UNSUPPORTED", pools: [], message: "n/a" },
+      holders: { status: "UNSUPPORTED", snapshots: [], message: "n/a" },
+      simulations: [],
+      risk: {
+        chainId: 4663,
+        address: "0x0000000000000000000000000000000000000003",
+        scannerVersion: "0.1.0-foundation",
+        status: "UNABLE_TO_ASSESS",
+        level: "UNABLE_TO_ASSESS",
+        score: null,
+        confidence: "LOW",
+        categoryScores: [],
+        findingContributions: [],
+        unableToAssessReasons: [],
+        findingCounts: { INFO: 0, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 },
+        message: "No detector findings were produced for this scan."
+      }
+    };
+
+    const reply = formatTelegramResultReply(result);
+
+    expect(reply).toContain(
+      "🔗 [TG](https://t.me/example) | [X](https://x.com/example) | [Discord](https://discord.gg/example) | [Web](https://example.com)"
+    );
+  });
+
   it("resolves a DexScreener chart URL from the highest-liquidity pool, or undefined when none exist", () => {
     const withPools: ScanResultView["liquidity"] = {
       status: "AVAILABLE",

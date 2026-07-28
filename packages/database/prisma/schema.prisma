@@ -123,6 +123,11 @@ model Token {
   /// this address — the real, documented meaning of the "DEX Paid" badge shown on DexScreener
   /// itself. Null when unknown (no market provider configured, or the lookup failed).
   dexPaid           Boolean?
+  /// Social links (Twitter/X, Telegram, Discord, etc.) from the project's own DexScreener token
+  /// profile, as a JSON array of {type, url}. Null when none are known.
+  socials           Json?
+  /// Website links from the same DexScreener token profile, as a JSON array of {label, url}.
+  websites          Json?
   metadataBlock     BigInt?
   metadataUpdatedAt DateTime?
   createdAt         DateTime  @default(now())

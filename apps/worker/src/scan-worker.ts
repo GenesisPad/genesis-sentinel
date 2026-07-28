@@ -2371,7 +2371,9 @@ async function collectTokenProfile(
       priceUsd: null,
       marketCapUsd: null,
       volume24hUsd: null,
-      dexPaid: null
+      dexPaid: null,
+      socials: null,
+      websites: null
     };
   }
 
@@ -2410,7 +2412,10 @@ async function collectTokenProfile(
     priceUsd: explorer?.priceUsd ?? market?.priceUsd ?? null,
     marketCapUsd: explorer?.marketCapUsd ?? market?.marketCapUsd ?? null,
     volume24hUsd: explorer?.volume24hUsd ?? market?.volume24hUsd ?? null,
-    dexPaid: market?.dexPaid ?? null
+    dexPaid: market?.dexPaid ?? null,
+    // The explorer (Blockscout) has no social/website data — DexScreener only.
+    socials: market?.socials ?? null,
+    websites: market?.websites ?? null
   };
 }
 

@@ -134,7 +134,9 @@ describe("createMarketRefresher", () => {
       volume24hUsd: "75000",
       liquidityUsd: null,
       pairCreatedAt: null,
-      dexPaid: true
+      dexPaid: true,
+      socials: null,
+      websites: null
     };
     const refresh = createMarketRefresher(() => createProvider(profile));
     const original = createResult();
@@ -165,7 +167,9 @@ describe("createMarketRefresher", () => {
       volume24hUsd: null,
       liquidityUsd: 999,
       pairCreatedAt: null,
-      dexPaid: null
+      dexPaid: null,
+      socials: null,
+      websites: null
     };
     const refresh = createMarketRefresher(() => createProvider(profile));
     const original = createResult();
@@ -181,5 +185,30 @@ describe("createMarketRefresher", () => {
 
     expect(primary?.liquidityData?.totalLiquidityUsd).toBe(999);
     expect(other?.liquidityData?.totalLiquidityUsd).toBe(100);
+  });
+
+  it("refreshes socials and websites live, so a project adding them after the scan still shows up on a cached read", async () => {
+    const profile: MarketProfile = {
+      name: null,
+      symbol: null,
+      iconUrl: null,
+      labels: null,
+      priceUsd: null,
+      marketCapUsd: null,
+      volume24hUsd: null,
+      liquidityUsd: null,
+      pairCreatedAt: null,
+      dexPaid: null,
+      socials: [{ type: "twitter", url: "https://x.com/example" }],
+      websites: [{ label: "Website", url: "https://example.com" }]
+    };
+    const refresh = createMarketRefresher(() => createProvider(profile));
+    const original = createResult();
+    expect(original.token.socials).toBeUndefined();
+
+    const refreshed = await refresh(original);
+
+    expect(refreshed.token.socials).toEqual([{ type: "twitter", url: "https://x.com/example" }]);
+    expect(refreshed.token.websites).toEqual([{ label: "Website", url: "https://example.com" }]);
   });
 });

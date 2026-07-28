@@ -1398,6 +1398,7 @@ export function formatTelegramResultReply(result: ScanResultView): string {
     devClusterLine(summary.devCluster),
     sourceVerifiedLine(result),
     dexPaidLine(result),
+    socialLinksLine(result),
     tokenAgeLine(result),
     "",
     marketLine(result),
@@ -1904,6 +1905,29 @@ function sourceVerifiedLine(result: ScanResultView): string | null {
 function dexPaidLine(result: ScanResultView): string | null {
   if (result.token.dexPaid === undefined) return null;
   return `💳 Dex: ${result.token.dexPaid ? "Paid ✅" : "Not paid"}`;
+}
+
+/** Short, fixed labels for the most common DexScreener social types — kept brief since these
+ * render as plain "TG | X | Web"-style inline text, not buttons. An unrecognized type still
+ * gets a readable capitalized label rather than being dropped. */
+function telegramSocialLabel(type: string): string {
+  const normalized = type.toLowerCase();
+  if (normalized === "twitter" || normalized === "x") return "X";
+  if (normalized === "telegram") return "TG";
+  return type.length > 0 ? `${type[0]!.toUpperCase()}${type.slice(1)}` : type;
+}
+
+/** Sourced from the project's own DexScreener token profile, refreshed live on every cached
+ * read (apps/api/src/market-refresh.ts) so a project adding these after the last scan still
+ * shows up here without needing a rescan. Plain hyperlinked text, not keyboard buttons. */
+function socialLinksLine(result: ScanResultView): string | null {
+  const links = [
+    ...(result.token.socials ?? []).map(
+      (social) => `[${telegramSocialLabel(social.type)}](${social.url})`
+    ),
+    ...(result.token.websites ?? []).map((site) => `[Web](${site.url})`)
+  ];
+  return links.length > 0 ? `🔗 ${links.join(" | ")}` : null;
 }
 
 function formatCapability(result: ScanResultView, kind: "BUY" | "SELL"): string | null {

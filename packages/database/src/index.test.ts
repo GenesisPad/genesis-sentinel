@@ -307,6 +307,8 @@ describe("database readiness", () => {
         marketCapUsd: "1250000",
         volume24hUsd: "50000",
         dexPaid: true,
+        socials: [{ type: "twitter", url: "https://x.com/example" }],
+        websites: [{ label: "Website", url: "https://example.com" }],
         metadataBlock: 123n,
         metadataUpdatedAt: new Date("2026-07-11T00:00:00.000Z"),
         createdAt: new Date("2026-07-11T00:00:00.000Z"),
@@ -327,7 +329,9 @@ describe("database readiness", () => {
       tokenType: "ERC-20",
       iconUrl: "https://example.com/token.png",
       reputation: "ok",
-      priceUsd: "1.25"
+      priceUsd: "1.25",
+      socials: [{ type: "twitter", url: "https://x.com/example" }],
+      websites: [{ label: "Website", url: "https://example.com" }]
     });
   });
 

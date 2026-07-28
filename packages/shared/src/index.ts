@@ -231,6 +231,19 @@ export interface ScanResultView {
   risk: RiskSnapshot;
 }
 
+export interface TokenSocialLink {
+  /** DexScreener's own social type string, e.g. "twitter", "telegram", "discord" — not an enum,
+   * since DexScreener adds new types over time and an unrecognized one should still render as a
+   * generic link. */
+  type: string;
+  url: string;
+}
+
+export interface TokenWebsiteLink {
+  label: string | null;
+  url: string;
+}
+
 export interface TokenProfileView {
   chainId: number;
   address: `0x${string}`;
@@ -254,6 +267,11 @@ export interface TokenProfileView {
   /** Whether DexScreener reports an approved "tokenProfile" order for this token — the
    * documented meaning of its "DEX Paid" badge. Undefined when unknown. */
   dexPaid?: boolean;
+  /** Social links (Twitter/X, Telegram, Discord, etc.) a project has added to its DexScreener
+   * token profile. Undefined when none are known — never fabricated. */
+  socials?: TokenSocialLink[];
+  /** Project website links from the same DexScreener token profile. */
+  websites?: TokenWebsiteLink[];
   metadataUpdatedAt?: string;
 }
 

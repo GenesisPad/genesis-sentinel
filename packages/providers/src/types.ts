@@ -122,6 +122,19 @@ export interface ExplorerProvider {
   getTokenPriceUsd(input: { chainId: number; address: `0x${string}` }): Promise<number | null>;
 }
 
+export interface MarketProfileSocialLink {
+  /** DexScreener's own social type string, e.g. "twitter", "telegram", "discord". Not an enum —
+   * DexScreener adds new types over time and an unrecognized one should still render as a
+   * generic link rather than being dropped. */
+  type: string;
+  url: string;
+}
+
+export interface MarketProfileWebsite {
+  label: string | null;
+  url: string;
+}
+
 export interface MarketProfile {
   name: string | null;
   symbol: string | null;
@@ -135,6 +148,11 @@ export interface MarketProfile {
   /** Whether DexScreener reports an approved "tokenProfile" order for this token — the
    * documented meaning of its "DEX Paid" badge. Null when the lookup is unavailable/failed. */
   dexPaid: boolean | null;
+  /** Social links (Twitter/X, Telegram, Discord, etc.) a project has added to its DexScreener
+   * token profile. Null when unavailable, never fabricated. */
+  socials: MarketProfileSocialLink[] | null;
+  /** Project website links from the same DexScreener token profile. Null when unavailable. */
+  websites: MarketProfileWebsite[] | null;
 }
 
 export interface MarketDataProvider {

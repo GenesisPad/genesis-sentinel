@@ -5,6 +5,7 @@ import type { TokenMeta } from "@/lib/types";
 import { CHAINS } from "@/lib/chains";
 import { shortAddress, timeAgo } from "@/lib/utils";
 import { cn } from "@/lib/utils";
+import { SocialLinks } from "./social-links";
 
 export function TokenHeader({
   token,
@@ -101,6 +102,7 @@ export function TokenHeader({
           ) : null}
           {token.dexPaid === true ? <span className="text-primary">Dex · Paid</span> : null}
           {token.dexPaid === false ? <span className="text-faint">Dex · Not Paid</span> : null}
+          <SocialLinks socials={token.socials} websites={token.websites} />
         </div>
         {profileFacts.length > 0 ? (
           <p className="mt-1 break-words text-xs text-faint [overflow-wrap:anywhere]">

@@ -5,11 +5,11 @@ export type RefreshVolatileFields = (result: ScanResultView) => Promise<ScanResu
 
 /**
  * Refreshes only the volatile, fast-changing fields of an already-persisted scan result — price,
- * market cap, 24h volume, dex-paid status, and the primary pool's own liquidity figure — via a
- * live DexScreener lookup, while leaving every detector finding, control check, holder snapshot,
- * and simulation result exactly as persisted. This is what lets a cached read stay fast and free
- * of RPC/worker cost for the expensive parts, while still showing current numbers for the parts
- * that genuinely change minute to minute.
+ * market cap, 24h volume, dex-paid status, social/website links, and the primary pool's own
+ * liquidity figure — via a live DexScreener lookup, while leaving every detector finding, control
+ * check, holder snapshot, and simulation result exactly as persisted. This is what lets a cached
+ * read stay fast and free of RPC/worker cost for the expensive parts, while still showing current
+ * numbers for the parts that genuinely change minute to minute.
  *
  * Deliberately DexScreener-only, not the full explorer-then-market precedence chain a real scan
  * uses (see collectTokenProfile in apps/worker/src/scan-worker.ts) — that would mean adding a
@@ -43,7 +43,12 @@ export function createMarketRefresher(
       ...(profile.priceUsd != null ? { priceUsd: profile.priceUsd } : {}),
       ...(profile.marketCapUsd != null ? { marketCapUsd: profile.marketCapUsd } : {}),
       ...(profile.volume24hUsd != null ? { volume24hUsd: profile.volume24hUsd } : {}),
-      ...(profile.dexPaid != null ? { dexPaid: profile.dexPaid } : {})
+      ...(profile.dexPaid != null ? { dexPaid: profile.dexPaid } : {}),
+      // A project can add/update its socials or website on DexScreener at any time after
+      // Sentinel's last scan — refreshed live on every cached read, same as price/market cap,
+      // rather than frozen at whatever was (or wasn't) set when the token was first scanned.
+      ...(profile.socials != null ? { socials: profile.socials } : {}),
+      ...(profile.websites != null ? { websites: profile.websites } : {})
     };
 
     const primaryPool =

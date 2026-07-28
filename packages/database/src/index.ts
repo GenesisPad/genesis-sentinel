@@ -32,6 +32,8 @@ import {
   type ScanState,
   type ScanStageStatus,
   type TokenProfileView,
+  type TokenSocialLink,
+  type TokenWebsiteLink,
   type OwnershipStatus,
   type PublicAnalyticsView,
   type SecurityFindingView,
@@ -227,6 +229,8 @@ export interface RecordTokenProfileInput {
   marketCapUsd?: string | null;
   volume24hUsd?: string | null;
   dexPaid?: boolean | null;
+  socials?: TokenSocialLink[] | null;
+  websites?: TokenWebsiteLink[] | null;
 }
 
 export interface RecordDetectorResultInput {
@@ -664,6 +668,8 @@ export function createScanRepository(db: PrismaDatabase): ScanRepository {
         marketCapUsd: input.marketCapUsd ?? null,
         volume24hUsd: input.volume24hUsd ?? null,
         dexPaid: input.dexPaid ?? null,
+        socials: input.socials ? toJsonValue(input.socials) : Prisma.JsonNull,
+        websites: input.websites ? toJsonValue(input.websites) : Prisma.JsonNull,
         metadataUpdatedAt: now
       };
       const updateData: Prisma.TokenUncheckedUpdateInput = {
@@ -696,6 +702,12 @@ export function createScanRepository(db: PrismaDatabase): ScanRepository {
       if (input.marketCapUsd !== undefined) updateData.marketCapUsd = input.marketCapUsd;
       if (input.volume24hUsd !== undefined) updateData.volume24hUsd = input.volume24hUsd;
       if (input.dexPaid !== undefined) updateData.dexPaid = input.dexPaid;
+      if (input.socials !== undefined) {
+        updateData.socials = input.socials ? toJsonValue(input.socials) : Prisma.JsonNull;
+      }
+      if (input.websites !== undefined) {
+        updateData.websites = input.websites ? toJsonValue(input.websites) : Prisma.JsonNull;
+      }
 
       await db.chain.upsert({
         where: { chainId: input.chainId },
@@ -1716,6 +1728,16 @@ function toTokenProfileView(scan: ScanResultRecord): TokenProfileView {
     profile.reputation = scan.token.reputation;
   }
 
+  const socials = toTokenSocialLinks(scan.token?.socials);
+  if (socials) {
+    profile.socials = socials;
+  }
+
+  const websites = toTokenWebsiteLinks(scan.token?.websites);
+  if (websites) {
+    profile.websites = websites;
+  }
+
   if (ownership.ownerAddress) {
     profile.ownerAddress = ownership.ownerAddress;
   }
@@ -2286,6 +2308,36 @@ function toRecord(value: Prisma.JsonValue): Record<string, unknown> {
   }
 
   return { value };
+}
+
+function asJsonRecord(entry: Prisma.JsonValue): Record<string, unknown> | null {
+  return typeof entry === "object" && entry !== null && !Array.isArray(entry) ? entry : null;
+}
+
+function toTokenSocialLinks(value: Prisma.JsonValue | null | undefined): TokenSocialLink[] | null {
+  if (!Array.isArray(value)) return null;
+  const links = value
+    .map(asJsonRecord)
+    .map((entry): TokenSocialLink | null =>
+      entry && typeof entry.type === "string" && typeof entry.url === "string"
+        ? { type: entry.type, url: entry.url }
+        : null
+    )
+    .filter((link): link is TokenSocialLink => link !== null);
+  return links.length > 0 ? links : null;
+}
+
+function toTokenWebsiteLinks(value: Prisma.JsonValue | null | undefined): TokenWebsiteLink[] | null {
+  if (!Array.isArray(value)) return null;
+  const links = value
+    .map(asJsonRecord)
+    .map((entry): TokenWebsiteLink | null =>
+      entry && typeof entry.url === "string"
+        ? { label: typeof entry.label === "string" ? entry.label : null, url: entry.url }
+        : null
+    )
+    .filter((link): link is TokenWebsiteLink => link !== null);
+  return links.length > 0 ? links : null;
 }
 
 function isEvidenceType(value: unknown): value is FindingEvidenceView["type"] {

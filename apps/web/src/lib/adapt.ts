@@ -498,6 +498,8 @@ function deriveTokenMeta(
     iconUrl: view.token.iconUrl,
     reputation: view.token.reputation,
     dexPaid: view.token.dexPaid,
+    socials: view.token.socials,
+    websites: view.token.websites,
     ownerAddress: view.token.ownerAddress,
     ownershipStatus:
       view.token.ownershipStatus === "RENOUNCED"

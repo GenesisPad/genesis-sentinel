@@ -7,7 +7,12 @@ import {
   stringValue,
   timestampMsDateValue
 } from "./http.js";
-import type { MarketDataProvider, MarketProfile } from "./types.js";
+import type {
+  MarketDataProvider,
+  MarketProfile,
+  MarketProfileSocialLink,
+  MarketProfileWebsite
+} from "./types.js";
 
 export interface DexScreenerChainConfig {
   chainId: number;
@@ -72,12 +77,44 @@ export function createDexScreenerMarketDataProvider(
         volume24hUsd: decimalStringValue(volume.h24),
         liquidityUsd: numberValue(liquidity.usd),
         pairCreatedAt: timestampMsDateValue(bestPair.pairCreatedAt),
-        dexPaid
+        dexPaid,
+        socials: socialsFromInfo(info.socials),
+        websites: websitesFromInfo(info.websites)
       };
 
       return profile;
     }
   };
+}
+
+/** DexScreener's `info.socials`: an array of `{type, url}` (e.g. `{"type":"twitter","url":"..."}`)
+ * a project adds to its own token profile. Null (not []) when the field is missing/malformed, so
+ * "no socials known" stays distinguishable from "confirmed zero socials" upstream. */
+function socialsFromInfo(value: unknown): MarketProfileSocialLink[] | null {
+  if (!Array.isArray(value)) return null;
+  const links = value
+    .filter(isRecord)
+    .map((entry): MarketProfileSocialLink | null => {
+      const type = stringValue(entry.type);
+      const url = stringValue(entry.url);
+      return type && url ? { type, url } : null;
+    })
+    .filter((link): link is MarketProfileSocialLink => link !== null);
+  return links.length > 0 ? links : null;
+}
+
+/** DexScreener's `info.websites`: an array of `{label, url}`. Same null-vs-empty rationale as
+ * socialsFromInfo. */
+function websitesFromInfo(value: unknown): MarketProfileWebsite[] | null {
+  if (!Array.isArray(value)) return null;
+  const links = value
+    .filter(isRecord)
+    .map((entry): MarketProfileWebsite | null => {
+      const url = stringValue(entry.url);
+      return url ? { label: stringValue(entry.label), url } : null;
+    })
+    .filter((link): link is MarketProfileWebsite => link !== null);
+  return links.length > 0 ? links : null;
 }
 
 /**
@@ -110,7 +147,9 @@ async function fetchGeckoTerminalProfile(
     volume24hUsd: decimalStringValue(volume.h24),
     liquidityUsd: null,
     pairCreatedAt: null,
-    dexPaid
+    dexPaid,
+    socials: null,
+    websites: null
   };
 }
 

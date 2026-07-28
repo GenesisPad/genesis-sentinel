@@ -194,6 +194,11 @@ export interface TokenMeta {
   dexPaid?: boolean;
   ownerAddress?: string;
   ownershipStatus?: OwnershipStatus;
+  /** Social links (Twitter/X, Telegram, Discord, etc.) a project has added to its DexScreener
+   * token profile. Undefined when none are known — never fabricated. */
+  socials?: { type: string; url: string }[];
+  /** Project website links from the same DexScreener token profile. */
+  websites?: { label: string | null; url: string }[];
 }
 
 /** Raw per-detector check outcome — the technical view's evidence trail. */

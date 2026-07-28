@@ -73,7 +73,9 @@ export const tokenMetaSchema = z.object({
   iconUrl: z.string().optional(),
   reputation: z.string().optional(),
   ownerAddress: z.string().optional(),
-  ownershipStatus: z.enum(["renounced", "active", "unknown"]).optional()
+  ownershipStatus: z.enum(["renounced", "active", "unknown"]).optional(),
+  socials: z.array(z.object({ type: z.string(), url: z.string() })).optional(),
+  websites: z.array(z.object({ label: z.string().nullable(), url: z.string() })).optional()
 });
 
 export const detectorCheckSchema = z.object({

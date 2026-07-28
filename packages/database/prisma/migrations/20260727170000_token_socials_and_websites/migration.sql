@@ -1,0 +1,2 @@
+ALTER TABLE "Token" ADD COLUMN "socials" JSONB;
+ALTER TABLE "Token" ADD COLUMN "websites" JSONB;
