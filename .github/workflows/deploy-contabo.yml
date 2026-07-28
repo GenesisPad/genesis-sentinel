@@ -46,6 +46,7 @@ jobs:
         env:
           API_ADMIN_SECRET: ${{ secrets.API_ADMIN_SECRET }}
           TELEGRAM_ADMIN_IDS: ${{ secrets.TELEGRAM_ADMIN_IDS }}
+          DWELLIR_API_KEY: ${{ secrets.DWELLIR_API_KEY }}
         with:
           host: ${{ secrets.CONTABO_HOST }}
           username: ${{ secrets.CONTABO_USER }}
@@ -53,7 +54,7 @@ jobs:
           port: ${{ secrets.CONTABO_PORT || '22' }}
           timeout: 30s
           command_timeout: 30m
-          envs: API_ADMIN_SECRET,TELEGRAM_ADMIN_IDS
+          envs: API_ADMIN_SECRET,TELEGRAM_ADMIN_IDS,DWELLIR_API_KEY
           script: |
             set -e
 
@@ -72,6 +73,15 @@ jobs:
                 echo "Missing required env key $key in $ENV_FILE"
                 exit 1
               fi
+            }
+
+            upsert_env_key() {
+              key="$1"
+              value="$2"
+              temporary_file="$(mktemp "${ENV_FILE}.XXXXXX")"
+              awk -v key="$key" '$0 !~ "^" key "=" { print }' "$ENV_FILE" > "$temporary_file"
+              printf '%s=%s\n' "$key" "$value" >> "$temporary_file"
+              mv "$temporary_file" "$ENV_FILE"
             }
 
             mkdir -p "$RELEASE_ROOT" "$SHARED_ROOT"
@@ -93,6 +103,7 @@ jobs:
             REDIS_URL=
             ROBINHOOD_RPC_URL=
             ROBINHOOD_FALLBACK_RPC_URLS=
+            DWELLIR_API_KEY=
             ARC_RPC_URL=https://rpc.blockdaemon.mainnet.arc.io
             ARC_FALLBACK_RPC_URLS=
             STABLE_RPC_URL=https://stable.drpc.org
@@ -111,9 +122,25 @@ jobs:
             SIMULATION_FORK_NATIVE_AMOUNT_WEI=1000000000000000
             SENTRY_DSN=
             ENV
-              echo "Created $ENV_FILE. Fill DATABASE_URL, REDIS_URL, and ROBINHOOD_RPC_URL, then rerun deploy."
+              echo "Created $ENV_FILE. Fill DATABASE_URL and REDIS_URL, then rerun deploy."
               exit 1
             fi
+
+            # Prefer a GitHub Actions secret when configured, otherwise read the key from the
+            # server's persisted production environment. Do not print the credential.
+            if [ -z "${DWELLIR_API_KEY:-}" ]; then
+              DWELLIR_API_KEY="$(sed -n 's/^DWELLIR_API_KEY=//p' "$ENV_FILE" | tail -n 1)"
+            fi
+            if [ -z "$DWELLIR_API_KEY" ]; then
+              echo "Missing DWELLIR_API_KEY in GitHub Actions secrets and $ENV_FILE"
+              exit 1
+            fi
+
+            # Dwellir authenticates with the API key in the URL path. Rebuild this value on
+            # every deploy so an existing release cannot retain an expired provider endpoint.
+            upsert_env_key \
+              ROBINHOOD_RPC_URL \
+              "https://api-robinhood-mainnet-archive.n.dwellir.com/${DWELLIR_API_KEY}"
 
             if [ -n "${API_ADMIN_SECRET:-}" ]; then
               if grep -q "^API_ADMIN_SECRET=" "$ENV_FILE"; then

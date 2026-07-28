@@ -9,7 +9,7 @@ Stage 11 hardens Genesis Sentinel for a private alpha deployment. It does not ma
 - Web service from `infrastructure/docker/Dockerfile.web`.
 - Managed PostgreSQL.
 - Managed Redis.
-- Production-grade Robinhood Chain RPC URL.
+- Dwellir Robinhood Chain archive RPC access.
 - HTTPS ingress or reverse proxy in front of API and web.
 
 ## Required Environment
@@ -19,7 +19,8 @@ Use `.env.example` as the base and set production values:
 - `NODE_ENV=production`
 - `DATABASE_URL`
 - `REDIS_URL`
-- `ROBINHOOD_RPC_URL`
+- `ROBINHOOD_RPC_URL`, using
+  `https://api-robinhood-mainnet-archive.n.dwellir.com/<environment-specific-key>`
 - `NEXT_PUBLIC_API_BASE_URL`
 - `NEXT_PUBLIC_SITE_URL`
 - `API_RATE_LIMIT_MAX`
@@ -40,6 +41,12 @@ GitHub Actions production deployment requires these repository or organization s
 - `CONTABO_USER`
 - `CONTABO_SSH_KEY`
 - `CONTABO_PORT`, only if SSH does not use port 22
+- `DWELLIR_API_KEY`, the production-only key used to construct `ROBINHOOD_RPC_URL`. Store it
+  in `/var/www/genesis-sentinel/shared/.env.production`; a GitHub Actions secret with the same
+  name can optionally override it during deployment.
+
+Use a different Dwellir key in each non-production `.env`; never commit keys or reuse the
+production key for development.
 
 ## Deployment Checks
 
