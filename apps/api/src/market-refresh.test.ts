@@ -187,6 +187,27 @@ describe("createMarketRefresher", () => {
     expect(other?.liquidityData?.totalLiquidityUsd).toBe(100);
   });
 
+  it("promotes a catastrophic live liquidity collapse to a critical finding and score", async () => {
+    const profile: MarketProfile = {
+      name: null, symbol: null, iconUrl: null, labels: null,
+      priceUsd: "0.0001", marketCapUsd: "10000", volume24hUsd: "1000000",
+      liquidityUsd: 0.08, pairCreatedAt: null, dexPaid: null, socials: null, websites: null
+    };
+    const refresh = createMarketRefresher(() => createProvider(profile));
+    const original = createResult();
+    original.liquidity.pools[1]!.liquidityData = { totalLiquidityUsd: 158_696.95 };
+    original.risk = { ...original.risk, status: "AVAILABLE", level: "HIGH", score: 60, confidence: "MEDIUM" };
+
+    const refreshed = await refresh(original);
+
+    expect(refreshed.liquidity.pools[1]?.liquidityData?.totalLiquidityUsd).toBe(0.08);
+    expect(refreshed.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "LIVE_LIQUIDITY_COLLAPSE", severity: "CRITICAL" })
+    ]));
+    expect(refreshed.risk).toMatchObject({ level: "CRITICAL", score: 98, confidence: "HIGH" });
+    expect(refreshed.risk.findingCounts.CRITICAL).toBe(1);
+  });
+
   it("refreshes socials and websites live, so a project adding them after the scan still shows up on a cached read", async () => {
     const profile: MarketProfile = {
       name: null,

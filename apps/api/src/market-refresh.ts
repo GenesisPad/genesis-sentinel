@@ -57,7 +57,7 @@ export function createMarketRefresher(
       return { ...result, token: refreshedToken };
     }
 
-    return {
+    const refreshed = {
       ...result,
       token: refreshedToken,
       liquidity: {
@@ -72,5 +72,80 @@ export function createMarketRefresher(
         )
       }
     };
+    return applyLiveLiquidityCollapse(result, refreshed, primaryPool.poolAddress, profile.liquidityUsd!);
+  };
+}
+
+const LIVE_LIQUIDITY_COLLAPSE_CODE = "LIVE_LIQUIDITY_COLLAPSE";
+const LIVE_LIQUIDITY_COLLAPSE_SCORE = 98;
+
+function applyLiveLiquidityCollapse(
+  persisted: ScanResultView,
+  refreshed: ScanResultView,
+  poolAddress: `0x${string}`,
+  liveLiquidityUsd: number
+): ScanResultView {
+  const persistedPool = persisted.liquidity.pools.find((pool) => pool.poolAddress === poolAddress);
+  const persistedLiquidityUsd = persistedPool?.liquidityData?.totalLiquidityUsd;
+  if (
+    typeof persistedLiquidityUsd !== "number" || !Number.isFinite(persistedLiquidityUsd) ||
+    persistedLiquidityUsd < 1_000 || !Number.isFinite(liveLiquidityUsd) ||
+    liveLiquidityUsd > 500 || liveLiquidityUsd > persistedLiquidityUsd * 0.1
+  ) return refreshed;
+  if (refreshed.findings.some((finding) => finding.code === LIVE_LIQUIDITY_COLLAPSE_CODE)) return refreshed;
+
+  const dropPct = ((persistedLiquidityUsd - liveLiquidityUsd) / persistedLiquidityUsd) * 100;
+  const finding = {
+    id: `live-liquidity-collapse:${poolAddress}`,
+    code: LIVE_LIQUIDITY_COLLAPSE_CODE,
+    detectorId: "live-market-refresh",
+    detectorVersion: "0.1.0",
+    title: "Live liquidity has collapsed",
+    severity: "CRITICAL" as const,
+    category: "LIQUIDITY_SAFETY" as const,
+    confidence: "HIGH" as const,
+    description: `Live liquidity fell ${dropPct.toFixed(1)}% from $${persistedLiquidityUsd.toFixed(2)} at scan time to $${liveLiquidityUsd.toFixed(2)}.`,
+    technicalExplanation: "The cached scan's primary-pool liquidity was compared with the current market value. A greater-than-90% collapse to $500 or less is treated as an active drain/rug signal, regardless of the original contract score.",
+    evidence: [{
+      type: "LIQUIDITY_DATA" as const,
+      summary: "Current primary-pool liquidity is catastrophically below the persisted scan value.",
+      address: poolAddress,
+      data: { persistedLiquidityUsd, liveLiquidityUsd, dropPct }
+    }],
+    recommendation: "Do not trade. Treat this pool as drained until liquidity is independently restored and verified."
+  };
+  const contribution = {
+    code: LIVE_LIQUIDITY_COLLAPSE_CODE,
+    category: "LIQUIDITY_SAFETY" as const,
+    severity: "CRITICAL" as const,
+    confidence: "HIGH" as const,
+    weight: LIVE_LIQUIDITY_COLLAPSE_SCORE
+  };
+  const categoryScores = refreshed.risk.categoryScores.some((category) => category.category === "LIQUIDITY_SAFETY")
+    ? refreshed.risk.categoryScores.map((category) => category.category === "LIQUIDITY_SAFETY"
+        ? { ...category, score: Math.max(category.score, LIVE_LIQUIDITY_COLLAPSE_SCORE), confidence: "HIGH" as const,
+            explanation: "Live market refresh detected a catastrophic primary-pool liquidity collapse." }
+        : category)
+    : [...refreshed.risk.categoryScores, {
+        category: "LIQUIDITY_SAFETY" as const,
+        score: LIVE_LIQUIDITY_COLLAPSE_SCORE,
+        confidence: "HIGH" as const,
+        explanation: "Live market refresh detected a catastrophic primary-pool liquidity collapse."
+      }];
+
+  return {
+    ...refreshed,
+    findings: [...refreshed.findings, finding],
+    risk: {
+      ...refreshed.risk,
+      status: "AVAILABLE",
+      level: "CRITICAL",
+      score: Math.max(refreshed.risk.score ?? 0, LIVE_LIQUIDITY_COLLAPSE_SCORE),
+      confidence: "HIGH",
+      categoryScores,
+      findingContributions: [...refreshed.risk.findingContributions, contribution],
+      findingCounts: { ...refreshed.risk.findingCounts, CRITICAL: refreshed.risk.findingCounts.CRITICAL + 1 },
+      message: "Live liquidity collapse detected after the persisted scan."
+    }
   };
 }

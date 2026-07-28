@@ -64,6 +64,7 @@ export function TokenReportView({
   if (!report) return null;
 
   const sections = view === "trader" ? TRADER_SECTIONS : TECHNICAL_SECTIONS;
+  const staleSecuritySnapshot = Boolean(report.cachedAt);
 
   return (
     <main className="mx-auto min-w-0 max-w-[1360px] px-4 pb-20 sm:px-7">
@@ -99,6 +100,17 @@ export function TokenReportView({
           {rerunError ? <p className="text-xs text-danger">Fresh scan failed. Try again in a moment.</p> : null}
         </div>
       </Card>
+      {staleSecuritySnapshot ? (
+        <div role="alert" className="mt-3 flex items-start gap-3 rounded-xl border border-danger/40 bg-danger/10 p-4 text-sm">
+          <AlertTriangle className="mt-0.5 size-5 shrink-0 text-danger" aria-hidden />
+          <div>
+            <p className="font-bold text-danger">This is a saved security snapshot</p>
+            <p className="mt-1 text-secondary">
+              Contract privileges and trade simulations are not continuously monitored. Do not rely on this score for a current trade until you rerun the scan. A live liquidity collapse will be promoted to Critical when the market feed detects it.
+            </p>
+          </div>
+        </div>
+      ) : null}
       <p className="mt-2 text-xs text-muted">
         {view === "trader"
           ? "Fast answers for a buy/sell decision. Switch to Technical View for raw evidence."
