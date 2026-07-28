@@ -84,6 +84,24 @@ jobs:
               mv "$temporary_file" "$ENV_FILE"
             }
 
+            read_env_value() {
+              key="$1"
+              file="$2"
+              [ -f "$file" ] || return 0
+              awk -v key="$key" '
+                $0 ~ "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" {
+                  value = $0
+                  sub("^[^=]*=[[:space:]]*", "", value)
+                  sub("[[:space:]]*$", "", value)
+                  if ((substr(value, 1, 1) == "\"" && substr(value, length(value), 1) == "\"") ||
+                      (substr(value, 1, 1) == "\047" && substr(value, length(value), 1) == "\047")) {
+                    value = substr(value, 2, length(value) - 2)
+                  }
+                }
+                END { print value }
+              ' "$file"
+            }
+
             mkdir -p "$RELEASE_ROOT" "$SHARED_ROOT"
 
             if [ ! -f "$ENV_FILE" ]; then
@@ -126,21 +144,47 @@ jobs:
               exit 1
             fi
 
-            # Prefer a GitHub Actions secret when configured, otherwise read the key from the
-            # server's persisted production environment. Do not print the credential.
+            # Prefer a GitHub Actions secret when configured. Otherwise locate the server-side
+            # value in the persisted or legacy production env files. Do not print credentials.
             if [ -z "${DWELLIR_API_KEY:-}" ]; then
-              DWELLIR_API_KEY="$(sed -n 's/^DWELLIR_API_KEY=//p' "$ENV_FILE" | tail -n 1)"
-            fi
-            if [ -z "$DWELLIR_API_KEY" ]; then
-              echo "Missing DWELLIR_API_KEY in GitHub Actions secrets and $ENV_FILE"
-              exit 1
+              for candidate in \
+                "$ENV_FILE" \
+                "$SHARED_ROOT/.env" \
+                "$APP_ROOT/.env.production" \
+                "$APP_ROOT/.env" \
+                "$CURRENT_LINK/.env.production" \
+                "$CURRENT_LINK/.env"; do
+                DWELLIR_API_KEY="$(read_env_value DWELLIR_API_KEY "$candidate")"
+                [ -n "$DWELLIR_API_KEY" ] && break
+              done
             fi
 
-            # Dwellir authenticates with the API key in the URL path. Rebuild this value on
-            # every deploy so an existing release cannot retain an expired provider endpoint.
-            upsert_env_key \
-              ROBINHOOD_RPC_URL \
-              "https://api-robinhood-mainnet-archive.n.dwellir.com/${DWELLIR_API_KEY}"
+            if [ -n "$DWELLIR_API_KEY" ]; then
+              upsert_env_key DWELLIR_API_KEY "$DWELLIR_API_KEY"
+              upsert_env_key \
+                ROBINHOOD_RPC_URL \
+                "https://api-robinhood-mainnet-archive.n.dwellir.com/${DWELLIR_API_KEY}"
+            else
+              for candidate in \
+                "$ENV_FILE" \
+                "$SHARED_ROOT/.env" \
+                "$APP_ROOT/.env.production" \
+                "$APP_ROOT/.env" \
+                "$CURRENT_LINK/.env.production" \
+                "$CURRENT_LINK/.env"; do
+                existing_rpc_url="$(read_env_value ROBINHOOD_RPC_URL "$candidate")"
+                [ -n "$existing_rpc_url" ] && break
+              done
+              case "$existing_rpc_url" in
+                https://api-robinhood-mainnet-archive.n.dwellir.com/*)
+                  upsert_env_key ROBINHOOD_RPC_URL "$existing_rpc_url"
+                  ;;
+                *)
+                  echo "Missing DWELLIR_API_KEY and no complete Dwellir ROBINHOOD_RPC_URL was found"
+                  exit 1
+                  ;;
+              esac
+            fi
 
             if [ -n "${API_ADMIN_SECRET:-}" ]; then
               if grep -q "^API_ADMIN_SECRET=" "$ENV_FILE"; then
