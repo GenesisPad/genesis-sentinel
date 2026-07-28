@@ -33,6 +33,10 @@ export function redactRpcCredentials(value: unknown): unknown {
   return value;
 }
 
+function serializeError(error: unknown): unknown {
+  return redactRpcCredentials(error instanceof Error ? pino.stdSerializers.err(error) : error);
+}
+
 export function createLogger(env: Pick<AppEnv, "LOG_LEVEL" | "NODE_ENV">, service: string): Logger {
   const options: LoggerOptions = {
     base: {
@@ -44,8 +48,8 @@ export function createLogger(env: Pick<AppEnv, "LOG_LEVEL" | "NODE_ENV">, servic
       censor: "[redacted]"
     },
     serializers: {
-      err: (error) => redactRpcCredentials(pino.stdSerializers.err(error)),
-      error: (error) => redactRpcCredentials(pino.stdSerializers.err(error))
+      err: serializeError,
+      error: serializeError
     }
   };
 
