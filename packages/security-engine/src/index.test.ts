@@ -2104,6 +2104,7 @@ describe("v3 position custody detector", () => {
               tokenId: "471688",
               currentOwnerAddress: "0x1112b8c161119d4f866e4c21bacf0eeb3a1c91d9" as const,
               currentOwnerIsContract: false,
+              currentOwnerLockerLabel: null,
               liquidityRaw: "2134690521568425074304"
             }
           ])
@@ -2127,6 +2128,7 @@ describe("v3 position custody detector", () => {
               tokenId: "1",
               currentOwnerAddress: "0x00000000000000000000000000000000000000cc" as const,
               currentOwnerIsContract: true,
+              currentOwnerLockerLabel: null,
               liquidityRaw: "1000000"
             }
           ])
@@ -2149,6 +2151,7 @@ describe("v3 position custody detector", () => {
               tokenId: "2",
               currentOwnerAddress: "0x000000000000000000000000000000000000dead" as const,
               currentOwnerIsContract: false,
+              currentOwnerLockerLabel: null,
               liquidityRaw: "1000000"
             }
           ])
@@ -2170,6 +2173,7 @@ describe("v3 position custody detector", () => {
               tokenId: null,
               currentOwnerAddress: "0x1112b8c161119d4f866e4c21bacf0eeb3a1c91d9" as const,
               currentOwnerIsContract: false,
+              currentOwnerLockerLabel: null,
               liquidityRaw: "500000"
             }
           ])
@@ -2188,6 +2192,48 @@ describe("v3 position custody detector", () => {
 
     expect(result.findings).toHaveLength(0);
     expect(result.checks[0]?.outcome).toBe("DATA_UNAVAILABLE");
+  });
+
+  it("reports a real UNCX lock as INFO without suppressing a separate wallet-held position on the same pool (pipedog-style)", async () => {
+    const result = await v3PositionCustodyDetector.run(
+      {
+        readPositionCustody: () =>
+          Promise.resolve([
+            {
+              poolAddress: "0xb7f10f74b39291b9290b779978e19a7637c742d6" as const,
+              mintOwnerAddress: "0x73991a25c818bf1f1128deaab1492d45638de0d3" as const,
+              tokenId: "470003",
+              currentOwnerAddress: "0xf28704c691290547924e2129d407da36bda8ce0f" as const,
+              currentOwnerIsContract: true,
+              currentOwnerLockerLabel: "UNCX_LiquidityLocker_UniV3",
+              liquidityRaw: "1787504052991699032807727"
+            },
+            {
+              poolAddress: "0xb7f10f74b39291b9290b779978e19a7637c742d6" as const,
+              mintOwnerAddress: "0x73991a25c818bf1f1128deaab1492d45638de0d3" as const,
+              tokenId: "470692",
+              currentOwnerAddress: "0xa359e6190740930bb65e611b553724b0ce73e814" as const,
+              currentOwnerIsContract: false,
+              currentOwnerLockerLabel: null,
+              liquidityRaw: "676091525868340561187277"
+            }
+          ])
+      },
+      context
+    );
+
+    const codes = result.findings.map((finding) => finding.code);
+    expect(codes).toContain("V3_POSITION_HELD_BY_WALLET");
+    expect(codes).toContain("V3_POSITION_LOCKED_BY_KNOWN_LOCKER");
+
+    const walletFinding = result.findings.find((finding) => finding.code === "V3_POSITION_HELD_BY_WALLET");
+    expect(walletFinding?.severity).toBe("CRITICAL");
+    expect(walletFinding?.description).toContain("UNCX_LiquidityLocker_UniV3");
+
+    const lockFinding = result.findings.find(
+      (finding) => finding.code === "V3_POSITION_LOCKED_BY_KNOWN_LOCKER"
+    );
+    expect(lockFinding?.severity).toBe("INFO");
   });
 });
 

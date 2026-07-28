@@ -82,6 +82,18 @@ const erc721TransferEvent = parseAbiItem(
 const erc721TransferTopic = toEventSelector(erc721TransferEvent);
 const zeroAddressTopic = addressToTopic("0x0000000000000000000000000000000000000000");
 const erc721OwnerOfAbi = parseAbi(["function ownerOf(uint256 tokenId) view returns (address)"]);
+const positionManagerPositionsAbi = parseAbi([
+  "function positions(uint256 tokenId) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)"
+]);
+
+// Real, third-party Uniswap V3 position lockers seen holding launch liquidity on Robinhood
+// Chain. A position held by one of these contracts is genuinely locked — verified independently
+// via Blockscout (contract name + creation record), never inferred from a website claim. Keep
+// this list to services actually confirmed on this chain; an unrecognized contract holder is
+// reported as "unknown custody", not assumed safe.
+const knownV3PositionLockers: Record<string, string> = {
+  "0xf28704c691290547924e2129d407da36bda8ce0f": "UNCX_LiquidityLocker_UniV3"
+};
 
 export type QuoteTokenPriceLookup = (address: `0x${string}`) => Promise<number | null>;
 
@@ -408,13 +420,8 @@ async function discoverUniswapV3Pool(
     quotePriceUsd !== null
       ? (Number(quoteBalance) / 10 ** quote.decimals) * 2 * quotePriceUsd
       : null;
-  const positionCustody = await resolveV3PositionCustody(adapter, poolAddress, blockNumber).catch(
-    (): V3PositionCustodyResolution => ({
-      mintOwnerAddress: null,
-      tokenId: null,
-      currentOwnerAddress: null,
-      currentOwnerIsContract: null
-    })
+  const positions = await resolveV3PositionCustody(adapter, poolAddress, blockNumber).catch(
+    (): V3PositionCustodyEntry[] => []
   );
 
   return {
@@ -430,10 +437,11 @@ async function discoverUniswapV3Pool(
       token1,
       fee,
       feeTier,
-      positionManagerAddress: positionCustody.mintOwnerAddress,
-      positionTokenId: positionCustody.tokenId,
-      positionOwnerAddress: positionCustody.currentOwnerAddress,
-      positionOwnerIsContract: positionCustody.currentOwnerIsContract,
+      // One entry per distinct position (tickLower/tickUpper) found on this pool within the
+      // scanned window — a pool can have both a genuinely locked position (e.g. via UNCX) and a
+      // separate, unrelated position still held by a plain wallet at the same time. Reporting
+      // only a single "dominant" custodian would hide that split. See V3PositionCustodyEntry.
+      positions,
       liquidityRaw: liquidity.toString(),
       sqrtPriceX96Raw: slot0[0].toString(),
       tick: slot0[1],
@@ -446,11 +454,20 @@ async function discoverUniswapV3Pool(
   };
 }
 
-interface V3PositionCustodyResolution {
+interface V3PositionCustodyEntry {
   mintOwnerAddress: `0x${string}` | null;
   tokenId: string | null;
   currentOwnerAddress: `0x${string}` | null;
   currentOwnerIsContract: boolean | null;
+  /** Set when currentOwnerAddress matches a known third-party locker (see
+   * knownV3PositionLockers) — a genuine, verified lock, distinct from an unrecognized contract
+   * or a plain wallet. Null when the holder is not a recognized locker. */
+  currentOwnerLockerLabel: string | null;
+  /** This position's own live liquidity (positions().liquidity for an NFT-wrapped position,
+   * or the raw pool.mint() amount when there is no position manager at all) — NOT the pool's
+   * total liquidity. Lets a fully closed/withdrawn position (0) be told apart from one still
+   * holding real value. */
+  liquidityRaw: string;
 }
 
 // Commercial RPC providers (Dwellir included) reject eth_getLogs over an unbounded range —
@@ -517,35 +534,37 @@ async function fetchV3PoolMintLogs(
   return collected;
 }
 
+// Bounds how many distinct positions get resolved per pool. A pool with many small third-party
+// LPs could otherwise surface a long tail of dust positions; the launch/team positions that
+// matter for custody are the ones with meaningful liquidity, which sorting by mint amount and
+// capping surfaces first.
+const v3MaxPositionsResolvedPerPool = 6;
+
 /**
- * Determines who currently controls a Uniswap V3 pool's liquidity: the largest historical
- * Mint's `owner` (normally the NonfungiblePositionManager that wraps positions as NFTs, but a
- * raw pool.mint() call bypassing any position manager reports the direct caller instead), and,
- * when that owner is a contract, the CURRENT holder of the resulting position NFT via a live
- * ownerOf() call — not just who it was minted to, since a position can be transferred after
- * minting (e.g. into a locker). This codebase does not hardcode a canonical PositionManager
- * address (per ADR 0020/0021), so the position manager itself is discovered from the pool's own
- * Mint event rather than assumed.
+ * Determines who currently controls each distinct liquidity position on a Uniswap V3 pool — not
+ * just a single "dominant" one. A pool can have both a genuinely locked position (e.g. sent to a
+ * known locker like UNCX) and a separate, unrelated position still held by a plain wallet at the
+ * same time; collapsing that down to one custodian would misreport a partially-locked pool as
+ * either fully locked or fully unlocked. Positions are distinguished by their pool-level Mint
+ * event's (owner, tickLower, tickUpper) — each unique combination is a distinct position, since
+ * that is exactly how the pool itself tracks them internally.
  *
- * A dominant-Mint heuristic (largest single Mint by liquidity amount) is used rather than full
- * historical reconciliation of every position ever opened against this pool — sufficient to
- * flag "who currently controls the bulk of this pool's liquidity" without requiring a full
- * position-by-position ledger.
+ * For a contract-owned mint (normally the NonfungiblePositionManager that wraps positions as
+ * NFTs), the tokenId is resolved from the position's creation Mint's own transaction (via its
+ * ERC-721 Transfer-from-zero log), then the CURRENT holder is read live via ownerOf() — not just
+ * who it was minted to, since a position can be transferred after minting (e.g. into a locker) —
+ * and current liquidity via positions(tokenId), not the historical mint amount, so a position
+ * that has since been fully withdrawn reads as 0 rather than its stale original size. This
+ * codebase does not hardcode a canonical PositionManager address (per ADR 0020/0021), so it is
+ * discovered from the pool's own Mint event rather than assumed.
  */
 async function resolveV3PositionCustody(
   adapter: ChainAdapter,
   poolAddress: `0x${string}`,
   blockNumber: bigint
-): Promise<V3PositionCustodyResolution> {
-  const unresolved: V3PositionCustodyResolution = {
-    mintOwnerAddress: null,
-    tokenId: null,
-    currentOwnerAddress: null,
-    currentOwnerIsContract: null
-  };
-
+): Promise<V3PositionCustodyEntry[]> {
   const mintLogs = await fetchV3PoolMintLogs(adapter, poolAddress, blockNumber);
-  if (mintLogs.length === 0) return unresolved;
+  if (mintLogs.length === 0) return [];
 
   const decodedMints = mintLogs
     .map((log) => {
@@ -556,87 +575,146 @@ async function resolveV3PositionCustody(
           topics: log.topics as [Hex, ...Hex[]],
           eventName: "Mint"
         });
-        return { log, amount: decoded.args.amount, owner: decoded.args.owner };
+        return {
+          log,
+          amount: decoded.args.amount,
+          owner: decoded.args.owner,
+          tickLower: decoded.args.tickLower,
+          tickUpper: decoded.args.tickUpper
+        };
       } catch {
         return null;
       }
     })
-    .filter(
-      (entry): entry is { log: ChainLog; amount: bigint; owner: `0x${string}` } => entry !== null
-    );
-  if (decodedMints.length === 0) return unresolved;
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+  if (decodedMints.length === 0) return [];
 
-  const dominant = decodedMints.reduce((largest, entry) =>
-    entry.amount > largest.amount ? entry : largest
+  // Each distinct (owner, tickLower, tickUpper) is a separate position. Keep the EARLIEST Mint
+  // per group (its transaction is the one that actually minted the wrapping NFT, if any — a
+  // later increaseLiquidity() call reuses the existing tokenId and mints no new Transfer), and
+  // sum amounts per group only to rank by size below, not as the position's current liquidity.
+  const groups = new Map<string, { log: ChainLog; owner: `0x${string}`; totalAmount: bigint }>();
+  for (const mint of decodedMints) {
+    const key = `${mint.owner.toLowerCase()}-${mint.tickLower}-${mint.tickUpper}`;
+    const existing = groups.get(key);
+    if (!existing) {
+      groups.set(key, { log: mint.log, owner: mint.owner, totalAmount: mint.amount });
+      continue;
+    }
+    existing.totalAmount += mint.amount;
+    const existingBlock = existing.log.blockNumber;
+    if (mint.log.blockNumber !== null && (existingBlock === null || mint.log.blockNumber < existingBlock)) {
+      existing.log = mint.log;
+    }
+  }
+
+  const rankedGroups = [...groups.values()]
+    .sort((a, b) => (b.totalAmount > a.totalAmount ? 1 : b.totalAmount < a.totalAmount ? -1 : 0))
+    .slice(0, v3MaxPositionsResolvedPerPool);
+
+  return Promise.all(
+    rankedGroups.map((group) => resolveOneV3Position(adapter, group.owner, group.log, blockNumber))
   );
-  const mintOwnerAddress = dominant.owner;
+}
+
+async function resolveOneV3Position(
+  adapter: ChainAdapter,
+  mintOwnerAddress: `0x${string}`,
+  mintLog: ChainLog,
+  blockNumber: bigint
+): Promise<V3PositionCustodyEntry> {
+  const unresolved = (overrides: Partial<V3PositionCustodyEntry> = {}): V3PositionCustodyEntry => ({
+    mintOwnerAddress,
+    tokenId: null,
+    currentOwnerAddress: null,
+    currentOwnerIsContract: null,
+    currentOwnerLockerLabel: null,
+    liquidityRaw: "0",
+    ...overrides
+  });
 
   const mintOwnerCode = await adapter
     .getBytecode({ address: mintOwnerAddress, blockNumber })
     .catch((): Hex => "0x");
   if (mintOwnerCode === "0x") {
     // No position manager involved: this address called pool.mint() directly and holds the raw
-    // position itself, with no NFT abstraction to transfer custody through.
-    return {
-      mintOwnerAddress,
-      tokenId: null,
+    // position itself, with no NFT abstraction to transfer custody through. There is no cheap
+    // "current liquidity" read for a raw (owner,tickLower,tickUpper) position outside the pool's
+    // own internal accounting, so the original mint amount is reported as a best-effort estimate.
+    return unresolved({
       currentOwnerAddress: mintOwnerAddress,
       currentOwnerIsContract: false
-    };
+    });
   }
 
-  if (!dominant.log.transactionHash || dominant.log.blockNumber === null) {
-    return { mintOwnerAddress, tokenId: null, currentOwnerAddress: null, currentOwnerIsContract: null };
+  if (!mintLog.transactionHash || mintLog.blockNumber === null) {
+    return unresolved();
   }
 
   const transferLogs = await adapter
     .getLogs({
       address: mintOwnerAddress,
-      fromBlock: dominant.log.blockNumber,
-      toBlock: dominant.log.blockNumber,
+      fromBlock: mintLog.blockNumber,
+      toBlock: mintLog.blockNumber,
       topics: [erc721TransferTopic, zeroAddressTopic]
     })
     .catch(() => []);
   const mintTransfer = transferLogs.find(
-    (log) => log.transactionHash === dominant.log.transactionHash && log.topics.length >= 4
+    (log) => log.transactionHash === mintLog.transactionHash && log.topics.length >= 4
   );
   if (!mintTransfer) {
-    return { mintOwnerAddress, tokenId: null, currentOwnerAddress: null, currentOwnerIsContract: null };
+    return unresolved();
   }
 
   const tokenIdTopic = mintTransfer.topics[3];
   if (!tokenIdTopic) {
-    return { mintOwnerAddress, tokenId: null, currentOwnerAddress: null, currentOwnerIsContract: null };
+    return unresolved();
   }
   const tokenId = BigInt(tokenIdTopic);
 
-  const currentOwnerAddress = await adapter
-    .readContract<`0x${string}`>({
-      address: mintOwnerAddress,
-      abi: erc721OwnerOfAbi,
-      functionName: "ownerOf",
-      args: [tokenId],
-      blockNumber
-    })
-    .catch(() => null);
+  const [currentOwnerAddress, positionState] = await Promise.all([
+    adapter
+      .readContract<`0x${string}`>({
+        address: mintOwnerAddress,
+        abi: erc721OwnerOfAbi,
+        functionName: "ownerOf",
+        args: [tokenId],
+        blockNumber
+      })
+      .catch(() => null),
+    adapter
+      .readContract<readonly [bigint, `0x${string}`, `0x${string}`, `0x${string}`, number, number, number, bigint, bigint, bigint, bigint, bigint]>(
+        {
+          address: mintOwnerAddress,
+          abi: positionManagerPositionsAbi,
+          functionName: "positions",
+          args: [tokenId],
+          blockNumber
+        }
+      )
+      .catch(() => null)
+  ]);
+  const liquidityRaw = (positionState?.[7] ?? 0n).toString();
+
   if (!currentOwnerAddress) {
-    return {
-      mintOwnerAddress,
-      tokenId: tokenId.toString(),
-      currentOwnerAddress: null,
-      currentOwnerIsContract: null
-    };
+    return unresolved({ tokenId: tokenId.toString(), liquidityRaw });
   }
 
   const currentOwnerCode = await adapter
     .getBytecode({ address: currentOwnerAddress, blockNumber })
     .catch((): Hex => "0x");
+  const currentOwnerIsContract = currentOwnerCode !== "0x";
+  const currentOwnerLockerLabel = currentOwnerIsContract
+    ? (knownV3PositionLockers[currentOwnerAddress.toLowerCase()] ?? null)
+    : null;
 
   return {
     mintOwnerAddress,
     tokenId: tokenId.toString(),
     currentOwnerAddress,
-    currentOwnerIsContract: currentOwnerCode !== "0x"
+    currentOwnerIsContract,
+    currentOwnerLockerLabel,
+    liquidityRaw
   };
 }
 

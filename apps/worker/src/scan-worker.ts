@@ -14,6 +14,7 @@ import {
   type ProviderSet,
   addressValue,
   bigintFromRecord,
+  isRecord,
   numberFromRecord
 } from "@genesis-sentinel/providers";
 import type {
@@ -1654,10 +1655,12 @@ async function readPoolReserveSamples(
 }
 
 /**
- * Extracts each discovered V3 pool's already-resolved position-custody fields (see
+ * Extracts each discovered V3 pool's already-resolved per-position custody entries (see
  * resolveV3PositionCustody in @genesis-sentinel/providers' robinhood-liquidity.ts, which
- * performs the on-chain Mint-event/ownerOf() lookups once during pool discovery) into the
- * shape v3PositionCustodyDetector expects — a pure mapping, no further on-chain reads here.
+ * performs the on-chain Mint-event/ownerOf()/positions() lookups once during pool discovery)
+ * into the shape v3PositionCustodyDetector expects — a pure mapping, no further on-chain reads
+ * here. A single pool can yield multiple samples: one per distinct position found, since a pool
+ * can have both a genuinely locked position and a separate wallet-held one at the same time.
  */
 function readV3PositionCustodySamples(pools: DiscoveredPool[] | null): V3PositionCustodySample[] | null {
   if (!pools || pools.length === 0) return null;
@@ -1665,23 +1668,26 @@ function readV3PositionCustodySamples(pools: DiscoveredPool[] | null): V3Positio
   const samples: V3PositionCustodySample[] = [];
   for (const pool of pools) {
     if (pool.liquidityData.protocol !== "UNISWAP_V3") continue;
-    const liquidityRaw = bigintFromRecord(pool.liquidityData, "liquidityRaw");
-    if (liquidityRaw === null) continue;
+    const positions = pool.liquidityData.positions;
+    if (!Array.isArray(positions)) continue;
 
-    samples.push({
-      poolAddress: pool.poolAddress,
-      mintOwnerAddress: addressValue(pool.liquidityData.positionManagerAddress),
-      tokenId:
-        typeof pool.liquidityData.positionTokenId === "string"
-          ? pool.liquidityData.positionTokenId
-          : null,
-      currentOwnerAddress: addressValue(pool.liquidityData.positionOwnerAddress),
-      currentOwnerIsContract:
-        typeof pool.liquidityData.positionOwnerIsContract === "boolean"
-          ? pool.liquidityData.positionOwnerIsContract
-          : null,
-      liquidityRaw: liquidityRaw.toString()
-    });
+    for (const position of positions) {
+      if (!isRecord(position)) continue;
+      const liquidityRaw = bigintFromRecord(position, "liquidityRaw");
+      if (liquidityRaw === null) continue;
+
+      samples.push({
+        poolAddress: pool.poolAddress,
+        mintOwnerAddress: addressValue(position.mintOwnerAddress),
+        tokenId: typeof position.tokenId === "string" ? position.tokenId : null,
+        currentOwnerAddress: addressValue(position.currentOwnerAddress),
+        currentOwnerIsContract:
+          typeof position.currentOwnerIsContract === "boolean" ? position.currentOwnerIsContract : null,
+        currentOwnerLockerLabel:
+          typeof position.currentOwnerLockerLabel === "string" ? position.currentOwnerLockerLabel : null,
+        liquidityRaw: liquidityRaw.toString()
+      });
+    }
   }
 
   return samples.length > 0 ? samples : null;

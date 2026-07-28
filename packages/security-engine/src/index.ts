@@ -2509,6 +2509,12 @@ export interface V3PositionCustodySample {
   /** Whether currentOwnerAddress has contract bytecode, read live via getBytecode. Null when the
    * current owner could not be resolved. */
   currentOwnerIsContract: boolean | null;
+  /** Set when currentOwnerAddress matches a recognized third-party locker (e.g. UNCX) — a
+   * genuine, independently-verified lock, not inferred from a website claim. Null when the
+   * holder is not a recognized locker (including when it is a plain wallet). */
+  currentOwnerLockerLabel: string | null;
+  /** This position's own current liquidity — not the pool's total — so a fully withdrawn
+   * position reads as 0 rather than a stale historical size. */
   liquidityRaw: string;
 }
 
@@ -2517,17 +2523,21 @@ export interface V3PositionCustodyDetectorInput {
 }
 
 /**
- * Uniswap V3 liquidity is custodied by whoever holds the position's NFT — there is no protocol-
+ * Uniswap V3 liquidity is custodied by whoever holds each position's NFT — there is no protocol-
  * level equivalent of burning a V2 LP token to prove liquidity can't be pulled. A position held
  * by a plain wallet (not a locker/vault contract, and not a burn address) can be fully withdrawn
  * and sold by that single wallet at any time, with none of the token-contract-level red flags
- * (owner, mint, tax) a source-code review would catch.
+ * (owner, mint, tax) a source-code review would catch. A single pool can have MULTIPLE distinct
+ * positions at once — one genuinely locked via a known third-party locker, another still held by
+ * a plain wallet — so this reports per-position custody rather than one verdict for the whole
+ * pool; a real lock on one position never suppresses a finding on a separate, wallet-held one.
  *
- * Verified live against $PIPEDOG on Robinhood Chain: a ~$9.6M V3 position's NFT was minted
- * directly to a plain EOA, and none of Sentinel's other detectors covered this — the existing
- * Genesis Locker check only understands V2 LP tokens (see genesis-locker.ts), and
- * genesispadLaunchDetector only fires for tokens launched through GenesisPad's own registry.
- * This detector closes that gap independent of both.
+ * Verified live against $PIPEDOG on Robinhood Chain: alongside a real, verified UNCX-locked
+ * position, a SEPARATE ~$1.3M-liquidity-unit V3 position was held directly by the token's own
+ * deployer wallet — an EOA, confirmed via live getBytecode(). None of Sentinel's other detectors
+ * covered this — the existing Genesis Locker check only understands V2 LP tokens (see
+ * genesis-locker.ts), and genesispadLaunchDetector only fires for tokens launched through
+ * GenesisPad's own registry. This detector closes that gap independent of both.
  */
 export const v3PositionCustodyDetector: SecurityDetector<V3PositionCustodyDetectorInput> = {
   metadata: {
@@ -2535,7 +2545,7 @@ export const v3PositionCustodyDetector: SecurityDetector<V3PositionCustodyDetect
     version: detectorVersion,
     name: "Uniswap V3 position custody",
     description:
-      "Checks who currently holds the Uniswap V3 liquidity position NFT (or raw pool.mint() caller) for this token's pools."
+      "Checks who currently holds each Uniswap V3 liquidity position NFT (or raw pool.mint() caller) for this token's pools."
   },
 
   async run(input, context) {
@@ -2565,39 +2575,71 @@ export const v3PositionCustodyDetector: SecurityDetector<V3PositionCustodyDetect
       };
     }
 
-    const walletHeld = samples.filter((sample) => {
-      if (sample.currentOwnerIsContract !== false || sample.currentOwnerAddress === null) {
-        return false;
-      }
-      if (v3PositionCustodyKnownBurnOrZeroAddresses.has(sample.currentOwnerAddress.toLowerCase())) {
-        return false;
-      }
+    const withLiquidity = samples.filter((sample) => {
       const liquidity = parseRawAmount(sample.liquidityRaw);
       return liquidity !== null && liquidity > 0n;
     });
+    const walletHeld = withLiquidity.filter((sample) => {
+      if (sample.currentOwnerIsContract !== false || sample.currentOwnerAddress === null) {
+        return false;
+      }
+      return !v3PositionCustodyKnownBurnOrZeroAddresses.has(sample.currentOwnerAddress.toLowerCase());
+    });
+    const lockedByKnownLocker = withLiquidity.filter(
+      (sample) => sample.currentOwnerLockerLabel !== null
+    );
 
     const findings: SecurityFinding[] = [];
     if (walletHeld.length > 0) {
       const findingEvidence: FindingEvidence = {
         ...evidence,
         summary: "V3 positions whose current holder is a plain wallet, not a contract",
-        data: { samples, walletHeld }
+        data: { samples, walletHeld, lockedByKnownLocker }
       };
+      const lockerNote =
+        lockedByKnownLocker.length > 0
+          ? ` Separately, this pool also has ${lockedByKnownLocker.length} position(s) confirmed locked via ${[...new Set(lockedByKnownLocker.map((sample) => sample.currentOwnerLockerLabel))].join(", ")} — that lock does not cover the wallet-held position(s) reported here.`
+          : "";
       findings.push(
         createFinding({
           code: "V3_POSITION_HELD_BY_WALLET",
           detector: this.metadata,
-          title: "Liquidity position held by a plain wallet, not locked",
+          title:
+            lockedByKnownLocker.length > 0
+              ? "Part of this pool's liquidity is still held by a plain wallet, not locked"
+              : "Liquidity position held by a plain wallet, not locked",
           severity: "CRITICAL",
           category: "LIQUIDITY_SAFETY",
           confidence: "HIGH",
           description:
-            "This token's Uniswap V3 liquidity position NFT is currently held by a plain wallet rather than a locker/vault contract or a burn address. Uniswap V3 has no protocol-level equivalent of burning a V2 LP token — whoever holds the position NFT can withdraw and sell the entire pool at any time.",
+            `At least one Uniswap V3 liquidity position on this pool is currently held by a plain wallet rather than a locker/vault contract or a burn address. Uniswap V3 has no protocol-level equivalent of burning a V2 LP token — whoever holds that position's NFT can withdraw and sell it at any time.${lockerNote}`,
           technicalExplanation:
-            "The position's current holder was read live at the scan block (ownerOf() on the position manager, or the direct pool.mint() caller when no position manager wraps the position) and its bytecode was checked live via getBytecode(); an empty result means it is a plain externally-owned account, not a contract.",
+            "Each position's current holder was read live at the scan block (ownerOf() on the position manager, or the direct pool.mint() caller when no position manager wraps the position) and its bytecode was checked live via getBytecode(); an empty result means it is a plain externally-owned account, not a contract. Positions are resolved and reported independently, so a genuine lock on one position is never used to explain away a different, wallet-held position on the same pool.",
           evidence: [findingEvidence],
           recommendation:
-            "Treat this pool's liquidity as unlocked and withdrawable at will by the holding wallet. A clean token contract or renounced ownership elsewhere does not mean the liquidity itself is safe."
+            "Treat the wallet-held position(s) as unlocked and withdrawable at will by the holding wallet, regardless of any other liquidity in this pool confirmed locked elsewhere. A clean token contract or renounced ownership elsewhere does not mean this liquidity is safe."
+        })
+      );
+    }
+
+    if (lockedByKnownLocker.length > 0) {
+      const findingEvidence: FindingEvidence = {
+        ...evidence,
+        summary: "V3 positions confirmed held by a recognized third-party locker",
+        data: { samples, lockedByKnownLocker }
+      };
+      findings.push(
+        createFinding({
+          code: "V3_POSITION_LOCKED_BY_KNOWN_LOCKER",
+          detector: this.metadata,
+          title: "Part of this pool's liquidity is confirmed locked",
+          severity: "INFO",
+          category: "LIQUIDITY_SAFETY",
+          confidence: "HIGH",
+          description: `${lockedByKnownLocker.length} liquidity position(s) on this pool are held by ${[...new Set(lockedByKnownLocker.map((sample) => sample.currentOwnerLockerLabel))].join(", ")}, a recognized third-party locker — confirmed live via on-chain ownerOf(), not a website claim.`,
+          technicalExplanation:
+            "The position's current holder (ownerOf()) was matched against a list of independently-verified locker contracts. This only confirms custody of the specific position(s) listed in evidence — it says nothing about any other position on the same pool.",
+          evidence: [findingEvidence]
         })
       );
     }
