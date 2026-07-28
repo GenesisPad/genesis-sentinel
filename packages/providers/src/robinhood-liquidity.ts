@@ -589,40 +589,100 @@ async function resolveV3PositionCustody(
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
   if (decodedMints.length === 0) return [];
 
-  // Each distinct (owner, tickLower, tickUpper) is a separate position. Keep the EARLIEST Mint
-  // per group (its transaction is the one that actually minted the wrapping NFT, if any — a
-  // later increaseLiquidity() call reuses the existing tokenId and mints no new Transfer), and
-  // sum amounts per group only to rank by size below, not as the position's current liquidity.
-  const groups = new Map<string, { log: ChainLog; owner: `0x${string}`; totalAmount: bigint }>();
-  for (const mint of decodedMints) {
-    const key = `${mint.owner.toLowerCase()}-${mint.tickLower}-${mint.tickUpper}`;
-    const existing = groups.get(key);
-    if (!existing) {
-      groups.set(key, { log: mint.log, owner: mint.owner, totalAmount: mint.amount });
-      continue;
-    }
-    existing.totalAmount += mint.amount;
-    if (isEarlierLog(mint.log, existing.log)) {
-      existing.log = mint.log;
-    }
-  }
-
   function isEarlierLog(a: ChainLog, b: ChainLog): boolean {
     if (a.blockNumber === null || b.blockNumber === null) return false;
     if (a.blockNumber !== b.blockNumber) return a.blockNumber < b.blockNumber;
     return (a.logIndex ?? 0) < (b.logIndex ?? 0);
   }
 
-  const rankedGroups = [...groups.values()]
-    .sort((a, b) => (b.totalAmount > a.totalAmount ? 1 : b.totalAmount < a.totalAmount ? -1 : 0))
-    .slice(0, v3MaxPositionsResolvedPerPool);
-
-  return Promise.all(
-    rankedGroups.map((group) => resolveOneV3Position(adapter, group.owner, group.log, blockNumber))
+  // A pool-level Mint event only carries (owner, tickLower, tickUpper) — grouping distinct
+  // positions by that tuple alone breaks the moment two DIFFERENT depositors happen to pick the
+  // exact same range, which full-range (-887200/887200) is a common default for. Live-verified
+  // against $PIPEDOG: several unrelated small full-range deposits shared the exact tick range of
+  // the real UNCX-locked position, so grouping by tick range either merged them (hiding whichever
+  // lost the "earliest log" tie-break) or let dust entries crowd the real one out of the ranked
+  // top N. A position's only true unique identity is its NFT tokenId, so contract-owned mints
+  // are resolved individually and deduplicated by tokenId instead.
+  const uniqueOwners = [...new Set(decodedMints.map((mint) => mint.owner.toLowerCase()))];
+  const ownerIsContract = new Map<string, boolean>();
+  await Promise.all(
+    uniqueOwners.map(async (owner) => {
+      const code = await adapter.getBytecode({ address: owner as `0x${string}`, blockNumber }).catch(
+        (): Hex => "0x"
+      );
+      ownerIsContract.set(owner, code !== "0x");
+    })
   );
+
+  const rawMints = decodedMints.filter((mint) => ownerIsContract.get(mint.owner.toLowerCase()) === false);
+  const contractMints = decodedMints.filter((mint) => ownerIsContract.get(mint.owner.toLowerCase()) === true);
+
+  // Raw (non-NFT) positions have no tokenId at all, so (owner, tickLower, tickUpper) is the best
+  // available identity for them — collisions here would mean two different EOAs independently
+  // calling pool.mint() directly with the exact same range, an unusual enough case to accept.
+  const rawGroups = new Map<string, { log: ChainLog; owner: `0x${string}` }>();
+  for (const mint of rawMints) {
+    const key = `${mint.owner.toLowerCase()}-${mint.tickLower}-${mint.tickUpper}`;
+    const existing = rawGroups.get(key);
+    if (!existing || isEarlierLog(mint.log, existing.log)) {
+      rawGroups.set(key, { log: mint.log, owner: mint.owner });
+    }
+  }
+  const rawEntries: V3PositionCustodyEntry[] = [...rawGroups.values()].map((group) => ({
+    mintOwnerAddress: group.owner,
+    tokenId: null,
+    currentOwnerAddress: group.owner,
+    currentOwnerIsContract: false,
+    currentOwnerLockerLabel: null,
+    // No cheap "current liquidity" read exists for a raw (owner,tickLower,tickUpper) position
+    // outside the pool's own internal accounting; the historical mint amount is reported as a
+    // best-effort estimate rather than left blank.
+    liquidityRaw: group.log.data ? (decodeMintAmount(group.log) ?? 0n).toString() : "0"
+  }));
+
+  // Rank contract-owned candidates by their own mint amount before resolving (each resolution
+  // costs several RPC calls), capped at v3MaxPositionsResolvedPerPool. Ranking by an individual
+  // Mint's own amount is now meaningful again since it's no longer summed across unrelated
+  // depositors sharing a tick range.
+  const rankedContractMints = [...contractMints]
+    .sort((a, b) => (b.amount > a.amount ? 1 : b.amount < a.amount ? -1 : 0))
+    .slice(0, v3MaxPositionsResolvedPerPool * 2);
+
+  const resolvedContractEntries = await Promise.all(
+    rankedContractMints.map((mint) => resolveOneV3NftPosition(adapter, mint.owner, mint.log, blockNumber))
+  );
+
+  const seenTokenIds = new Set<string>();
+  const contractEntries: V3PositionCustodyEntry[] = [];
+  for (const entry of resolvedContractEntries) {
+    // No Transfer pairing found means this Mint was a later increaseLiquidity() on a tokenId
+    // whose original creation mint is (or isn't) captured elsewhere in this same scan — either
+    // way it carries no new tokenId to report, so it is skipped rather than reported as an
+    // unresolved phantom position.
+    if (entry.tokenId === null) continue;
+    if (seenTokenIds.has(entry.tokenId)) continue;
+    seenTokenIds.add(entry.tokenId);
+    contractEntries.push(entry);
+    if (contractEntries.length >= v3MaxPositionsResolvedPerPool) break;
+  }
+
+  return [...rawEntries, ...contractEntries];
 }
 
-async function resolveOneV3Position(
+function decodeMintAmount(log: ChainLog): bigint | null {
+  try {
+    return decodeEventLog({
+      abi: [uniswapV3PoolMintEvent],
+      data: log.data,
+      topics: log.topics as [Hex, ...Hex[]],
+      eventName: "Mint"
+    }).args.amount;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveOneV3NftPosition(
   adapter: ChainAdapter,
   mintOwnerAddress: `0x${string}`,
   mintLog: ChainLog,
@@ -637,20 +697,6 @@ async function resolveOneV3Position(
     liquidityRaw: "0",
     ...overrides
   });
-
-  const mintOwnerCode = await adapter
-    .getBytecode({ address: mintOwnerAddress, blockNumber })
-    .catch((): Hex => "0x");
-  if (mintOwnerCode === "0x") {
-    // No position manager involved: this address called pool.mint() directly and holds the raw
-    // position itself, with no NFT abstraction to transfer custody through. There is no cheap
-    // "current liquidity" read for a raw (owner,tickLower,tickUpper) position outside the pool's
-    // own internal accounting, so the original mint amount is reported as a best-effort estimate.
-    return unresolved({
-      currentOwnerAddress: mintOwnerAddress,
-      currentOwnerIsContract: false
-    });
-  }
 
   if (!mintLog.transactionHash || mintLog.blockNumber === null) {
     return unresolved();
