@@ -462,13 +462,22 @@ interface V3PositionCustodyResolution {
 // requests while staying under typical provider range caps.
 const v3MintLogChunkBlocks = 2_000n;
 const v3MintLogMaxChunks = 50;
+// A later, unrelated small liquidity top-up can sit in the very first chunk scanned, ahead of
+// the pool's original (and typically dominant) Mint. Stopping right after the first hit
+// therefore risks locking onto a closed/negligible position instead of the real one — verified
+// live against $PIPEDOG, where this returned a since-burned tokenId with 0 liquidity instead of
+// the actual ~$9.6M position a few chunks further back. Requiring several consecutive empty
+// chunks after the most recent hit lets the scan walk back through such gaps to the pool's
+// genuine creation Mint, while still bailing out once activity has clearly stopped.
+const v3MintLogQuietChunksToStop = 3;
 
 /**
- * Scans backward from the current block in bounded windows for this pool's Mint events,
- * stopping one chunk after the first hit (to also capture a mint just before it) rather than
- * scanning the pool's entire history once its liquidity-creation window has been located. A
- * pool older than ~100,000 blocks (chunk size x max chunks) without any Mint found in that
- * window returns no logs — a known limitation, not a claim that no Mint ever happened.
+ * Scans backward from the current block in bounded windows for this pool's Mint events. Keeps
+ * going past a hit until v3MintLogQuietChunksToStop consecutive chunks in a row find nothing
+ * more (likely past the pool's creation), rather than stopping at the first hit. A pool whose
+ * entire Mint history lies beyond v3MintLogMaxChunks x v3MintLogChunkBlocks without any hit at
+ * all returns no logs — a known limitation for very old pools, not a claim that no Mint ever
+ * happened.
  */
 async function fetchV3PoolMintLogs(
   adapter: ChainAdapter,
@@ -478,7 +487,8 @@ async function fetchV3PoolMintLogs(
   const collected: ChainLog[] = [];
   let toBlock = blockNumber;
   let chunksScanned = 0;
-  let foundAtChunk = -1;
+  let hasAnyHit = false;
+  let quietChunksSinceLastHit = 0;
 
   while (chunksScanned < v3MintLogMaxChunks) {
     const fromBlock = toBlock > v3MintLogChunkBlocks ? toBlock - v3MintLogChunkBlocks + 1n : 0n;
@@ -492,10 +502,14 @@ async function fetchV3PoolMintLogs(
       .catch(() => []);
     collected.push(...logs);
     chunksScanned += 1;
-    if (logs.length > 0 && foundAtChunk === -1) {
-      foundAtChunk = chunksScanned;
+
+    if (logs.length > 0) {
+      hasAnyHit = true;
+      quietChunksSinceLastHit = 0;
+    } else if (hasAnyHit) {
+      quietChunksSinceLastHit += 1;
+      if (quietChunksSinceLastHit >= v3MintLogQuietChunksToStop) break;
     }
-    if (foundAtChunk !== -1 && chunksScanned >= foundAtChunk + 1) break;
     if (fromBlock === 0n) break;
     toBlock = fromBlock - 1n;
   }
