@@ -1,5 +1,5 @@
 import { decodeEventLog, parseAbi, parseAbiItem, toEventSelector, type Hex } from "viem";
-import type { ChainAdapter } from "@genesis-sentinel/chain-adapters";
+import type { ChainAdapter, ChainLog } from "@genesis-sentinel/chain-adapters";
 import type { LockerProvider, LockStatusResult } from "./locker.js";
 import type { DiscoveredPool, LiquidityProvider, LiquidityProviderCoverage } from "./types.js";
 
@@ -72,6 +72,16 @@ const uniswapV4InitializeEvent = parseAbiItem(
   "event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)"
 );
 const uniswapV4InitializeTopic = toEventSelector(uniswapV4InitializeEvent);
+const uniswapV3PoolMintEvent = parseAbiItem(
+  "event Mint(address sender, address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)"
+);
+const uniswapV3PoolMintTopic = toEventSelector(uniswapV3PoolMintEvent);
+const erc721TransferEvent = parseAbiItem(
+  "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)"
+);
+const erc721TransferTopic = toEventSelector(erc721TransferEvent);
+const zeroAddressTopic = addressToTopic("0x0000000000000000000000000000000000000000");
+const erc721OwnerOfAbi = parseAbi(["function ownerOf(uint256 tokenId) view returns (address)"]);
 
 export type QuoteTokenPriceLookup = (address: `0x${string}`) => Promise<number | null>;
 
@@ -155,7 +165,9 @@ export function createRobinhoodLiquidityProvider(
       const memoizedGetQuoteTokenPriceUsd = memoizeQuoteTokenPriceLookup(getQuoteTokenPriceUsd);
 
       const [v3Pools, v4Pools, v2Pools] = await Promise.all([
-        discoverUniswapV3Liquidity(adapter, tokenAddress, memoizedGetQuoteTokenPriceUsd).catch(() => []),
+        discoverUniswapV3Liquidity(adapter, tokenAddress, memoizedGetQuoteTokenPriceUsd, blockNumber).catch(
+          () => []
+        ),
         discoverUniswapV4Liquidity(adapter, tokenAddress, blockNumber).catch(() => []),
         discoverUniswapV2Liquidity(
           adapter,
@@ -308,7 +320,8 @@ async function discoverUniswapV2Pool(
 async function discoverUniswapV3Liquidity(
   adapter: ChainAdapter,
   tokenAddress: `0x${string}`,
-  getQuoteTokenPriceUsd: QuoteTokenPriceLookup
+  getQuoteTokenPriceUsd: QuoteTokenPriceLookup,
+  blockNumber: bigint
 ): Promise<DiscoveredPool[]> {
   return compact(
     await Promise.all(
@@ -316,7 +329,7 @@ async function discoverUniswapV3Liquidity(
         .filter((quote) => quote.address.toLowerCase() !== tokenAddress.toLowerCase())
         .flatMap((quote) =>
           uniswapV3FeeTiers.map((fee) =>
-            discoverUniswapV3Pool(adapter, tokenAddress, quote, fee, getQuoteTokenPriceUsd).catch(
+            discoverUniswapV3Pool(adapter, tokenAddress, quote, fee, getQuoteTokenPriceUsd, blockNumber).catch(
               () => null
             )
           )
@@ -330,7 +343,8 @@ async function discoverUniswapV3Pool(
   tokenAddress: `0x${string}`,
   quote: (typeof robinhoodQuoteTokens)[number],
   feeTier: (typeof uniswapV3FeeTiers)[number],
-  getQuoteTokenPriceUsd: QuoteTokenPriceLookup
+  getQuoteTokenPriceUsd: QuoteTokenPriceLookup,
+  blockNumber: bigint
 ): Promise<DiscoveredPool | null> {
   const poolAddress = await adapter
     .readContract<`0x${string}`>({
@@ -394,6 +408,14 @@ async function discoverUniswapV3Pool(
     quotePriceUsd !== null
       ? (Number(quoteBalance) / 10 ** quote.decimals) * 2 * quotePriceUsd
       : null;
+  const positionCustody = await resolveV3PositionCustody(adapter, poolAddress, blockNumber).catch(
+    (): V3PositionCustodyResolution => ({
+      mintOwnerAddress: null,
+      tokenId: null,
+      currentOwnerAddress: null,
+      currentOwnerIsContract: null
+    })
+  );
 
   return {
     poolAddress,
@@ -408,6 +430,10 @@ async function discoverUniswapV3Pool(
       token1,
       fee,
       feeTier,
+      positionManagerAddress: positionCustody.mintOwnerAddress,
+      positionTokenId: positionCustody.tokenId,
+      positionOwnerAddress: positionCustody.currentOwnerAddress,
+      positionOwnerIsContract: positionCustody.currentOwnerIsContract,
       liquidityRaw: liquidity.toString(),
       sqrtPriceX96Raw: slot0[0].toString(),
       tick: slot0[1],
@@ -417,6 +443,143 @@ async function discoverUniswapV3Pool(
       quoteDecimals: quote.decimals,
       totalLiquidityUsd
     }
+  };
+}
+
+interface V3PositionCustodyResolution {
+  mintOwnerAddress: `0x${string}` | null;
+  tokenId: string | null;
+  currentOwnerAddress: `0x${string}` | null;
+  currentOwnerIsContract: boolean | null;
+}
+
+/**
+ * Determines who currently controls a Uniswap V3 pool's liquidity: the largest historical
+ * Mint's `owner` (normally the NonfungiblePositionManager that wraps positions as NFTs, but a
+ * raw pool.mint() call bypassing any position manager reports the direct caller instead), and,
+ * when that owner is a contract, the CURRENT holder of the resulting position NFT via a live
+ * ownerOf() call — not just who it was minted to, since a position can be transferred after
+ * minting (e.g. into a locker). This codebase does not hardcode a canonical PositionManager
+ * address (per ADR 0020/0021), so the position manager itself is discovered from the pool's own
+ * Mint event rather than assumed.
+ *
+ * A dominant-Mint heuristic (largest single Mint by liquidity amount) is used rather than full
+ * historical reconciliation of every position ever opened against this pool — sufficient to
+ * flag "who currently controls the bulk of this pool's liquidity" without requiring a full
+ * position-by-position ledger.
+ */
+async function resolveV3PositionCustody(
+  adapter: ChainAdapter,
+  poolAddress: `0x${string}`,
+  blockNumber: bigint
+): Promise<V3PositionCustodyResolution> {
+  const unresolved: V3PositionCustodyResolution = {
+    mintOwnerAddress: null,
+    tokenId: null,
+    currentOwnerAddress: null,
+    currentOwnerIsContract: null
+  };
+
+  const mintLogs = await adapter
+    .getLogs({
+      address: poolAddress,
+      fromBlock: 0n,
+      toBlock: blockNumber,
+      topics: [uniswapV3PoolMintTopic]
+    })
+    .catch(() => []);
+  if (mintLogs.length === 0) return unresolved;
+
+  const decodedMints = mintLogs
+    .map((log) => {
+      try {
+        const decoded = decodeEventLog({
+          abi: [uniswapV3PoolMintEvent],
+          data: log.data,
+          topics: log.topics as [Hex, ...Hex[]],
+          eventName: "Mint"
+        });
+        return { log, amount: decoded.args.amount, owner: decoded.args.owner };
+      } catch {
+        return null;
+      }
+    })
+    .filter(
+      (entry): entry is { log: ChainLog; amount: bigint; owner: `0x${string}` } => entry !== null
+    );
+  if (decodedMints.length === 0) return unresolved;
+
+  const dominant = decodedMints.reduce((largest, entry) =>
+    entry.amount > largest.amount ? entry : largest
+  );
+  const mintOwnerAddress = dominant.owner;
+
+  const mintOwnerCode = await adapter
+    .getBytecode({ address: mintOwnerAddress, blockNumber })
+    .catch((): Hex => "0x");
+  if (mintOwnerCode === "0x") {
+    // No position manager involved: this address called pool.mint() directly and holds the raw
+    // position itself, with no NFT abstraction to transfer custody through.
+    return {
+      mintOwnerAddress,
+      tokenId: null,
+      currentOwnerAddress: mintOwnerAddress,
+      currentOwnerIsContract: false
+    };
+  }
+
+  if (!dominant.log.transactionHash || dominant.log.blockNumber === null) {
+    return { mintOwnerAddress, tokenId: null, currentOwnerAddress: null, currentOwnerIsContract: null };
+  }
+
+  const transferLogs = await adapter
+    .getLogs({
+      address: mintOwnerAddress,
+      fromBlock: dominant.log.blockNumber,
+      toBlock: dominant.log.blockNumber,
+      topics: [erc721TransferTopic, zeroAddressTopic]
+    })
+    .catch(() => []);
+  const mintTransfer = transferLogs.find(
+    (log) => log.transactionHash === dominant.log.transactionHash && log.topics.length >= 4
+  );
+  if (!mintTransfer) {
+    return { mintOwnerAddress, tokenId: null, currentOwnerAddress: null, currentOwnerIsContract: null };
+  }
+
+  const tokenIdTopic = mintTransfer.topics[3];
+  if (!tokenIdTopic) {
+    return { mintOwnerAddress, tokenId: null, currentOwnerAddress: null, currentOwnerIsContract: null };
+  }
+  const tokenId = BigInt(tokenIdTopic);
+
+  const currentOwnerAddress = await adapter
+    .readContract<`0x${string}`>({
+      address: mintOwnerAddress,
+      abi: erc721OwnerOfAbi,
+      functionName: "ownerOf",
+      args: [tokenId],
+      blockNumber
+    })
+    .catch(() => null);
+  if (!currentOwnerAddress) {
+    return {
+      mintOwnerAddress,
+      tokenId: tokenId.toString(),
+      currentOwnerAddress: null,
+      currentOwnerIsContract: null
+    };
+  }
+
+  const currentOwnerCode = await adapter
+    .getBytecode({ address: currentOwnerAddress, blockNumber })
+    .catch((): Hex => "0x");
+
+  return {
+    mintOwnerAddress,
+    tokenId: tokenId.toString(),
+    currentOwnerAddress,
+    currentOwnerIsContract: currentOwnerCode !== "0x"
   };
 }
 

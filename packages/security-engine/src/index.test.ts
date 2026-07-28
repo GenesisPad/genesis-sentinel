@@ -22,6 +22,7 @@ import {
   selectorPatternDetectors,
   sourceCodeRiskDetector,
   transferGateDetector,
+  v3PositionCustodyDetector,
   type DetectorMetadata
 } from "./index.js";
 
@@ -2088,6 +2089,105 @@ describe("pool reserve integrity detector", () => {
     expect(result.findings.map((finding) => finding.code)).not.toContain(
       "POOL_RESERVE_DESYNC_CRITICAL"
     );
+  });
+});
+
+describe("v3 position custody detector", () => {
+  it("flags a V3 position currently held by a plain wallet (pipedog-style)", async () => {
+    const result = await v3PositionCustodyDetector.run(
+      {
+        readPositionCustody: () =>
+          Promise.resolve([
+            {
+              poolAddress: "0xb7f10f74b39291b9290b779978e19a7637c742d6" as const,
+              mintOwnerAddress: "0x73991a25c818bf1f1128deaab1492d45638de0d3" as const,
+              tokenId: "471688",
+              currentOwnerAddress: "0x1112b8c161119d4f866e4c21bacf0eeb3a1c91d9" as const,
+              currentOwnerIsContract: false,
+              liquidityRaw: "2134690521568425074304"
+            }
+          ])
+      },
+      context
+    );
+
+    expect(result.findings.map((finding) => finding.code)).toContain("V3_POSITION_HELD_BY_WALLET");
+    expect(result.findings[0]?.severity).toBe("CRITICAL");
+    expect(result.checks[0]?.outcome).toBe("DETECTED");
+  });
+
+  it("does not flag a position held by a contract (locker/vault)", async () => {
+    const result = await v3PositionCustodyDetector.run(
+      {
+        readPositionCustody: () =>
+          Promise.resolve([
+            {
+              poolAddress: "0x00000000000000000000000000000000000000aa" as const,
+              mintOwnerAddress: "0x00000000000000000000000000000000000000bb" as const,
+              tokenId: "1",
+              currentOwnerAddress: "0x00000000000000000000000000000000000000cc" as const,
+              currentOwnerIsContract: true,
+              liquidityRaw: "1000000"
+            }
+          ])
+      },
+      context
+    );
+
+    expect(result.findings).toHaveLength(0);
+    expect(result.checks[0]?.outcome).toBe("PASSED");
+  });
+
+  it("does not flag a position held by a known burn/zero address", async () => {
+    const result = await v3PositionCustodyDetector.run(
+      {
+        readPositionCustody: () =>
+          Promise.resolve([
+            {
+              poolAddress: "0x00000000000000000000000000000000000000dd" as const,
+              mintOwnerAddress: "0x00000000000000000000000000000000000000ee" as const,
+              tokenId: "2",
+              currentOwnerAddress: "0x000000000000000000000000000000000000dead" as const,
+              currentOwnerIsContract: false,
+              liquidityRaw: "1000000"
+            }
+          ])
+      },
+      context
+    );
+
+    expect(result.findings).toHaveLength(0);
+  });
+
+  it("flags a raw pool.mint() caller with no position manager involved at all", async () => {
+    const result = await v3PositionCustodyDetector.run(
+      {
+        readPositionCustody: () =>
+          Promise.resolve([
+            {
+              poolAddress: "0x00000000000000000000000000000000000000ff" as const,
+              mintOwnerAddress: "0x1112b8c161119d4f866e4c21bacf0eeb3a1c91d9" as const,
+              tokenId: null,
+              currentOwnerAddress: "0x1112b8c161119d4f866e4c21bacf0eeb3a1c91d9" as const,
+              currentOwnerIsContract: false,
+              liquidityRaw: "500000"
+            }
+          ])
+      },
+      context
+    );
+
+    expect(result.findings.map((finding) => finding.code)).toContain("V3_POSITION_HELD_BY_WALLET");
+  });
+
+  it("reports data-unavailable when there is no V3 pool to check", async () => {
+    const result = await v3PositionCustodyDetector.run(
+      { readPositionCustody: () => Promise.resolve(null) },
+      context
+    );
+
+    expect(result.findings).toHaveLength(0);
+    expect(result.checks[0]?.outcome).toBe("DATA_UNAVAILABLE");
   });
 });
 

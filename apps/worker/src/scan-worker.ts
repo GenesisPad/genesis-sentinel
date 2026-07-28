@@ -40,9 +40,11 @@ import {
   scoreFindings,
   sourceCodeRiskDetector,
   transferGateDetector,
+  v3PositionCustodyDetector,
   type LedgerAccountReconciliation,
   type LedgerReconciliation,
-  type PoolReserveSample
+  type PoolReserveSample,
+  type V3PositionCustodySample
 } from "@genesis-sentinel/security-engine";
 import { NEGLIGIBLE_LIQUIDITY_USD as negligibleLiquidityUsd, scannerVersion } from "@genesis-sentinel/shared";
 import type { BytecodeReuseView, RelatedWalletEdge } from "@genesis-sentinel/shared";
@@ -1652,6 +1654,40 @@ async function readPoolReserveSamples(
 }
 
 /**
+ * Extracts each discovered V3 pool's already-resolved position-custody fields (see
+ * resolveV3PositionCustody in @genesis-sentinel/providers' robinhood-liquidity.ts, which
+ * performs the on-chain Mint-event/ownerOf() lookups once during pool discovery) into the
+ * shape v3PositionCustodyDetector expects — a pure mapping, no further on-chain reads here.
+ */
+function readV3PositionCustodySamples(pools: DiscoveredPool[] | null): V3PositionCustodySample[] | null {
+  if (!pools || pools.length === 0) return null;
+
+  const samples: V3PositionCustodySample[] = [];
+  for (const pool of pools) {
+    if (pool.liquidityData.protocol !== "UNISWAP_V3") continue;
+    const liquidityRaw = bigintFromRecord(pool.liquidityData, "liquidityRaw");
+    if (liquidityRaw === null) continue;
+
+    samples.push({
+      poolAddress: pool.poolAddress,
+      mintOwnerAddress: addressValue(pool.liquidityData.positionManagerAddress),
+      tokenId:
+        typeof pool.liquidityData.positionTokenId === "string"
+          ? pool.liquidityData.positionTokenId
+          : null,
+      currentOwnerAddress: addressValue(pool.liquidityData.positionOwnerAddress),
+      currentOwnerIsContract:
+        typeof pool.liquidityData.positionOwnerIsContract === "boolean"
+          ? pool.liquidityData.positionOwnerIsContract
+          : null,
+      liquidityRaw: liquidityRaw.toString()
+    });
+  }
+
+  return samples.length > 0 ? samples : null;
+}
+
+/**
  * Reads each clustered wallet's real token balance on-chain at the scan block, so the dev
  * cluster can report what every connected address actually holds. The holder snapshot only
  * covers the top N holders, so without this a connected wallet outside that set reports
@@ -2094,6 +2130,12 @@ export async function processScanJob(
       },
       detectorRunContext
     );
+    const v3PositionCustodyResult = await v3PositionCustodyDetector.run(
+      {
+        readPositionCustody: () => Promise.resolve(readV3PositionCustodySamples(discoveredPools))
+      },
+      detectorRunContext
+    );
     const transferGateResult = await transferGateDetector.run(
       {
         bytecode,
@@ -2122,6 +2164,7 @@ export async function processScanJob(
       deployerHistoryResult,
       dexInteractionResult,
       poolReserveResult,
+      v3PositionCustodyResult,
       transferGateResult
     );
     const detectorCompletedAt = now();

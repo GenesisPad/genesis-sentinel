@@ -2488,6 +2488,136 @@ export const poolReserveIntegrityDetector: SecurityDetector<PoolReserveIntegrity
   }
 };
 
+const v3PositionCustodyKnownBurnOrZeroAddresses = new Set([
+  "0x000000000000000000000000000000000000dead",
+  "0x0000000000000000000000000000000000000000"
+]);
+
+export interface V3PositionCustodySample {
+  poolAddress: `0x${string}`;
+  /** The address Uniswap's pool-level Mint event recorded as `owner` — normally the
+   * NonfungiblePositionManager that wraps the position as an NFT, but for a raw pool.mint()
+   * call bypassing any position manager, this is the direct caller and IS the custodian. */
+  mintOwnerAddress: `0x${string}` | null;
+  /** ERC-721 tokenId for the position NFT, when one was found wrapping this position. Null
+   * when no position manager is involved (a raw pool.mint() call) or it could not be resolved. */
+  tokenId: string | null;
+  /** Current holder of the position, read live at the scan block: ownerOf(tokenId) when an NFT
+   * wraps the position (so a transfer after minting, e.g. into a locker, is reflected), or the
+   * raw mintOwnerAddress when there is no NFT layer at all. */
+  currentOwnerAddress: `0x${string}` | null;
+  /** Whether currentOwnerAddress has contract bytecode, read live via getBytecode. Null when the
+   * current owner could not be resolved. */
+  currentOwnerIsContract: boolean | null;
+  liquidityRaw: string;
+}
+
+export interface V3PositionCustodyDetectorInput {
+  readPositionCustody(): Promise<V3PositionCustodySample[] | null>;
+}
+
+/**
+ * Uniswap V3 liquidity is custodied by whoever holds the position's NFT — there is no protocol-
+ * level equivalent of burning a V2 LP token to prove liquidity can't be pulled. A position held
+ * by a plain wallet (not a locker/vault contract, and not a burn address) can be fully withdrawn
+ * and sold by that single wallet at any time, with none of the token-contract-level red flags
+ * (owner, mint, tax) a source-code review would catch.
+ *
+ * Verified live against $PIPEDOG on Robinhood Chain: a ~$9.6M V3 position's NFT was minted
+ * directly to a plain EOA, and none of Sentinel's other detectors covered this — the existing
+ * Genesis Locker check only understands V2 LP tokens (see genesis-locker.ts), and
+ * genesispadLaunchDetector only fires for tokens launched through GenesisPad's own registry.
+ * This detector closes that gap independent of both.
+ */
+export const v3PositionCustodyDetector: SecurityDetector<V3PositionCustodyDetectorInput> = {
+  metadata: {
+    id: "v3-position-custody",
+    version: detectorVersion,
+    name: "Uniswap V3 position custody",
+    description:
+      "Checks who currently holds the Uniswap V3 liquidity position NFT (or raw pool.mint() caller) for this token's pools."
+  },
+
+  async run(input, context) {
+    const samples = await input.readPositionCustody();
+    const evidence: FindingEvidence = {
+      type: "LIQUIDITY_DATA",
+      summary: "Uniswap V3 position custody per discovered pool",
+      address: context.address,
+      data: { samples }
+    };
+    if (context.blockNumber !== undefined) {
+      evidence.blockNumber = context.blockNumber;
+    }
+
+    if (!samples || samples.length === 0) {
+      return {
+        detector: this.metadata,
+        checks: [
+          {
+            code: "V3_POSITION_CUSTODY_UNAVAILABLE",
+            outcome: "DATA_UNAVAILABLE",
+            confidence: "LOW",
+            evidence: [evidence]
+          }
+        ],
+        findings: []
+      };
+    }
+
+    const walletHeld = samples.filter((sample) => {
+      if (sample.currentOwnerIsContract !== false || sample.currentOwnerAddress === null) {
+        return false;
+      }
+      if (v3PositionCustodyKnownBurnOrZeroAddresses.has(sample.currentOwnerAddress.toLowerCase())) {
+        return false;
+      }
+      const liquidity = parseRawAmount(sample.liquidityRaw);
+      return liquidity !== null && liquidity > 0n;
+    });
+
+    const findings: SecurityFinding[] = [];
+    if (walletHeld.length > 0) {
+      const findingEvidence: FindingEvidence = {
+        ...evidence,
+        summary: "V3 positions whose current holder is a plain wallet, not a contract",
+        data: { samples, walletHeld }
+      };
+      findings.push(
+        createFinding({
+          code: "V3_POSITION_HELD_BY_WALLET",
+          detector: this.metadata,
+          title: "Liquidity position held by a plain wallet, not locked",
+          severity: "CRITICAL",
+          category: "LIQUIDITY_SAFETY",
+          confidence: "HIGH",
+          description:
+            "This token's Uniswap V3 liquidity position NFT is currently held by a plain wallet rather than a locker/vault contract or a burn address. Uniswap V3 has no protocol-level equivalent of burning a V2 LP token — whoever holds the position NFT can withdraw and sell the entire pool at any time.",
+          technicalExplanation:
+            "The position's current holder was read live at the scan block (ownerOf() on the position manager, or the direct pool.mint() caller when no position manager wraps the position) and its bytecode was checked live via getBytecode(); an empty result means it is a plain externally-owned account, not a contract.",
+          evidence: [findingEvidence],
+          recommendation:
+            "Treat this pool's liquidity as unlocked and withdrawable at will by the holding wallet. A clean token contract or renounced ownership elsewhere does not mean the liquidity itself is safe."
+        })
+      );
+    }
+
+    return {
+      detector: this.metadata,
+      checks: [
+        {
+          code:
+            walletHeld.length > 0 ? "V3_POSITION_CUSTODY_WALLET_HELD" : "V3_POSITION_CUSTODY_SECURED",
+          outcome: walletHeld.length > 0 ? "DETECTED" : "PASSED",
+          confidence: "HIGH",
+          evidence: [evidence]
+        }
+      ],
+      findings
+    };
+  }
+};
+
 /** Reported reserves above this multiple of the real balance are reported at all. */
 const POOL_RESERVE_TOLERANCE_RATIO = 1.05;
 /** Reported reserves above this multiple are treated as a staged drain, not drift. */
