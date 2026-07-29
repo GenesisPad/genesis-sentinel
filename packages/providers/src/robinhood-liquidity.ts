@@ -640,20 +640,20 @@ async function resolveV3PositionCustody(
     liquidityRaw: group.log.data ? (decodeMintAmount(group.log) ?? 0n).toString() : "0"
   }));
 
-  // Rank contract-owned candidates by their own mint amount before resolving (each resolution
-  // costs several RPC calls), capped at v3MaxPositionsResolvedPerPool. Ranking by an individual
-  // Mint's own amount is now meaningful again since it's no longer summed across unrelated
-  // depositors sharing a tick range.
-  const rankedContractMints = [...contractMints]
-    .sort((a, b) => (b.amount > a.amount ? 1 : b.amount < a.amount ? -1 : 0))
-    .slice(0, v3MaxPositionsResolvedPerPool * 2);
-
+  // Every contract-owned Mint in the (already bounded) scan window is resolved — NOT pre-ranked
+  // by its raw mint `amount` first. That L (liquidity) value is not comparable across different
+  // tick ranges: a full-range position needs a far LARGER L than a narrow-range one to represent
+  // the same real token amount, so ranking by raw amount let dust full-range deposits outrank a
+  // real, valuable narrow-range position and drop it before it was ever resolved. Live-verified
+  // regression against $PIPEDOG: this hid both the deployer's real position and the genuine
+  // UNCX lock in the same run. Only each RESOLVED position's real current liquidity (read below
+  // via positions()) is a valid ranking signal, so capping happens after resolution instead.
   const resolvedContractEntries = await Promise.all(
-    rankedContractMints.map((mint) => resolveOneV3NftPosition(adapter, mint.owner, mint.log, blockNumber))
+    contractMints.map((mint) => resolveOneV3NftPosition(adapter, mint.owner, mint.log, blockNumber))
   );
 
   const seenTokenIds = new Set<string>();
-  const contractEntries: V3PositionCustodyEntry[] = [];
+  const uniqueContractEntries: V3PositionCustodyEntry[] = [];
   for (const entry of resolvedContractEntries) {
     // No Transfer pairing found means this Mint was a later increaseLiquidity() on a tokenId
     // whose original creation mint is (or isn't) captured elsewhere in this same scan — either
@@ -662,11 +662,26 @@ async function resolveV3PositionCustody(
     if (entry.tokenId === null) continue;
     if (seenTokenIds.has(entry.tokenId)) continue;
     seenTokenIds.add(entry.tokenId);
-    contractEntries.push(entry);
-    if (contractEntries.length >= v3MaxPositionsResolvedPerPool) break;
+    uniqueContractEntries.push(entry);
   }
 
+  const contractEntries = uniqueContractEntries
+    .sort((a, b) => {
+      const liquidityA = parseRawLiquidity(a.liquidityRaw);
+      const liquidityB = parseRawLiquidity(b.liquidityRaw);
+      return liquidityB > liquidityA ? 1 : liquidityB < liquidityA ? -1 : 0;
+    })
+    .slice(0, v3MaxPositionsResolvedPerPool);
+
   return [...rawEntries, ...contractEntries];
+}
+
+function parseRawLiquidity(value: string): bigint {
+  try {
+    return BigInt(value);
+  } catch {
+    return 0n;
+  }
 }
 
 function decodeMintAmount(log: ChainLog): bigint | null {
