@@ -2073,9 +2073,26 @@ export async function processScanJob(
     // launch legitimately sends the bulk of its supply to its own pool; that's expected
     // behavior, not a distribution risk). Fetched here once and reused at DISCOVERING_MARKETS
     // below instead of calling the provider twice.
+    // No liquidity Mint can predate the token contract itself, so its own creation block is a
+    // precise, activity-independent floor for a provider's backward Mint-log scan (see
+    // resolveV3PositionCustody in @genesis-sentinel/providers' robinhood-liquidity.ts) — far more
+    // reliable than an activity-based "stop after N quiet chunks" heuristic, which can never tell
+    // a genuine lull in bot activity apart from having actually reached the pool's creation.
+    const tokenCreationBlock = tokenProfile.creationTxHash
+      ? await adapter
+          .getTransactionReceipt({ hash: tokenProfile.creationTxHash })
+          .then((receipt) => receipt?.blockNumber ?? undefined)
+          .catch(() => undefined)
+      : undefined;
     const discoveredPools = providers
       ? await providers.liquidity
-          .discoverPools({ adapter, chainId: target.chainId, tokenAddress: target.address, blockNumber })
+          .discoverPools({
+            adapter,
+            chainId: target.chainId,
+            tokenAddress: target.address,
+            blockNumber,
+            ...(tokenCreationBlock !== undefined ? { sinceBlock: tokenCreationBlock } : {})
+          })
           .catch(() => null)
       : null;
     // Also excludes the chain's real locker contract (e.g. Genesis Locker) when one is wired —

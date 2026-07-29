@@ -263,6 +263,12 @@ export interface LiquidityProvider {
     chainId: number;
     tokenAddress: `0x${string}`;
     blockNumber: bigint;
+    /** The scanned token's own creation block, when known. No liquidity Mint can predate the
+     * token contract itself, so this is a precise, activity-independent floor for any backward
+     * log scan a provider needs to do (e.g. resolving V3 position custody) — far more reliable
+     * than an activity-based heuristic, which can never tell a genuine lull in bot activity
+     * apart from having actually reached the pool's creation. */
+    sinceBlock?: bigint;
   }): Promise<DiscoveredPool[]>;
 }
 

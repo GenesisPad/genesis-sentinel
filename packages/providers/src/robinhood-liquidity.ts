@@ -159,7 +159,7 @@ export function createRobinhoodLiquidityProvider(
         checkedQuoteSymbols: robinhoodQuoteTokens.map((quote) => quote.symbol)
       };
     },
-    async discoverPools({ adapter, chainId, tokenAddress, blockNumber }) {
+    async discoverPools({ adapter, chainId, tokenAddress, blockNumber, sinceBlock }) {
       if (chainId !== robinhoodChainId) {
         return [];
       }
@@ -177,9 +177,13 @@ export function createRobinhoodLiquidityProvider(
       const memoizedGetQuoteTokenPriceUsd = memoizeQuoteTokenPriceLookup(getQuoteTokenPriceUsd);
 
       const [v3Pools, v4Pools, v2Pools] = await Promise.all([
-        discoverUniswapV3Liquidity(adapter, tokenAddress, memoizedGetQuoteTokenPriceUsd, blockNumber).catch(
-          () => []
-        ),
+        discoverUniswapV3Liquidity(
+          adapter,
+          tokenAddress,
+          memoizedGetQuoteTokenPriceUsd,
+          blockNumber,
+          sinceBlock
+        ).catch(() => []),
         discoverUniswapV4Liquidity(adapter, tokenAddress, blockNumber).catch(() => []),
         discoverUniswapV2Liquidity(
           adapter,
@@ -333,7 +337,8 @@ async function discoverUniswapV3Liquidity(
   adapter: ChainAdapter,
   tokenAddress: `0x${string}`,
   getQuoteTokenPriceUsd: QuoteTokenPriceLookup,
-  blockNumber: bigint
+  blockNumber: bigint,
+  sinceBlock: bigint | undefined
 ): Promise<DiscoveredPool[]> {
   return compact(
     await Promise.all(
@@ -341,9 +346,15 @@ async function discoverUniswapV3Liquidity(
         .filter((quote) => quote.address.toLowerCase() !== tokenAddress.toLowerCase())
         .flatMap((quote) =>
           uniswapV3FeeTiers.map((fee) =>
-            discoverUniswapV3Pool(adapter, tokenAddress, quote, fee, getQuoteTokenPriceUsd, blockNumber).catch(
-              () => null
-            )
+            discoverUniswapV3Pool(
+              adapter,
+              tokenAddress,
+              quote,
+              fee,
+              getQuoteTokenPriceUsd,
+              blockNumber,
+              sinceBlock
+            ).catch(() => null)
           )
         )
     )
@@ -356,7 +367,8 @@ async function discoverUniswapV3Pool(
   quote: (typeof robinhoodQuoteTokens)[number],
   feeTier: (typeof uniswapV3FeeTiers)[number],
   getQuoteTokenPriceUsd: QuoteTokenPriceLookup,
-  blockNumber: bigint
+  blockNumber: bigint,
+  sinceBlock: bigint | undefined
 ): Promise<DiscoveredPool | null> {
   const poolAddress = await adapter
     .readContract<`0x${string}`>({
@@ -420,7 +432,7 @@ async function discoverUniswapV3Pool(
     quotePriceUsd !== null
       ? (Number(quoteBalance) / 10 ** quote.decimals) * 2 * quotePriceUsd
       : null;
-  const positions = await resolveV3PositionCustody(adapter, poolAddress, blockNumber).catch(
+  const positions = await resolveV3PositionCustody(adapter, poolAddress, blockNumber, sinceBlock).catch(
     (): V3PositionCustodyEntry[] => []
   );
 
@@ -494,17 +506,25 @@ const v3MintLogMaxChunks = 80;
 const v3MintLogQuietChunksToStop = 3;
 
 /**
- * Scans backward from the current block in bounded windows for this pool's Mint events. Keeps
- * going past a hit until v3MintLogQuietChunksToStop consecutive chunks in a row find nothing
- * more (likely past the pool's creation), rather than stopping at the first hit. A pool whose
- * entire Mint history lies beyond v3MintLogMaxChunks x v3MintLogChunkBlocks without any hit at
- * all returns no logs — a known limitation for very old pools, not a claim that no Mint ever
- * happened.
+ * Scans backward from the current block in bounded windows for this pool's Mint events.
+ *
+ * When sinceBlock (the scanned token's own creation block) is known, it is used as a hard,
+ * activity-independent floor: no Mint can predate the token itself, so the scan simply continues
+ * down to that exact block rather than guessing when to stop. This is far more reliable than an
+ * activity-based heuristic — live-verified repeatedly against $PIPEDOG, where a "stop after N
+ * consecutive quiet chunks" rule kept mistaking a genuine lull in bot activity for having reached
+ * the pool's creation, cutting the scan short long before the real launch Mint and hiding both
+ * the deployer's real position and the genuine UNCX lock.
+ *
+ * Without sinceBlock (token creation block unavailable), falls back to the quiet-chunk heuristic
+ * bounded by v3MintLogMaxChunks — a known-weaker approximation, not a guarantee of reaching the
+ * pool's actual creation.
  */
 async function fetchV3PoolMintLogs(
   adapter: ChainAdapter,
   poolAddress: `0x${string}`,
-  blockNumber: bigint
+  blockNumber: bigint,
+  sinceBlock: bigint | undefined
 ): Promise<ChainLog[]> {
   const collected: ChainLog[] = [];
   let toBlock = blockNumber;
@@ -513,10 +533,13 @@ async function fetchV3PoolMintLogs(
   let quietChunksSinceLastHit = 0;
 
   while (chunksScanned < v3MintLogMaxChunks) {
+    if (sinceBlock !== undefined && toBlock < sinceBlock) break;
     const fromBlock = toBlock > v3MintLogChunkBlocks ? toBlock - v3MintLogChunkBlocks + 1n : 0n;
+    const effectiveFromBlock =
+      sinceBlock !== undefined && fromBlock < sinceBlock ? sinceBlock : fromBlock;
     const query = {
       address: poolAddress,
-      fromBlock,
+      fromBlock: effectiveFromBlock,
       toBlock,
       topics: [uniswapV3PoolMintTopic]
     };
@@ -532,17 +555,21 @@ async function fetchV3PoolMintLogs(
     collected.push(...(logs ?? []));
     chunksScanned += 1;
 
-    if (logs === null) {
-      // Unknown, not confirmed-empty: budget is still spent, but the quiet streak is untouched.
-    } else if (logs.length > 0) {
-      hasAnyHit = true;
-      quietChunksSinceLastHit = 0;
-    } else if (hasAnyHit) {
-      quietChunksSinceLastHit += 1;
-      if (quietChunksSinceLastHit >= v3MintLogQuietChunksToStop) break;
+    if (sinceBlock === undefined) {
+      if (logs === null) {
+        // Unknown, not confirmed-empty: budget is still spent, but the quiet streak is untouched.
+      } else if (logs.length > 0) {
+        hasAnyHit = true;
+        quietChunksSinceLastHit = 0;
+      } else if (hasAnyHit) {
+        quietChunksSinceLastHit += 1;
+        if (quietChunksSinceLastHit >= v3MintLogQuietChunksToStop) break;
+      }
     }
-    if (fromBlock === 0n) break;
-    toBlock = fromBlock - 1n;
+    if (effectiveFromBlock === 0n || (sinceBlock !== undefined && effectiveFromBlock <= sinceBlock)) {
+      break;
+    }
+    toBlock = effectiveFromBlock - 1n;
   }
 
   return collected;
@@ -575,9 +602,10 @@ const v3MaxPositionsResolvedPerPool = 6;
 async function resolveV3PositionCustody(
   adapter: ChainAdapter,
   poolAddress: `0x${string}`,
-  blockNumber: bigint
+  blockNumber: bigint,
+  sinceBlock: bigint | undefined
 ): Promise<V3PositionCustodyEntry[]> {
-  const mintLogs = await fetchV3PoolMintLogs(adapter, poolAddress, blockNumber);
+  const mintLogs = await fetchV3PoolMintLogs(adapter, poolAddress, blockNumber, sinceBlock);
   if (mintLogs.length === 0) return [];
 
   const decodedMints = mintLogs
