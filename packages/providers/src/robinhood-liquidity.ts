@@ -551,11 +551,11 @@ function computePositionQuoteValueUsd(
 // Scanning backward in bounded chunks finds a recently created pool's Mint(s) in only a few
 // requests while staying under typical provider range caps.
 const v3MintLogChunkBlocks = 2_000n;
-// A pool is scanned at an ever-growing distance from its own creation block as real time passes
-// between rescans, so a lookback budget sized to "just barely" cover one observed gap erodes on
-// every later rescan of the same pool. 80 chunks x 2,000 blocks = 160,000 blocks (~6 days at this
-// chain's ~3.2s block time) — verified live against $PIPEDOG: the prior 50-chunk (100,000 block)
-// budget already stopped covering its own launch block within a day of relaunching the detector.
+// Fallback-only (no sinceBlock available): a pool is scanned at an ever-growing distance from
+// its own creation block as real time passes between rescans, so a lookback budget sized to
+// "just barely" cover one observed gap erodes on every later rescan of the same pool. This
+// bounds the WEAKER quiet-chunk heuristic path only — see fetchV3PoolMintLogsSinceBlock for the
+// precise, sinceBlock-anchored path used whenever the token's creation block is known.
 const v3MintLogMaxChunks = 80;
 // A later, unrelated small liquidity top-up can sit in the very first chunk scanned, ahead of
 // the pool's original (and typically dominant) Mint. Stopping right after the first hit
@@ -565,27 +565,75 @@ const v3MintLogMaxChunks = 80;
 // chunks after the most recent hit lets the scan walk back through such gaps to the pool's
 // genuine creation Mint, while still bailing out once activity has clearly stopped.
 const v3MintLogQuietChunksToStop = 3;
+// How many 2,000-block chunks fetch concurrently when scanning a known, exact range — bounds
+// wall-clock time without changing the total request count. Retried chunks fall back to serial.
+const v3MintLogConcurrency = 8;
+// Hard ceiling even when sinceBlock is known and exact, purely to bound worst-case cost for a
+// pathologically old token — 500 chunks x 2,000 blocks = 1,000,000 blocks (~37 days at this
+// chain's ~3.2s block time). A gap beyond this returns only what was found up to the ceiling,
+// a known limitation for very old pools, not a claim their Mint history is fully covered.
+const v3MintLogMaxChunksSinceBlock = 500;
 
 /**
- * Scans backward from the current block in bounded windows for this pool's Mint events.
- *
- * When sinceBlock (the scanned token's own creation block) is known, it is used as a hard,
- * activity-independent floor: no Mint can predate the token itself, so the scan simply continues
- * down to that exact block rather than guessing when to stop. This is far more reliable than an
- * activity-based heuristic — live-verified repeatedly against $PIPEDOG, where a "stop after N
- * consecutive quiet chunks" rule kept mistaking a genuine lull in bot activity for having reached
- * the pool's creation, cutting the scan short long before the real launch Mint and hiding both
- * the deployer's real position and the genuine UNCX lock.
- *
- * Without sinceBlock (token creation block unavailable), falls back to the quiet-chunk heuristic
- * bounded by v3MintLogMaxChunks — a known-weaker approximation, not a guarantee of reaching the
- * pool's actual creation.
+ * Fetches this pool's Mint events across the entire [sinceBlock, blockNumber] range, in bounded
+ * chunks fetched with limited concurrency. Used whenever the scanned token's own creation block
+ * is known — no Mint can predate the token itself, so the exact number of chunks needed is known
+ * upfront and there is no heuristic "when to stop" question at all. Live-verified against
+ * $PIPEDOG: as real time passed between rescans, the gap between "now" and the pool's creation
+ * grew past 500,000 blocks — a fixed, activity-based chunk budget silently stopped covering the
+ * pool's own launch Mint again, even with a floor in place, because the floor was still capped
+ * by an unrelated fixed chunk-count ceiling sized for a much smaller gap.
  */
-async function fetchV3PoolMintLogs(
+async function fetchV3PoolMintLogsSinceBlock(
   adapter: ChainAdapter,
   poolAddress: `0x${string}`,
   blockNumber: bigint,
-  sinceBlock: bigint | undefined
+  sinceBlock: bigint
+): Promise<ChainLog[]> {
+  const ranges: Array<{ fromBlock: bigint; toBlock: bigint }> = [];
+  let toBlock = blockNumber;
+  while (toBlock >= sinceBlock && ranges.length < v3MintLogMaxChunksSinceBlock) {
+    const fromBlock = toBlock - v3MintLogChunkBlocks + 1n > sinceBlock
+      ? toBlock - v3MintLogChunkBlocks + 1n
+      : sinceBlock;
+    ranges.push({ fromBlock, toBlock });
+    if (fromBlock <= sinceBlock) break;
+    toBlock = fromBlock - 1n;
+  }
+
+  const collected: ChainLog[] = [];
+  for (let i = 0; i < ranges.length; i += v3MintLogConcurrency) {
+    const batch = ranges.slice(i, i + v3MintLogConcurrency);
+    const batchResults = await Promise.all(
+      batch.map(async (range) => {
+        const query = {
+          address: poolAddress,
+          fromBlock: range.fromBlock,
+          toBlock: range.toBlock,
+          topics: [uniswapV3PoolMintTopic]
+        };
+        const logs = await adapter.getLogs(query).catch(() => null);
+        if (logs !== null) return logs;
+        return adapter.getLogs(query).catch(() => []);
+      })
+    );
+    for (const logs of batchResults) collected.push(...logs);
+  }
+
+  return collected;
+}
+
+/**
+ * Scans backward from the current block in bounded windows for this pool's Mint events, using
+ * an activity-based "stop after N quiet chunks" heuristic — a known-weaker fallback used only
+ * when the token's creation block is unavailable (see fetchV3PoolMintLogsSinceBlock for the
+ * precise, preferred path). This heuristic cannot reliably tell a genuine lull in bot activity
+ * apart from having actually reached the pool's creation.
+ */
+async function fetchV3PoolMintLogsHeuristic(
+  adapter: ChainAdapter,
+  poolAddress: `0x${string}`,
+  blockNumber: bigint
 ): Promise<ChainLog[]> {
   const collected: ChainLog[] = [];
   let toBlock = blockNumber;
@@ -594,21 +642,18 @@ async function fetchV3PoolMintLogs(
   let quietChunksSinceLastHit = 0;
 
   while (chunksScanned < v3MintLogMaxChunks) {
-    if (sinceBlock !== undefined && toBlock < sinceBlock) break;
     const fromBlock = toBlock > v3MintLogChunkBlocks ? toBlock - v3MintLogChunkBlocks + 1n : 0n;
-    const effectiveFromBlock =
-      sinceBlock !== undefined && fromBlock < sinceBlock ? sinceBlock : fromBlock;
     const query = {
       address: poolAddress,
-      fromBlock: effectiveFromBlock,
+      fromBlock,
       toBlock,
       topics: [uniswapV3PoolMintTopic]
     };
     // A transient RPC hiccup on one chunk must never look identical to "genuinely no Mint here"
     // — treating them the same lets a single flaky request prematurely trip the quiet-chunk
     // stop below and silently cut the scan short before reaching the pool's real creation Mint.
-    // One immediate retry absorbs a one-off blip; only a confirmed empty result (or two
-    // consecutive failures) counts toward quietChunksSinceLastHit.
+    // One immediate retry absorbs a one-off blip; only a confirmed empty result counts toward
+    // quietChunksSinceLastHit.
     let logs: ChainLog[] | null = await adapter.getLogs(query).catch(() => null);
     if (logs === null) {
       logs = await adapter.getLogs(query).catch(() => null);
@@ -616,25 +661,34 @@ async function fetchV3PoolMintLogs(
     collected.push(...(logs ?? []));
     chunksScanned += 1;
 
-    if (sinceBlock === undefined) {
-      if (logs === null) {
-        // Unknown, not confirmed-empty: budget is still spent, but the quiet streak is untouched.
-      } else if (logs.length > 0) {
-        hasAnyHit = true;
-        quietChunksSinceLastHit = 0;
-      } else if (hasAnyHit) {
-        quietChunksSinceLastHit += 1;
-        if (quietChunksSinceLastHit >= v3MintLogQuietChunksToStop) break;
-      }
+    if (logs === null) {
+      // Unknown, not confirmed-empty: budget is still spent, but the quiet streak is untouched.
+    } else if (logs.length > 0) {
+      hasAnyHit = true;
+      quietChunksSinceLastHit = 0;
+    } else if (hasAnyHit) {
+      quietChunksSinceLastHit += 1;
+      if (quietChunksSinceLastHit >= v3MintLogQuietChunksToStop) break;
     }
-    if (effectiveFromBlock === 0n || (sinceBlock !== undefined && effectiveFromBlock <= sinceBlock)) {
-      break;
-    }
-    toBlock = effectiveFromBlock - 1n;
+    if (fromBlock === 0n) break;
+    toBlock = fromBlock - 1n;
   }
 
   return collected;
 }
+
+async function fetchV3PoolMintLogs(
+  adapter: ChainAdapter,
+  poolAddress: `0x${string}`,
+  blockNumber: bigint,
+  sinceBlock: bigint | undefined
+): Promise<ChainLog[]> {
+  if (sinceBlock !== undefined) {
+    return fetchV3PoolMintLogsSinceBlock(adapter, poolAddress, blockNumber, sinceBlock);
+  }
+  return fetchV3PoolMintLogsHeuristic(adapter, poolAddress, blockNumber);
+}
+
 
 // Bounds how many distinct positions get resolved per pool. A pool with many small third-party
 // LPs could otherwise surface a long tail of dust positions; the launch/team positions that
