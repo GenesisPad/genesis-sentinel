@@ -478,7 +478,12 @@ interface V3PositionCustodyEntry {
 // Scanning backward in bounded chunks finds a recently created pool's Mint(s) in only a few
 // requests while staying under typical provider range caps.
 const v3MintLogChunkBlocks = 2_000n;
-const v3MintLogMaxChunks = 50;
+// A pool is scanned at an ever-growing distance from its own creation block as real time passes
+// between rescans, so a lookback budget sized to "just barely" cover one observed gap erodes on
+// every later rescan of the same pool. 80 chunks x 2,000 blocks = 160,000 blocks (~6 days at this
+// chain's ~3.2s block time) — verified live against $PIPEDOG: the prior 50-chunk (100,000 block)
+// budget already stopped covering its own launch block within a day of relaunching the detector.
+const v3MintLogMaxChunks = 80;
 // A later, unrelated small liquidity top-up can sit in the very first chunk scanned, ahead of
 // the pool's original (and typically dominant) Mint. Stopping right after the first hit
 // therefore risks locking onto a closed/negligible position instead of the real one — verified
@@ -509,18 +514,27 @@ async function fetchV3PoolMintLogs(
 
   while (chunksScanned < v3MintLogMaxChunks) {
     const fromBlock = toBlock > v3MintLogChunkBlocks ? toBlock - v3MintLogChunkBlocks + 1n : 0n;
-    const logs = await adapter
-      .getLogs({
-        address: poolAddress,
-        fromBlock,
-        toBlock,
-        topics: [uniswapV3PoolMintTopic]
-      })
-      .catch(() => []);
-    collected.push(...logs);
+    const query = {
+      address: poolAddress,
+      fromBlock,
+      toBlock,
+      topics: [uniswapV3PoolMintTopic]
+    };
+    // A transient RPC hiccup on one chunk must never look identical to "genuinely no Mint here"
+    // — treating them the same lets a single flaky request prematurely trip the quiet-chunk
+    // stop below and silently cut the scan short before reaching the pool's real creation Mint.
+    // One immediate retry absorbs a one-off blip; only a confirmed empty result (or two
+    // consecutive failures) counts toward quietChunksSinceLastHit.
+    let logs: ChainLog[] | null = await adapter.getLogs(query).catch(() => null);
+    if (logs === null) {
+      logs = await adapter.getLogs(query).catch(() => null);
+    }
+    collected.push(...(logs ?? []));
     chunksScanned += 1;
 
-    if (logs.length > 0) {
+    if (logs === null) {
+      // Unknown, not confirmed-empty: budget is still spent, but the quiet streak is untouched.
+    } else if (logs.length > 0) {
       hasAnyHit = true;
       quietChunksSinceLastHit = 0;
     } else if (hasAnyHit) {
