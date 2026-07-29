@@ -2105,13 +2105,15 @@ describe("v3 position custody detector", () => {
               currentOwnerAddress: "0x1112b8c161119d4f866e4c21bacf0eeb3a1c91d9" as const,
               currentOwnerIsContract: false,
               currentOwnerLockerLabel: null,
-              liquidityRaw: "2134690521568425074304"
+              liquidityRaw: "2134690521568425074304",
+              valueUsd: null
             }
           ])
       },
       context
     );
 
+    // Unpriceable defaults to CRITICAL rather than assuming a small share of the pool.
     expect(result.findings.map((finding) => finding.code)).toContain("V3_POSITION_HELD_BY_WALLET");
     expect(result.findings[0]?.severity).toBe("CRITICAL");
     expect(result.checks[0]?.outcome).toBe("DETECTED");
@@ -2129,7 +2131,8 @@ describe("v3 position custody detector", () => {
               currentOwnerAddress: "0x00000000000000000000000000000000000000cc" as const,
               currentOwnerIsContract: true,
               currentOwnerLockerLabel: null,
-              liquidityRaw: "1000000"
+              liquidityRaw: "1000000",
+              valueUsd: 500
             }
           ])
       },
@@ -2152,7 +2155,8 @@ describe("v3 position custody detector", () => {
               currentOwnerAddress: "0x000000000000000000000000000000000000dead" as const,
               currentOwnerIsContract: false,
               currentOwnerLockerLabel: null,
-              liquidityRaw: "1000000"
+              liquidityRaw: "1000000",
+              valueUsd: 500
             }
           ])
       },
@@ -2174,7 +2178,8 @@ describe("v3 position custody detector", () => {
               currentOwnerAddress: "0x1112b8c161119d4f866e4c21bacf0eeb3a1c91d9" as const,
               currentOwnerIsContract: false,
               currentOwnerLockerLabel: null,
-              liquidityRaw: "500000"
+              liquidityRaw: "500000",
+              valueUsd: null
             }
           ])
       },
@@ -2194,7 +2199,7 @@ describe("v3 position custody detector", () => {
     expect(result.checks[0]?.outcome).toBe("DATA_UNAVAILABLE");
   });
 
-  it("reports a real UNCX lock as INFO without suppressing a separate wallet-held position on the same pool (pipedog-style)", async () => {
+  it("reports a real UNCX lock as INFO and downgrades a small (~3.4%) wallet-held minority to HIGH, not CRITICAL (pipedog-style)", async () => {
     const result = await v3PositionCustodyDetector.run(
       {
         readPositionCustody: () =>
@@ -2206,7 +2211,10 @@ describe("v3 position custody detector", () => {
               currentOwnerAddress: "0xf28704c691290547924e2129d407da36bda8ce0f" as const,
               currentOwnerIsContract: true,
               currentOwnerLockerLabel: "UNCX_LiquidityLocker_UniV3",
-              liquidityRaw: "1787504052991699032807727"
+              liquidityRaw: "1787504052991699032807727",
+              // Real dollar value computed from on-chain tick math: ~2,087 WETH + ~1.53B
+              // PIPEDOG at the scanned price — the large majority of the pool.
+              valueUsd: 7_324_948.72
             },
             {
               poolAddress: "0xb7f10f74b39291b9290b779978e19a7637c742d6" as const,
@@ -2215,7 +2223,9 @@ describe("v3 position custody detector", () => {
               currentOwnerAddress: "0xa359e6190740930bb65e611b553724b0ce73e814" as const,
               currentOwnerIsContract: false,
               currentOwnerLockerLabel: null,
-              liquidityRaw: "676091525868340561187277"
+              liquidityRaw: "676091525868340561187277",
+              // ~135 WETH, out of range — a real but small (~3.4%) slice of the pool.
+              valueUsd: 259_710.30
             }
           ])
       },
@@ -2227,13 +2237,84 @@ describe("v3 position custody detector", () => {
     expect(codes).toContain("V3_POSITION_LOCKED_BY_KNOWN_LOCKER");
 
     const walletFinding = result.findings.find((finding) => finding.code === "V3_POSITION_HELD_BY_WALLET");
-    expect(walletFinding?.severity).toBe("CRITICAL");
+    expect(walletFinding?.severity).toBe("HIGH");
     expect(walletFinding?.description).toContain("UNCX_LiquidityLocker_UniV3");
+    expect(walletFinding?.description).toContain("3.4%");
 
     const lockFinding = result.findings.find(
       (finding) => finding.code === "V3_POSITION_LOCKED_BY_KNOWN_LOCKER"
     );
     expect(lockFinding?.severity).toBe("INFO");
+  });
+
+  it("keeps CRITICAL when the wallet-held share of a priceable pool is a majority", async () => {
+    const result = await v3PositionCustodyDetector.run(
+      {
+        readPositionCustody: () =>
+          Promise.resolve([
+            {
+              poolAddress: "0x0000000000000000000000000000000000000011" as const,
+              mintOwnerAddress: "0x0000000000000000000000000000000000000022" as const,
+              tokenId: "10",
+              currentOwnerAddress: "0x0000000000000000000000000000000000000033" as const,
+              currentOwnerIsContract: false,
+              currentOwnerLockerLabel: null,
+              liquidityRaw: "900000",
+              valueUsd: 900_000
+            },
+            {
+              poolAddress: "0x0000000000000000000000000000000000000011" as const,
+              mintOwnerAddress: "0x0000000000000000000000000000000000000022" as const,
+              tokenId: "11",
+              currentOwnerAddress: "0x0000000000000000000000000000000000000044" as const,
+              currentOwnerIsContract: true,
+              currentOwnerLockerLabel: "UNCX_LiquidityLocker_UniV3",
+              liquidityRaw: "100000",
+              valueUsd: 100_000
+            }
+          ])
+      },
+      context
+    );
+
+    const walletFinding = result.findings.find((finding) => finding.code === "V3_POSITION_HELD_BY_WALLET");
+    expect(walletFinding?.severity).toBe("CRITICAL");
+    expect(walletFinding?.description).toContain("90.0%");
+  });
+
+  it("defaults to CRITICAL when the wallet-held position's pool share cannot be priced", async () => {
+    const result = await v3PositionCustodyDetector.run(
+      {
+        readPositionCustody: () =>
+          Promise.resolve([
+            {
+              poolAddress: "0x0000000000000000000000000000000000000055" as const,
+              mintOwnerAddress: "0x0000000000000000000000000000000000000066" as const,
+              tokenId: "20",
+              currentOwnerAddress: "0x0000000000000000000000000000000000000077" as const,
+              currentOwnerIsContract: false,
+              currentOwnerLockerLabel: null,
+              liquidityRaw: "900000",
+              valueUsd: null
+            },
+            {
+              poolAddress: "0x0000000000000000000000000000000000000055" as const,
+              mintOwnerAddress: "0x0000000000000000000000000000000000000066" as const,
+              tokenId: "21",
+              currentOwnerAddress: "0x0000000000000000000000000000000000000088" as const,
+              currentOwnerIsContract: true,
+              currentOwnerLockerLabel: "UNCX_LiquidityLocker_UniV3",
+              liquidityRaw: "100000",
+              valueUsd: 100_000
+            }
+          ])
+      },
+      context
+    );
+
+    const walletFinding = result.findings.find((finding) => finding.code === "V3_POSITION_HELD_BY_WALLET");
+    expect(walletFinding?.severity).toBe("CRITICAL");
+    expect(walletFinding?.description).toContain("could not be priced");
   });
 });
 

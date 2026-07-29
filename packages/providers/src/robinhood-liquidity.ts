@@ -432,7 +432,13 @@ async function discoverUniswapV3Pool(
     quotePriceUsd !== null
       ? (Number(quoteBalance) / 10 ** quote.decimals) * 2 * quotePriceUsd
       : null;
-  const positions = await resolveV3PositionCustody(adapter, poolAddress, blockNumber, sinceBlock).catch(
+  const positions = await resolveV3PositionCustody(adapter, poolAddress, blockNumber, sinceBlock, {
+    currentTick: slot0[1],
+    sqrtPriceX96: slot0[0],
+    quoteIsToken0: quote.address.toLowerCase() === token0.toLowerCase(),
+    quoteDecimals: quote.decimals,
+    quotePriceUsd
+  }).catch(
     (): V3PositionCustodyEntry[] => []
   );
 
@@ -480,6 +486,61 @@ interface V3PositionCustodyEntry {
    * total liquidity. Lets a fully closed/withdrawn position (0) be told apart from one still
    * holding real value. */
   liquidityRaw: string;
+  /** Best-effort USD value of this specific position, derived from its quote-token side only
+   * (via standard V3 tick math against the pool's current price) times the quote token's known
+   * USD price — not the scanned token's own price, which would need its decimals threaded in
+   * from elsewhere. This deliberately undercounts an in-range position's non-quote-token side,
+   * which biases the resulting share comparison conservatively (never understating a wallet's
+   * real share of pool value) rather than requiring a second, less reliable price lookup.
+   * Null when the quote token's USD price is unavailable. Liquidity (L) units are NOT
+   * comparable in dollar terms across different tick ranges, so this is the only sound basis
+   * for judging how large a position's share of the pool actually is. */
+  valueUsd: number | null;
+}
+
+interface V3PositionValuationContext {
+  currentTick: number;
+  sqrtPriceX96: bigint;
+  quoteIsToken0: boolean;
+  quoteDecimals: number;
+  quotePriceUsd: number | null;
+}
+
+/**
+ * Values a position's quote-token side only via the standard V3 tick-math amount formulas,
+ * using floating-point sqrt-ratio approximation (1.0001^(tick/2)) — sufficient for a severity
+ * comparison, not claimed as wei-exact evidence.
+ */
+function computePositionQuoteValueUsd(
+  liquidityRaw: string,
+  tickLower: number,
+  tickUpper: number,
+  context: V3PositionValuationContext
+): number | null {
+  if (context.quotePriceUsd === null) return null;
+  const liquidity = parseRawLiquidity(liquidityRaw);
+  if (liquidity <= 0n) return 0;
+
+  const sqrtRatioAtTick = (tick: number) => Math.pow(1.0001, tick / 2);
+  const l = Number(liquidity);
+  const sqrtPa = sqrtRatioAtTick(tickLower);
+  const sqrtPb = sqrtRatioAtTick(tickUpper);
+  const sqrtP = Math.pow(2, -96) * Number(context.sqrtPriceX96);
+
+  let amount0 = 0;
+  let amount1 = 0;
+  if (context.currentTick < tickLower) {
+    amount0 = l * (1 / sqrtPa - 1 / sqrtPb);
+  } else if (context.currentTick >= tickUpper) {
+    amount1 = l * (sqrtPb - sqrtPa);
+  } else {
+    amount0 = l * (1 / sqrtP - 1 / sqrtPb);
+    amount1 = l * (sqrtP - sqrtPa);
+  }
+
+  const quoteAmountRaw = context.quoteIsToken0 ? amount0 : amount1;
+  const quoteAmount = quoteAmountRaw / 10 ** context.quoteDecimals;
+  return quoteAmount * context.quotePriceUsd;
 }
 
 // Commercial RPC providers (Dwellir included) reject eth_getLogs over an unbounded range —
@@ -603,7 +664,8 @@ async function resolveV3PositionCustody(
   adapter: ChainAdapter,
   poolAddress: `0x${string}`,
   blockNumber: bigint,
-  sinceBlock: bigint | undefined
+  sinceBlock: bigint | undefined,
+  valuation: V3PositionValuationContext
 ): Promise<V3PositionCustodyEntry[]> {
   const mintLogs = await fetchV3PoolMintLogs(adapter, poolAddress, blockNumber, sinceBlock);
   if (mintLogs.length === 0) return [];
@@ -662,25 +724,37 @@ async function resolveV3PositionCustody(
   // Raw (non-NFT) positions have no tokenId at all, so (owner, tickLower, tickUpper) is the best
   // available identity for them — collisions here would mean two different EOAs independently
   // calling pool.mint() directly with the exact same range, an unusual enough case to accept.
-  const rawGroups = new Map<string, { log: ChainLog; owner: `0x${string}` }>();
+  const rawGroups = new Map<
+    string,
+    { log: ChainLog; owner: `0x${string}`; tickLower: number; tickUpper: number }
+  >();
   for (const mint of rawMints) {
     const key = `${mint.owner.toLowerCase()}-${mint.tickLower}-${mint.tickUpper}`;
     const existing = rawGroups.get(key);
     if (!existing || isEarlierLog(mint.log, existing.log)) {
-      rawGroups.set(key, { log: mint.log, owner: mint.owner });
+      rawGroups.set(key, {
+        log: mint.log,
+        owner: mint.owner,
+        tickLower: mint.tickLower,
+        tickUpper: mint.tickUpper
+      });
     }
   }
-  const rawEntries: V3PositionCustodyEntry[] = [...rawGroups.values()].map((group) => ({
-    mintOwnerAddress: group.owner,
-    tokenId: null,
-    currentOwnerAddress: group.owner,
-    currentOwnerIsContract: false,
-    currentOwnerLockerLabel: null,
+  const rawEntries: V3PositionCustodyEntry[] = [...rawGroups.values()].map((group) => {
     // No cheap "current liquidity" read exists for a raw (owner,tickLower,tickUpper) position
     // outside the pool's own internal accounting; the historical mint amount is reported as a
     // best-effort estimate rather than left blank.
-    liquidityRaw: group.log.data ? (decodeMintAmount(group.log) ?? 0n).toString() : "0"
-  }));
+    const liquidityRaw = (decodeMintAmount(group.log) ?? 0n).toString();
+    return {
+      mintOwnerAddress: group.owner,
+      tokenId: null,
+      currentOwnerAddress: group.owner,
+      currentOwnerIsContract: false,
+      currentOwnerLockerLabel: null,
+      liquidityRaw,
+      valueUsd: computePositionQuoteValueUsd(liquidityRaw, group.tickLower, group.tickUpper, valuation)
+    };
+  });
 
   // Every contract-owned Mint in the (already bounded) scan window is resolved — NOT pre-ranked
   // by its raw mint `amount` first. That L (liquidity) value is not comparable across different
@@ -691,7 +765,9 @@ async function resolveV3PositionCustody(
   // UNCX lock in the same run. Only each RESOLVED position's real current liquidity (read below
   // via positions()) is a valid ranking signal, so capping happens after resolution instead.
   const resolvedContractEntries = await Promise.all(
-    contractMints.map((mint) => resolveOneV3NftPosition(adapter, mint.owner, mint.log, blockNumber))
+    contractMints.map((mint) =>
+      resolveOneV3NftPosition(adapter, mint.owner, mint.log, blockNumber, valuation)
+    )
   );
 
   const seenTokenIds = new Set<string>();
@@ -709,6 +785,7 @@ async function resolveV3PositionCustody(
 
   const contractEntries = uniqueContractEntries
     .sort((a, b) => {
+      if (a.valueUsd !== null && b.valueUsd !== null) return b.valueUsd - a.valueUsd;
       const liquidityA = parseRawLiquidity(a.liquidityRaw);
       const liquidityB = parseRawLiquidity(b.liquidityRaw);
       return liquidityB > liquidityA ? 1 : liquidityB < liquidityA ? -1 : 0;
@@ -743,7 +820,8 @@ async function resolveOneV3NftPosition(
   adapter: ChainAdapter,
   mintOwnerAddress: `0x${string}`,
   mintLog: ChainLog,
-  blockNumber: bigint
+  blockNumber: bigint,
+  valuation: V3PositionValuationContext
 ): Promise<V3PositionCustodyEntry> {
   const unresolved = (overrides: Partial<V3PositionCustodyEntry> = {}): V3PositionCustodyEntry => ({
     mintOwnerAddress,
@@ -752,6 +830,7 @@ async function resolveOneV3NftPosition(
     currentOwnerIsContract: null,
     currentOwnerLockerLabel: null,
     liquidityRaw: "0",
+    valueUsd: null,
     ...overrides
   });
 
@@ -833,6 +912,9 @@ async function resolveOneV3NftPosition(
   const currentOwnerLockerLabel = currentOwnerIsContract
     ? (knownV3PositionLockers[currentOwnerAddress.toLowerCase()] ?? null)
     : null;
+  const valueUsd = positionState
+    ? computePositionQuoteValueUsd(liquidityRaw, positionState[5], positionState[6], valuation)
+    : null;
 
   return {
     mintOwnerAddress,
@@ -840,7 +922,8 @@ async function resolveOneV3NftPosition(
     currentOwnerAddress,
     currentOwnerIsContract,
     currentOwnerLockerLabel,
-    liquidityRaw
+    liquidityRaw,
+    valueUsd
   };
 }
 

@@ -2493,6 +2493,10 @@ const v3PositionCustodyKnownBurnOrZeroAddresses = new Set([
   "0x0000000000000000000000000000000000000000"
 ]);
 
+/** A wallet-held position worth at least this share of its pool's known value is CRITICAL;
+ * below it, HIGH. Two tiers only — not a claim that risk drops to zero below the threshold. */
+const v3WalletShareCriticalThreshold = 0.15;
+
 export interface V3PositionCustodySample {
   poolAddress: `0x${string}`;
   /** The address Uniswap's pool-level Mint event recorded as `owner` — normally the
@@ -2516,6 +2520,12 @@ export interface V3PositionCustodySample {
   /** This position's own current liquidity — not the pool's total — so a fully withdrawn
    * position reads as 0 rather than a stale historical size. */
   liquidityRaw: string;
+  /** Best-effort USD value of this specific position (quote-token side only — see
+   * resolveV3PositionCustody in @genesis-sentinel/providers' robinhood-liquidity.ts for why).
+   * Liquidity units are not comparable across different tick ranges, so this is the only sound
+   * basis for judging what share of a pool's value a wallet-held position represents. Null when
+   * a USD price was unavailable. */
+  valueUsd: number | null;
 }
 
 export interface V3PositionCustodyDetectorInput {
@@ -2591,15 +2601,56 @@ export const v3PositionCustodyDetector: SecurityDetector<V3PositionCustodyDetect
 
     const findings: SecurityFinding[] = [];
     if (walletHeld.length > 0) {
-      const findingEvidence: FindingEvidence = {
-        ...evidence,
-        summary: "V3 positions whose current holder is a plain wallet, not a contract",
-        data: { samples, walletHeld, lockedByKnownLocker }
-      };
+      // Liquidity (L) units are not comparable in dollar terms across different tick ranges (a
+      // full-range position needs far more L than a narrow one to hold the same real value), so
+      // severity is scaled by each affected pool's wallet-held USD share, not a flat verdict.
+      // Verified live against $PIPEDOG: a wallet-held position worth ~$260k sat alongside a
+      // genuine ~$7.3M UNCX-locked position in the same pool — a ~3.4% share, not "the pool is
+      // unlocked." When a pool's value can't be priced at all, severity defaults to CRITICAL
+      // rather than guessing it's a small share.
+      const affectedPools = [...new Set(walletHeld.map((sample) => sample.poolAddress))];
+      const poolShares = affectedPools.map((poolAddress) => {
+        const poolSamples = withLiquidity.filter((sample) => sample.poolAddress === poolAddress);
+        const poolWalletSamples = walletHeld.filter((sample) => sample.poolAddress === poolAddress);
+        const knownValue = poolSamples.every((sample) => sample.valueUsd !== null);
+        const totalValueUsd = knownValue
+          ? poolSamples.reduce((sum, sample) => sum + (sample.valueUsd ?? 0), 0)
+          : null;
+        const walletValueUsd = knownValue
+          ? poolWalletSamples.reduce((sum, sample) => sum + (sample.valueUsd ?? 0), 0)
+          : null;
+        const sharePct =
+          totalValueUsd !== null && walletValueUsd !== null && totalValueUsd > 0
+            ? walletValueUsd / totalValueUsd
+            : null;
+        return { poolAddress, totalValueUsd, walletValueUsd, sharePct };
+      });
+
+      const knownShares = poolShares.filter(
+        (pool): pool is typeof pool & { sharePct: number } => pool.sharePct !== null
+      );
+      const hasUnknownSharePool = poolShares.length !== knownShares.length;
+      const maxSharePct = knownShares.length > 0
+        ? Math.max(...knownShares.map((pool) => pool.sharePct))
+        : null;
+      const severity: FindingSeverity =
+        hasUnknownSharePool || maxSharePct === null || maxSharePct >= v3WalletShareCriticalThreshold
+          ? "CRITICAL"
+          : "HIGH";
+
+      const shareNote =
+        maxSharePct !== null
+          ? ` The wallet-held position(s) account for approximately ${(maxSharePct * 100).toFixed(1)}% of the affected pool's known value.`
+          : " The wallet-held position(s)' share of pool value could not be priced, so this is treated as high severity by default.";
       const lockerNote =
         lockedByKnownLocker.length > 0
           ? ` Separately, this pool also has ${lockedByKnownLocker.length} position(s) confirmed locked via ${[...new Set(lockedByKnownLocker.map((sample) => sample.currentOwnerLockerLabel))].join(", ")} — that lock does not cover the wallet-held position(s) reported here.`
           : "";
+      const findingEvidence: FindingEvidence = {
+        ...evidence,
+        summary: "V3 positions whose current holder is a plain wallet, not a contract",
+        data: { samples, walletHeld, lockedByKnownLocker, poolShares }
+      };
       findings.push(
         createFinding({
           code: "V3_POSITION_HELD_BY_WALLET",
@@ -2608,13 +2659,13 @@ export const v3PositionCustodyDetector: SecurityDetector<V3PositionCustodyDetect
             lockedByKnownLocker.length > 0
               ? "Part of this pool's liquidity is still held by a plain wallet, not locked"
               : "Liquidity position held by a plain wallet, not locked",
-          severity: "CRITICAL",
+          severity,
           category: "LIQUIDITY_SAFETY",
           confidence: "HIGH",
           description:
-            `At least one Uniswap V3 liquidity position on this pool is currently held by a plain wallet rather than a locker/vault contract or a burn address. Uniswap V3 has no protocol-level equivalent of burning a V2 LP token — whoever holds that position's NFT can withdraw and sell it at any time.${lockerNote}`,
+            `At least one Uniswap V3 liquidity position on this pool is currently held by a plain wallet rather than a locker/vault contract or a burn address. Uniswap V3 has no protocol-level equivalent of burning a V2 LP token — whoever holds that position's NFT can withdraw and sell it at any time.${shareNote}${lockerNote}`,
           technicalExplanation:
-            "Each position's current holder was read live at the scan block (ownerOf() on the position manager, or the direct pool.mint() caller when no position manager wraps the position) and its bytecode was checked live via getBytecode(); an empty result means it is a plain externally-owned account, not a contract. Positions are resolved and reported independently, so a genuine lock on one position is never used to explain away a different, wallet-held position on the same pool.",
+            "Each position's current holder was read live at the scan block (ownerOf() on the position manager, or the direct pool.mint() caller when no position manager wraps the position) and its bytecode was checked live via getBytecode(); an empty result means it is a plain externally-owned account, not a contract. Positions are resolved and reported independently, so a genuine lock on one position is never used to explain away a different, wallet-held position on the same pool. Severity is scaled by each pool's wallet-held USD share (quote-token-side valuation via V3 tick math), defaulting to CRITICAL whenever that share cannot be priced.",
           evidence: [findingEvidence],
           recommendation:
             "Treat the wallet-held position(s) as unlocked and withdrawable at will by the holding wallet, regardless of any other liquidity in this pool confirmed locked elsewhere. A clean token contract or renounced ownership elsewhere does not mean this liquidity is safe."

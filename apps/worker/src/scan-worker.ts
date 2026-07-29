@@ -1685,7 +1685,8 @@ function readV3PositionCustodySamples(pools: DiscoveredPool[] | null): V3Positio
           typeof position.currentOwnerIsContract === "boolean" ? position.currentOwnerIsContract : null,
         currentOwnerLockerLabel:
           typeof position.currentOwnerLockerLabel === "string" ? position.currentOwnerLockerLabel : null,
-        liquidityRaw: liquidityRaw.toString()
+        liquidityRaw: liquidityRaw.toString(),
+        valueUsd: typeof position.valueUsd === "number" ? position.valueUsd : null
       });
     }
   }
