@@ -1121,6 +1121,11 @@ const burnOrZeroAddresses = new Set([
   "0x0000000000000000000000000000000000000000",
   "0x000000000000000000000000000000000000dead"
 ]);
+const developerControlRoles = new Set<RelatedWalletEdgeType>([
+  "DEPLOYED_BY",
+  "OWNED_BY",
+  "PREVIOUSLY_OWNED_BY"
+]);
 
 function buildDevClusterSummary(result: ScanResultView): DevClusterSummaryView {
   const holderPctByAddress = buildHolderPctLookup(result);
@@ -1176,17 +1181,18 @@ function buildDevClusterSummary(result: ScanResultView): DevClusterSummaryView {
     const aPct = a.holdingPct ?? -1;
     return bPct - aPct;
   });
-  const knownValues = wallets.flatMap((wallet) =>
+  const controlledWallets = wallets.filter((wallet) => developerControlRoles.has(wallet.role));
+  const knownValues = controlledWallets.flatMap((wallet) =>
     wallet.holdingPct == null ? [] : [wallet.holdingPct]
   );
   const knownHoldingPct =
     knownValues.length > 0 ? knownValues.reduce((total, pct) => total + pct, 0) : null;
 
   return {
-    walletCount: wallets.length,
+    walletCount: controlledWallets.length,
     knownHoldingPct,
-    unknownHoldingWalletCount: wallets.filter((wallet) => wallet.holdingPct == null).length,
-    wallets
+    unknownHoldingWalletCount: controlledWallets.filter((wallet) => wallet.holdingPct == null).length,
+    wallets: controlledWallets
   };
 }
 

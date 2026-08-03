@@ -479,6 +479,11 @@ const BURN_OR_ZERO_ADDRESSES = new Set([
   "0x0000000000000000000000000000000000000000",
   "0x000000000000000000000000000000000000dead",
 ]);
+const DEVELOPER_CONTROL_EDGE_TYPES = new Set<WalletClusterEdgeType>([
+  "DEPLOYED_BY",
+  "OWNED_BY",
+  "PREVIOUSLY_OWNED_BY",
+]);
 
 function buildDevClusterSummary(view: ScanResultView, edges: WalletClusterEdge[]): DevClusterInfo {
   const holderPctByAddress = buildHolderPctLookup(view);
@@ -492,6 +497,7 @@ function buildDevClusterSummary(view: ScanResultView, edges: WalletClusterEdge[]
   }
 
   for (const edge of edges) {
+    if (!DEVELOPER_CONTROL_EDGE_TYPES.has(edge.type)) continue;
     const key = edge.address.toLowerCase();
     if (isBurned(key)) continue;
     wallets.set(key, edge.holdingPct ?? holderPctByAddress.get(key) ?? null);

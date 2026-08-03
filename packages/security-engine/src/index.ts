@@ -1895,12 +1895,7 @@ export const deployerHistoryDetector: SecurityDetector<DeployerHistoryDetectorIn
 
       if (input.deployerHistory.previousHighOrCriticalCount > 0) {
         const { previousTokenCount, previousHighOrCriticalCount } = input.deployerHistory;
-        const severity: FindingSeverity =
-          previousHighOrCriticalCount >= 3
-            ? "HIGH"
-            : previousHighOrCriticalCount > 0
-              ? "MEDIUM"
-              : "INFO";
+        const severity: FindingSeverity = "INFO";
 
         findings.push(
           createFinding({
@@ -3070,6 +3065,8 @@ export async function runFoundationDetectors(
  * erase a different category's finding.
  */
 const nonRiskEvidenceFindingCodes = new Set([
+  "DEPLOYER_PRIOR_SCAN_HISTORY",
+  "DEPLOYER_FUNDED_BY_WALLET",
   "GENESISPAD_CONFIRMED_LAUNCH",
   "V3_POSITION_LOCKED_BY_KNOWN_LOCKER"
 ]);

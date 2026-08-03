@@ -1468,7 +1468,7 @@ describe("deployer history detector", () => {
 
     expect(result.findings[0]).toMatchObject({
       code: "DEPLOYER_PRIOR_SCAN_HISTORY",
-      severity: "HIGH",
+      severity: "INFO",
       category: "REPUTATION_RISK"
     });
     expect(result.findings[0]?.description).toContain("5 other token(s)");

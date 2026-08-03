@@ -528,7 +528,7 @@ describe("mapResultToReport", () => {
     ]);
   });
 
-  it("attaches holdingPct and aggregates the dev cluster when linked wallets appear in the top-holders snapshot", () => {
+  it("shows recipient holdings without treating an ordinary supply transfer as developer control", () => {
     const report = mapResultToReport(
       baseView({
         token: {
@@ -587,10 +587,10 @@ describe("mapResultToReport", () => {
     );
 
     expect(report.walletCluster[0]?.holdingPct).toBe(18.4);
-    expect(report.devCluster.walletCount).toBe(2);
-    expect(report.devCluster.knownHoldingPct).toBeCloseTo(19.6);
+    expect(report.devCluster.walletCount).toBe(1);
+    expect(report.devCluster.knownHoldingPct).toBeCloseTo(1.2);
     expect(report.devCluster.unknownHoldingWalletCount).toBe(0);
-    expect(report.holders.devClusterPct).toBeCloseTo(19.6);
+    expect(report.holders.devClusterPct).toBeCloseTo(1.2);
   });
 
   it("returns an empty wallet cluster when no clustering check is present", () => {
@@ -598,7 +598,7 @@ describe("mapResultToReport", () => {
     expect(report.walletCluster).toEqual([]);
   });
 
-  it("includes every evidenced connected wallet in the dev cluster total", () => {
+  it("keeps funding relationships visible without treating the funder as developer-controlled", () => {
     const report = mapResultToReport(
       baseView({
         token: {
@@ -652,8 +652,8 @@ describe("mapResultToReport", () => {
     );
 
     expect(report.devCluster).toMatchObject({
-      walletCount: 2,
-      knownHoldingPct: 4.75,
+      walletCount: 1,
+      knownHoldingPct: 1.5,
       unknownHoldingWalletCount: 0
     });
   });

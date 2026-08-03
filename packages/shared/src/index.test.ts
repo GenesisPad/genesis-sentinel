@@ -359,8 +359,8 @@ describe("buildTokenSecuritySummary", () => {
       "https://sentinel.genesispad.app/token/4663/0x1111111111111111111111111111111111111111"
     );
     expect(summary.devCluster).toMatchObject({
-      walletCount: 2,
-      knownHoldingPct: 5.75,
+      walletCount: 1,
+      knownHoldingPct: 1.25,
       unknownHoldingWalletCount: 0
     });
     expect(summary.taxes).toMatchObject({
@@ -404,8 +404,8 @@ describe("buildTokenSecuritySummary", () => {
     });
     expect(summary.signals.find((signal) => signal.id === "dev_cluster")).toMatchObject({
       label: "Dev cluster",
-      answer: "YES",
-      value: "5.75% across 2 linked wallet(s)"
+      answer: "NO",
+      value: "1.25% across 1 linked wallet(s)"
     });
   });
 });
