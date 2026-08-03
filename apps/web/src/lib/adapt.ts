@@ -277,6 +277,26 @@ function mapLiquidity(view: ScanResultView): LiquidityInfo {
     typeof data.lpBurnedOrLockedPct === "number"
       ? data.lpBurnedOrLockedPct
       : burnedPct;
+  const activeV3Positions =
+    data.protocol === "UNISWAP_V3" && Array.isArray(data.positions)
+      ? data.positions.filter((position) => {
+          if (typeof position !== "object" || position === null) return false;
+          try {
+            return BigInt((position as { liquidityRaw?: unknown }).liquidityRaw as string) > 0n;
+          } catch {
+            return false;
+          }
+        })
+      : [];
+  const lockedV3Positions = activeV3Positions.filter(
+    (position) =>
+      typeof (position as { currentOwnerLockerLabel?: unknown }).currentOwnerLockerLabel === "string"
+  );
+  const v3FullyLocked =
+    activeV3Positions.length > 0
+      ? lockedV3Positions.length === activeV3Positions.length
+      : null;
+  const v3LockedPct = v3FullyLocked === true ? 100 : undefined;
   const totalUsd = typeof data.totalLiquidityUsd === "number" ? data.totalLiquidityUsd : null;
   // totalLiquidityUsd is computed as quote-side value * 2 (packages/providers), assuming a
   // roughly symmetric pool — so the quote (native/stablecoin) side alone is half of it.
@@ -289,9 +309,9 @@ function mapLiquidity(view: ScanResultView): LiquidityInfo {
 
   return {
     totalUsd,
-    locked: protectedPct != null ? protectedPct >= 50 : null,
+    locked: data.protocol === "UNISWAP_V3" ? v3FullyLocked : protectedPct != null ? protectedPct >= 50 : null,
     burnedPct,
-    lockedPct,
+    lockedPct: v3LockedPct ?? lockedPct,
     poolAddress: pool.poolAddress,
     dex: pool.dex ?? undefined,
     quoteSidePctOfMarketCap,
@@ -309,6 +329,13 @@ function mapHolders(view: ScanResultView, devCluster: DevClusterInfo): HolderInf
         top10Pct?: number;
         deployerPct?: number | null;
         deployerBalanceRaw?: string | null;
+        tokenLockStatus?: {
+          status?: string;
+          lockerAddress?: string | null;
+          lockedAmountRaw?: string | null;
+          lockedPct?: number | null;
+          lockExpiry?: string | null;
+        };
       }
     | undefined;
   const topHolders = snapshot?.topHolders as { holders?: unknown[] } | undefined;
@@ -337,6 +364,21 @@ function mapHolders(view: ScanResultView, devCluster: DevClusterInfo): HolderInf
     devClusterUnknownHoldingWalletCount: devCluster.unknownHoldingWalletCount,
     ...(concentration?.deployerBalanceRaw != null
       ? { deployerBalance: { amountRaw: concentration.deployerBalanceRaw, pct: deployerPct } }
+      : {}),
+    ...(concentration?.tokenLockStatus?.status === "LOCKED" &&
+    typeof concentration.tokenLockStatus.lockedAmountRaw === "string"
+      ? {
+          tokenLock: {
+            amountRaw: concentration.tokenLockStatus.lockedAmountRaw,
+            pct:
+              typeof concentration.tokenLockStatus.lockedPct === "number"
+                ? concentration.tokenLockStatus.lockedPct
+                : null,
+            lockerAddress: concentration.tokenLockStatus.lockerAddress ?? null,
+            permanent: concentration.tokenLockStatus.lockExpiry == null,
+            expiresAt: concentration.tokenLockStatus.lockExpiry ?? null
+          }
+        }
       : {})
   };
 }

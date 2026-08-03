@@ -293,6 +293,38 @@ describe("mapResultToReport", () => {
     expect(report.liquidity.locked).toBe(false);
   });
 
+  it("recognizes a V3 position verified in Genesis Universal Locker", () => {
+    const report = mapResultToReport(
+      baseView({
+        liquidity: {
+          status: "AVAILABLE",
+          message: "Persisted liquidity pools are available for this token.",
+          pools: [
+            {
+              chainId: 4663,
+              tokenAddress: ADDRESS,
+              poolAddress: "0x1234567890123456789012345678901234567890",
+              dex: "Uniswap V3",
+              liquidityData: {
+                protocol: "UNISWAP_V3",
+                totalLiquidityUsd: 50_000,
+                positions: [
+                  {
+                    liquidityRaw: "1000",
+                    currentOwnerLockerLabel: "Genesis Universal Locker"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      })
+    );
+
+    expect(report.liquidity.locked).toBe(true);
+    expect(report.liquidity.lockedPct).toBe(100);
+  });
+
   it("maps real holder concentration snapshots instead of the unsupported stub", () => {
     const report = mapResultToReport(
       baseView({
@@ -314,6 +346,46 @@ describe("mapResultToReport", () => {
     );
     expect(report.holders.top1Pct).toBe(18.4);
     expect(report.holders.top10Pct).toBe(63.2);
+  });
+
+  it("maps verified universal-locker token custody into the holder report", () => {
+    const report = mapResultToReport(
+      baseView({
+        token: { chainId: 4663, address: ADDRESS, decimals: 18, totalSupply: "1000000000000000000000" },
+        holders: {
+          status: "AVAILABLE",
+          message: "Persisted holder snapshots are available for this token.",
+          snapshots: [
+            {
+              chainId: 4663,
+              tokenAddress: ADDRESS,
+              blockNumber: "6942713",
+              topHolders: {},
+              concentration: {
+                tokenLockStatus: {
+                  status: "LOCKED",
+                  lockerId: "genesis-universal-locker",
+                  lockerAddress: "0xf88535677f27334ee5f977dd055c790524160789",
+                  lockedAmountRaw: "100000000000000000000",
+                  lockedPct: 10,
+                  lockExpiry: null,
+                  reason: "Permanently locked via Genesis Universal Locker."
+                }
+              },
+              createdAt: "2026-07-11T00:00:00.000Z"
+            }
+          ]
+        }
+      })
+    );
+
+    expect(report.holders.tokenLock).toEqual({
+      amountRaw: "100000000000000000000",
+      pct: 10,
+      lockerAddress: "0xf88535677f27334ee5f977dd055c790524160789",
+      permanent: true,
+      expiresAt: null
+    });
   });
 
   it("flags ownership as not-renounced from the backend's on-chain owner() read", () => {

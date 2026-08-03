@@ -1395,6 +1395,7 @@ export function formatTelegramResultReply(result: ScanResultView): string {
       ? `🏗️ Deployer: ${explorerAddressLink(result.token.deployerAddress, result.token.chainId)}`
       : null,
     deployerBalanceLine(summary.deployerBalance, result),
+    tokenLockLine(summary.tokenLock, result),
     devClusterLine(summary.devCluster),
     sourceVerifiedLine(result),
     dexPaidLine(result),
@@ -1714,6 +1715,7 @@ export function formatTelegramSectionReply(
   // rather than one dense "A / B / C" line, so it reads at a glance instead of requiring the
   // reader to line up three numbers against three labels themselves.
   const concentration = readHolderConcentration(result);
+  const { tokenLock } = buildTokenSecuritySummary(result);
   return compact([
     "👥 *Holders*",
     "",
@@ -1725,6 +1727,7 @@ export function formatTelegramSectionReply(
     "",
     concentration.deployer ? `*Deployer:* ${concentration.deployer}` : null,
     concentration.owner ? `*Owner:* ${concentration.owner}` : null,
+    tokenLock ? `*Verified token lock:* ${escapeMarkdown(tokenLockLine(tokenLock, result)?.replace(/^🔒 /u, "") ?? "")}` : null,
     "",
     concentration.liquidityPool || concentration.burned || concentration.excludedContracts
       ? `*LP / Burned / Excluded:*\n${concentration.liquidityPool || "—"} / ${concentration.burned || "—"} / ${concentration.excludedContracts || "—"}`
@@ -1793,6 +1796,31 @@ function deployerBalanceLine(
   if (pct === null && amount === null) return null;
   const parts = compact([amount, pct === null ? null : `${formatSupplyPercentage(pct)} of supply`]);
   return `💰 Deployer holds: ${parts.join(" · ")}`;
+}
+
+function tokenLockLine(
+  tokenLock: {
+    lockedAmountRaw: string;
+    lockedPct: number | null;
+    permanent: boolean;
+    lockExpiry: string | null;
+  } | null,
+  result: ScanResultView
+): string | null {
+  if (!tokenLock) return null;
+  const amount = formatTokenAmount(tokenLock.lockedAmountRaw, result.token.decimals ?? null);
+  const quantity = compact([
+    amount,
+    tokenLock.lockedPct === null
+      ? null
+      : `${formatSupplyPercentage(tokenLock.lockedPct)} of supply`
+  ]).join(" · ");
+  const duration = tokenLock.permanent
+    ? "permanent"
+    : tokenLock.lockExpiry
+      ? `until ${new Date(tokenLock.lockExpiry).toISOString()}`
+      : "active";
+  return `🔒 ${quantity || "Active token lock"} · ${duration}`;
 }
 
 function devClusterLine(devCluster: {
@@ -2139,12 +2167,29 @@ function readLiquidityData(result: ScanResultView): {
   const pool = selectPrimaryLiquidityPool(result.liquidity.pools);
   const data = pool?.liquidityData;
   const totalUsd = numberFromRecord(data, ["totalLiquidityUsd", "liquidityUsd", "totalUsd"]);
-  const burnedPct = numberFromRecord(data, [
+  const measuredProtectedPct = numberFromRecord(data, [
     "lpBurnedOrLockedPct",
     "lpBurnedPct",
     "burnedPct",
     "lockedPct"
   ]);
+  const activeV3Positions =
+    data?.protocol === "UNISWAP_V3" && Array.isArray(data.positions)
+      ? data.positions.filter((position) => {
+          if (!isRecord(position)) return false;
+          try {
+            return BigInt(position.liquidityRaw as string) > 0n;
+          } catch {
+            return false;
+          }
+        })
+      : [];
+  const v3FullyLocked =
+    activeV3Positions.length > 0 &&
+    activeV3Positions.every(
+      (position) => isRecord(position) && typeof position.currentOwnerLockerLabel === "string"
+    );
+  const burnedPct = measuredProtectedPct ?? (v3FullyLocked ? 100 : null);
   const marketCapUsd = result.token.marketCapUsd ? Number(result.token.marketCapUsd) : null;
   const quoteSidePctOfMarketCap =
     totalUsd != null && marketCapUsd != null && marketCapUsd > 0

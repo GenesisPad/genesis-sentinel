@@ -279,6 +279,37 @@ describe("createBlockscoutHolderProvider", () => {
   const lockerAddress = `0x${"0".repeat(38)}ad` as const;
   const otherHolderAddress = `0x${"0".repeat(38)}02` as const;
 
+  it("flags deployer concentration only when it is strictly above 5%", async () => {
+    const deployerAddress = `0x${"0".repeat(38)}d1` as const;
+    const provider = createBlockscoutHolderProvider(config);
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        items: [{ address: { hash: deployerAddress, is_contract: false }, value: "50" }]
+      })
+    );
+    const atThreshold = await provider.getHolderSnapshot({
+      chainId: 4663,
+      address: holderAddress,
+      totalSupply: "1000",
+      context: { deployerAddress }
+    });
+    expect(atThreshold?.concentration.suspiciousFlags).not.toContain("DEPLOYER_BALANCE_HIGH");
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        items: [{ address: { hash: deployerAddress, is_contract: false }, value: "51" }]
+      })
+    );
+    const aboveThreshold = await provider.getHolderSnapshot({
+      chainId: 4663,
+      address: holderAddress,
+      totalSupply: "1000",
+      context: { deployerAddress }
+    });
+    expect(aboveThreshold?.concentration.suspiciousFlags).toContain("DEPLOYER_BALANCE_HIGH");
+  });
+
   it("labels a known locker address and excludes it from adjusted concentration but includes it in raw", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse({

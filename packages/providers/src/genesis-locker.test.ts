@@ -111,4 +111,44 @@ describe("createGenesisLockerProvider", () => {
     expect(result.status).toBe("LOCKED");
     expect(result.lockExpiry).toBeNull();
   });
+
+  it("recognizes a universal-locker token lock with its own evidence identity", async () => {
+    const provider = createGenesisLockerProvider({
+      chainId: 4663,
+      lockerAddress,
+      lockerId: "genesis-universal-locker",
+      lockerLabel: "Genesis Universal Locker"
+    });
+    const result = await provider.getLockStatus({
+      adapter: stubAdapter((functionName) =>
+        functionName === "getTokenLocks"
+          ? [1n]
+          : lockStruct({ isLpToken: false, isPermanent: true })
+      ),
+      chainId: 4663,
+      lpTokenAddress
+    });
+
+    expect(result).toMatchObject({
+      status: "LOCKED",
+      lockerId: "genesis-universal-locker",
+      lockerAddress,
+      lockedAmountRaw: "1000"
+    });
+    expect(result.reason).toContain("Genesis Universal Locker");
+  });
+
+  it("does not report an expired, fully claimable balance as locked", async () => {
+    const provider = createGenesisLockerProvider({ chainId: 4663, lockerAddress });
+    const result = await provider.getLockStatus({
+      adapter: stubAdapter((functionName) =>
+        functionName === "getTokenLocks" ? [1n] : lockStruct({ endTime: 1n })
+      ),
+      chainId: 4663,
+      lpTokenAddress
+    });
+
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.reason).toContain("not yet claimable");
+  });
 });

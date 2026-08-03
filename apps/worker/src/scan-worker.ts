@@ -213,7 +213,7 @@ function createHolderConcentrationDetectorResult(input: {
     });
   }
 
-  if ((input.snapshot.concentration.deployerPct ?? 0) >= 5) {
+  if ((input.snapshot.concentration.deployerPct ?? 0) > 5) {
     findings.push({
       code: "DEPLOYER_BALANCE_HIGH",
       detectorId: detector.id,
@@ -222,7 +222,7 @@ function createHolderConcentrationDetectorResult(input: {
       severity: "HIGH",
       category: "DISTRIBUTION_RISK",
       confidence: "HIGH",
-      description: "The deployer wallet appears in the holder snapshot with at least 5% of supply.",
+      description: "The deployer wallet appears in the holder snapshot with more than 5% of supply.",
       technicalExplanation:
         "The deployer address from explorer metadata was matched against the token holder list.",
       evidence: [evidence],
@@ -231,7 +231,7 @@ function createHolderConcentrationDetectorResult(input: {
     });
   }
 
-  if ((input.snapshot.concentration.ownerPct ?? 0) >= 5) {
+  if ((input.snapshot.concentration.ownerPct ?? 0) > 5) {
     findings.push({
       code: "OWNER_BALANCE_HIGH",
       detectorId: detector.id,
@@ -241,7 +241,7 @@ function createHolderConcentrationDetectorResult(input: {
       category: "DISTRIBUTION_RISK",
       confidence: "HIGH",
       description:
-        "The current owner wallet appears in the holder snapshot with at least 5% of supply.",
+        "The current owner wallet appears in the holder snapshot with more than 5% of supply.",
       technicalExplanation:
         "The owner() result was matched against the token holder list for the scanned token.",
       evidence: [evidence],
@@ -2096,6 +2096,19 @@ export async function processScanJob(
           })
           .catch(() => null)
       : null;
+    // Verify fungible-token custody through the locker contract's own records. A transfer to a
+    // locker address is not enough on its own: direct ERC20 transfers can bypass lock creation.
+    // Only an active, unwithdrawn record removes that custody from the developer-controlled
+    // cluster and becomes persisted lock evidence.
+    const tokenLockStatus = providers
+      ? await providers.locker
+          .getLockStatus({
+            adapter,
+            chainId: target.chainId,
+            lpTokenAddress: target.address
+          })
+          .catch(() => null)
+      : null;
     // Also excludes the chain's real locker contract (e.g. Genesis Locker) when one is wired —
     // the deployer sending supply there is a locking action, not a wallet transfer. Verified
     // against a real false positive ($GEN): ~1% of supply sent to the name-tagged GenesisLocker
@@ -2113,10 +2126,9 @@ export async function processScanJob(
     const knownInfrastructureAddresses = new Set(
       [
         ...(discoveredPools ?? []).map((pool) => pool.poolAddress.toLowerCase()),
-        ...(providers?.locker.lockerAddresses?.map((address) => address.toLowerCase()) ??
-          (providers?.locker.lockerAddress
-            ? [providers.locker.lockerAddress.toLowerCase()]
-            : [])),
+        ...(tokenLockStatus?.status === "LOCKED" && tokenLockStatus.lockerAddress
+          ? [tokenLockStatus.lockerAddress.toLowerCase()]
+          : []),
         ...(target.chainId === robinhoodChainId
           ? [robinhoodUniswapV4PoolManagerAddress.toLowerCase()]
           : [])
@@ -2311,6 +2323,37 @@ export async function processScanJob(
     const holderDetectorResults: DetectorResult[] = [];
 
     if (holderSnapshot) {
+      if (tokenLockStatus) {
+        let verifiedTokenLockedPct: number | null = null;
+        if (
+          tokenLockStatus.status === "LOCKED" &&
+          tokenLockStatus.lockedAmountRaw &&
+          tokenProfile.totalSupply
+        ) {
+          try {
+            const supply = BigInt(tokenProfile.totalSupply);
+            verifiedTokenLockedPct =
+              supply > 0n
+                ? Number((BigInt(tokenLockStatus.lockedAmountRaw) * 100_000_000n) / supply) /
+                  1_000_000
+                : null;
+          } catch {
+            verifiedTokenLockedPct = null;
+          }
+        }
+        holderSnapshot.concentration.tokenLockStatus = {
+          status: tokenLockStatus.status,
+          lockerId: tokenLockStatus.lockerId ?? null,
+          lockerAddress: tokenLockStatus.lockerAddress ?? null,
+          lockedAmountRaw: tokenLockStatus.lockedAmountRaw ?? null,
+          lockedPct: verifiedTokenLockedPct,
+          lockExpiry: tokenLockStatus.lockExpiry?.toISOString() ?? null,
+          reason: tokenLockStatus.reason
+        };
+        holderSnapshot.concentration.verifiedTokenLockedPct = verifiedTokenLockedPct;
+        holderSnapshot.concentration.verifiedTokenLockedAmountRaw =
+          tokenLockStatus.status === "LOCKED" ? tokenLockStatus.lockedAmountRaw ?? null : null;
+      }
       await dependencies.scans.recordHolderSnapshot({
         chainId: target.chainId,
         tokenAddress: target.address,

@@ -9,6 +9,10 @@ export interface GenesisLockerConfig {
    * production-stack.json ("contracts.GenesisLocker"). Same address on both sibling repos.
    */
   lockerAddress: `0x${string}`;
+  /** Stable evidence identifier used in persisted lock results. */
+  lockerId?: string;
+  /** Human-readable contract name used in evidence copy. */
+  lockerLabel?: string;
 }
 
 // GenesisLocker/GenesisLockerV2 share an identical Lock struct and getTokenLocks/getLock
@@ -44,8 +48,10 @@ interface GenesisLockStruct {
  * lock never gets reported as fully locked.
  */
 export function createGenesisLockerProvider(config: GenesisLockerConfig): LockerProvider {
+  const lockerId = config.lockerId ?? "genesis-locker";
+  const lockerLabel = config.lockerLabel ?? "Genesis Locker";
   return {
-    id: "genesis-locker",
+    id: lockerId,
     lockerAddress: config.lockerAddress,
     lockerAddresses: [config.lockerAddress],
     supportsChain: (chainId) => chainId === config.chainId,
@@ -69,18 +75,18 @@ export function createGenesisLockerProvider(config: GenesisLockerConfig): Locker
       } catch {
         return {
           status: "UNKNOWN",
-          lockerId: "genesis-locker",
+          lockerId,
           lockerAddress: config.lockerAddress,
-          reason: "Genesis Locker getTokenLocks call failed; lock status could not be determined."
+          reason: `${lockerLabel} getTokenLocks call failed; lock status could not be determined.`
         };
       }
 
       if (lockIds.length === 0) {
         return {
           status: "UNKNOWN",
-          lockerId: "genesis-locker",
+          lockerId,
           lockerAddress: config.lockerAddress,
-          reason: "No Genesis Locker lock records exist for this LP token."
+          reason: `No ${lockerLabel} lock records exist for this fungible token or LP token.`
         };
       }
 
@@ -104,7 +110,21 @@ export function createGenesisLockerProvider(config: GenesisLockerConfig): Locker
         if (!lock) continue;
         const remaining = lock.amount - lock.withdrawnAmount;
         if (remaining <= 0n) continue;
-        totalRemaining += remaining;
+        let currentlyLocked = remaining;
+        if (!lock.isPermanent) {
+          const now = BigInt(Math.floor(Date.now() / 1000));
+          if (now >= lock.endTime) {
+            currentlyLocked = 0n;
+          } else if (lock.isVesting && now >= lock.cliffTime) {
+            const duration = lock.endTime - lock.startTime;
+            const elapsed = now - lock.startTime;
+            const completedIntervals = elapsed / lock.vestingInterval;
+            const vested = (lock.amount * (completedIntervals * lock.vestingInterval)) / duration;
+            currentlyLocked = vested >= lock.amount ? 0n : lock.amount - vested;
+          }
+        }
+        if (currentlyLocked <= 0n) continue;
+        totalRemaining += currentlyLocked;
         if (lock.isPermanent) anyPermanent = true;
         if (lock.endTime > maxEndTime) maxEndTime = lock.endTime;
       }
@@ -112,22 +132,22 @@ export function createGenesisLockerProvider(config: GenesisLockerConfig): Locker
       if (totalRemaining === 0n) {
         return {
           status: "UNKNOWN",
-          lockerId: "genesis-locker",
+          lockerId,
           lockerAddress: config.lockerAddress,
-          reason: "Every Genesis Locker lock found for this LP token has been fully withdrawn."
+          reason: `No ${lockerLabel} balance for this asset remains unwithdrawn and not yet claimable.`
         };
       }
 
       const lockExpiry = anyPermanent ? null : new Date(Number(maxEndTime) * 1000);
       return {
         status: "LOCKED",
-        lockerId: "genesis-locker",
+        lockerId,
         lockerAddress: config.lockerAddress,
         lockedAmountRaw: totalRemaining.toString(),
         lockExpiry,
         reason: anyPermanent
-          ? "Permanently locked via Genesis Locker; the locked LP is not withdrawable by anyone."
-          : `Locked via Genesis Locker until ${lockExpiry?.toISOString()}.`
+          ? `Permanently locked via ${lockerLabel}; the locked asset is not withdrawable by anyone.`
+          : `Locked via ${lockerLabel} until ${lockExpiry?.toISOString()}.`
       };
     }
   };

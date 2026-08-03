@@ -1259,6 +1259,60 @@ describe("telegram report informativeness", () => {
     expect(reply).toContain("12.50% of supply");
   });
 
+  it("reports token custody verified by Genesis Universal Locker", () => {
+    const result = baseResult();
+    const snapshot = result.holders.snapshots[0];
+    if (!snapshot) throw new Error("test fixture requires a holder snapshot");
+    snapshot.concentration = {
+      ...(snapshot.concentration ?? {}),
+      tokenLockStatus: {
+        status: "LOCKED",
+        lockerId: "genesis-universal-locker",
+        lockerAddress: "0xf88535677f27334ee5f977dd055c790524160789",
+        lockedAmountRaw: "100000000000000000",
+        lockedPct: 10,
+        lockExpiry: null,
+        reason: "Permanently locked via Genesis Universal Locker."
+      }
+    };
+
+    const reply = formatTelegramResultReply(result);
+    expect(reply).toContain("10.00% of supply");
+    expect(reply).toContain("permanent");
+  });
+
+  it("reports a V3 position verified in Genesis Universal Locker as locked liquidity", () => {
+    const reply = formatTelegramResultReply(
+      baseResult({
+        liquidity: {
+          status: "AVAILABLE",
+          message: "ok",
+          pools: [
+            {
+              chainId: 4663,
+              tokenAddress: "0x0000000000000000000000000000000000000001",
+              poolAddress: "0x1234567890123456789012345678901234567890",
+              dex: "Uniswap V3",
+              liquidityData: {
+                protocol: "UNISWAP_V3",
+                totalLiquidityUsd: 50_000,
+                positions: [
+                  {
+                    liquidityRaw: "1000",
+                    currentOwnerLockerLabel: "Genesis Universal Locker"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      })
+    );
+
+    expect(reply).toContain("Burn/Lock: 100.0%");
+    expect(reply).toContain("DEX: Uniswap V3");
+  });
+
   it("flags a punitive tax instead of printing it as a neutral number", () => {
     const reply = formatTelegramResultReply(
       baseResult({

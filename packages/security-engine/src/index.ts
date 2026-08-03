@@ -1893,7 +1893,7 @@ export const deployerHistoryDetector: SecurityDetector<DeployerHistoryDetectorIn
         evidence.blockNumber = context.blockNumber;
       }
 
-      if (input.deployerHistory.previousTokenCount > 0) {
+      if (input.deployerHistory.previousHighOrCriticalCount > 0) {
         const { previousTokenCount, previousHighOrCriticalCount } = input.deployerHistory;
         const severity: FindingSeverity =
           previousHighOrCriticalCount >= 3
@@ -1910,10 +1910,7 @@ export const deployerHistoryDetector: SecurityDetector<DeployerHistoryDetectorIn
             severity,
             category: "REPUTATION_RISK",
             confidence: "HIGH",
-            description:
-              previousHighOrCriticalCount > 0
-                ? `This deployer address previously created ${previousTokenCount} other token(s) scanned by Sentinel. ${previousHighOrCriticalCount} of those scans recorded a HIGH or CRITICAL severity finding.`
-                : `This deployer address previously created ${previousTokenCount} other token(s) scanned by Sentinel. None of those scans recorded a HIGH or CRITICAL severity finding.`,
+            description: `This deployer address previously created ${previousTokenCount} other token(s) scanned by Sentinel. ${previousHighOrCriticalCount} of those scans recorded a HIGH or CRITICAL severity finding.`,
             technicalExplanation:
               "Computed by matching this scan's deployer address against Token.deployerAddress across Sentinel's own persisted scan history for this chain, excluding the current token.",
             evidence: [evidence],
@@ -1925,10 +1922,12 @@ export const deployerHistoryDetector: SecurityDetector<DeployerHistoryDetectorIn
 
       checks.push({
         code:
-          input.deployerHistory.previousTokenCount > 0
-            ? "DEPLOYER_HISTORY_FOUND"
-            : "DEPLOYER_HISTORY_ABSENT",
-        outcome: input.deployerHistory.previousTokenCount > 0 ? "DETECTED" : "PASSED",
+          input.deployerHistory.previousHighOrCriticalCount > 0
+            ? "DEPLOYER_ADVERSE_HISTORY_FOUND"
+            : input.deployerHistory.previousTokenCount > 0
+              ? "DEPLOYER_BENIGN_HISTORY_FOUND"
+              : "DEPLOYER_HISTORY_ABSENT",
+        outcome: input.deployerHistory.previousHighOrCriticalCount > 0 ? "DETECTED" : "PASSED",
         confidence: "HIGH",
         evidence: [evidence]
       });
@@ -2044,8 +2043,11 @@ export const deployerHistoryDetector: SecurityDetector<DeployerHistoryDetectorIn
         if (context.blockNumber !== undefined) {
           supplyTransferEvidence.blockNumber = context.blockNumber;
         }
-        findings.push(
-          createFinding({
+        if (
+          measuredHoldingPercentages.length === supplyTransferEdges.length &&
+          aggregateHoldingPct > 5
+        ) {
+          findings.push(createFinding({
             code: "SUPPLY_TRANSFERRED_TO_WALLET",
             detector: this.metadata,
             title:
@@ -2059,15 +2061,12 @@ export const deployerHistoryDetector: SecurityDetector<DeployerHistoryDetectorIn
               supplyTransferEdges.length === 1
                 ? `${supplyTransferEdges[0]?.evidence} (${supplyTransferEdges[0]?.address})`
                 : `The deployer transferred supply to ${supplyTransferEdges.length} other wallets. See evidence for each recipient and its share.`,
-            technicalExplanation:
-              measuredHoldingPercentages.length === supplyTransferEdges.length
-                ? `Edge type TRANSFERRED_SUPPLY_TO, source: erc20-transfer-log-scan. Recipients currently hold ${aggregateHoldingPct.toFixed(2)}% in aggregate; the largest holds ${(largestHoldingPct ?? 0).toFixed(2)}%. Distribution below 20% aggregate with no recipient at or above 5% is LOW severity; larger distributions remain MEDIUM.`
-                : "Edge type TRANSFERRED_SUPPLY_TO, source: erc20-transfer-log-scan. Current holding percentages were not available for every recipient, so the distribution remains MEDIUM severity.",
+            technicalExplanation: `Edge type TRANSFERRED_SUPPLY_TO, source: erc20-transfer-log-scan. Recipients currently hold ${aggregateHoldingPct.toFixed(2)}% in aggregate; the largest holds ${(largestHoldingPct ?? 0).toFixed(2)}%. Developer-linked balances are scored only when the verified current aggregate is strictly above 5%.`,
             evidence: [supplyTransferEvidence],
             recommendation:
               "Review each recipient in evidence: is it a known team/vesting/exchange wallet, a legitimate early buyer, or an unexplained large holder?"
-          })
-        );
+          }));
+        }
       }
 
       for (const edge of input.relatedWalletEdges) {
@@ -3070,6 +3069,11 @@ export async function runFoundationDetectors(
  * good news (e.g. renounced ownership, locked liquidity, a successful sell simulation) does not
  * erase a different category's finding.
  */
+const nonRiskEvidenceFindingCodes = new Set([
+  "GENESISPAD_CONFIRMED_LAUNCH",
+  "V3_POSITION_LOCKED_BY_KNOWN_LOCKER"
+]);
+
 export function scoreFindings(
   detectorResults: DetectorResult[],
   scannerVersion: string
@@ -3082,7 +3086,7 @@ export function scoreFindings(
   const findings = effectiveFindingsAfterOwnershipRenouncement(
     detectorResults.flatMap((result) => result.findings),
     ownershipRenounced
-  );
+  ).filter((finding) => !nonRiskEvidenceFindingCodes.has(finding.code));
   const unableToAssessReasons = collectUnableToAssessReasons(detectorResults);
 
   if (findings.length === 0) {

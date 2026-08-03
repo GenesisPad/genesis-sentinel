@@ -1475,7 +1475,7 @@ describe("deployer history detector", () => {
     expect(result.findings[0]?.description).toContain("3 of those scans");
   });
 
-  it("reports INFO severity when prior tokens had no high/critical findings", async () => {
+  it("treats prior benign scans as context, not a risk finding", async () => {
     const result = await deployerHistoryDetector.run(
       {
         deployerHistory: {
@@ -1490,7 +1490,11 @@ describe("deployer history detector", () => {
       context
     );
 
-    expect(result.findings[0]).toMatchObject({ severity: "INFO" });
+    expect(result.findings).toEqual([]);
+    expect(result.checks[0]).toMatchObject({
+      code: "DEPLOYER_BENIGN_HISTORY_FOUND",
+      outcome: "PASSED"
+    });
   });
 
   it("flags reused bytecode across other scanned contracts", async () => {
@@ -1538,7 +1542,8 @@ describe("deployer history detector", () => {
             confidence: "HIGH",
             evidence: "Deployer transferred ~12.0% of total supply to this address (block 100).",
             source: "erc20-transfer-log-scan",
-            firstObservedBlock: "100"
+            firstObservedBlock: "100",
+            holdingPct: 12
           }
         ]
       },
@@ -1567,12 +1572,14 @@ describe("deployer history detector", () => {
       confidence: "HIGH" | "MEDIUM" | "LOW";
       evidence: string;
       source: string;
+      holdingPct: number;
     }> = Array.from({ length: 6 }, (_, i) => ({
       type: "TRANSFERRED_SUPPLY_TO",
       address: `0x000000000000000000000000000000000000${(10 + i).toString(16)}` as `0x${string}`,
       confidence: "HIGH",
       evidence: `Deployer transferred ~4.0% of total supply to this address (block ${100 + i}).`,
-      source: "erc20-transfer-log-scan"
+      source: "erc20-transfer-log-scan",
+      holdingPct: 4
     }));
 
     const result = await deployerHistoryDetector.run(
@@ -1607,6 +1614,57 @@ describe("deployer history detector", () => {
     expect(
       result.findings.find((finding) => finding.code === "SUPPLY_TRANSFERRED_TO_WALLET")
     ).toMatchObject({ severity: "LOW" });
+  });
+
+  it("does not score developer-linked holdings at exactly 5%", async () => {
+    const result = await deployerHistoryDetector.run(
+      {
+        deployerHistory: null,
+        bytecodeReuse: null,
+        relatedWalletEdges: [
+          {
+            type: "TRANSFERRED_SUPPLY_TO",
+            address: "0x0000000000000000000000000000000000000005",
+            confidence: "HIGH",
+            evidence: "Developer transferred supply to this wallet.",
+            source: "erc20-transfer-log-scan",
+            holdingPct: 5
+          }
+        ]
+      },
+      context
+    );
+
+    expect(
+      result.findings.find((finding) => finding.code === "SUPPLY_TRANSFERRED_TO_WALLET")
+    ).toBeUndefined();
+    expect(
+      result.checks.find((check) => check.code === "WALLET_CLUSTERING_EDGES_FOUND")
+    ).toMatchObject({ outcome: "DETECTED" });
+  });
+
+  it("scores developer-linked holdings strictly above 5%", async () => {
+    const result = await deployerHistoryDetector.run(
+      {
+        deployerHistory: null,
+        bytecodeReuse: null,
+        relatedWalletEdges: [
+          {
+            type: "TRANSFERRED_SUPPLY_TO",
+            address: "0x0000000000000000000000000000000000000005",
+            confidence: "HIGH",
+            evidence: "Developer transferred supply to this wallet.",
+            source: "erc20-transfer-log-scan",
+            holdingPct: 5.01
+          }
+        ]
+      },
+      context
+    );
+
+    expect(
+      result.findings.find((finding) => finding.code === "SUPPLY_TRANSFERRED_TO_WALLET")
+    ).toMatchObject({ category: "DISTRIBUTION_RISK" });
   });
 
   it("reports a FUNDED_BY edge as informational, not a risk verdict", async () => {
@@ -2245,6 +2303,35 @@ describe("v3 position custody detector", () => {
       (finding) => finding.code === "V3_POSITION_LOCKED_BY_KNOWN_LOCKER"
     );
     expect(lockFinding?.severity).toBe("INFO");
+  });
+
+  it("does not add positive locker evidence to the risk score", () => {
+    const assessment = scoreFindings(
+      [
+        {
+          detector: { id: "v3-position-custody", version: "1", name: "V3", description: "V3" },
+          checks: [{ code: "V3_POSITION_CUSTODY_SECURED", outcome: "PASSED", confidence: "HIGH", evidence: [] }],
+          findings: [
+            {
+              code: "V3_POSITION_LOCKED_BY_KNOWN_LOCKER",
+              detectorId: "v3-position-custody",
+              detectorVersion: "1",
+              title: "Liquidity locked",
+              severity: "INFO",
+              category: "LIQUIDITY_SAFETY",
+              confidence: "HIGH",
+              description: "Verified locker custody.",
+              technicalExplanation: "Verified on-chain.",
+              evidence: []
+            }
+          ]
+        }
+      ],
+      "test"
+    );
+
+    expect(assessment.score).toBeNull();
+    expect(assessment.findingContributions).toEqual([]);
   });
 
   it("keeps CRITICAL when the wallet-held share of a priceable pool is a majority", async () => {

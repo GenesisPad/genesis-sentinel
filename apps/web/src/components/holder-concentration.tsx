@@ -28,6 +28,26 @@ export function HolderConcentration({ holders, decimals }: { holders: HolderInfo
           </span>
         </div>
       ) : null}
+      {holders.tokenLock ? (
+        <div className="rounded-lg border border-pass/30 bg-pass/5 px-3.5 py-2.5 text-sm">
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-semibold text-secondary">Verified token lock</span>
+            <span className="text-right font-bold text-pass">
+              {holders.tokenLock.pct != null
+                ? `${formatSupplyPct(holders.tokenLock.pct)} of supply`
+                : formatTokenAmount(holders.tokenLock.amountRaw, decimals)}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-muted">
+            {holders.tokenLock.permanent
+              ? "Permanently held in Genesis Universal Locker custody."
+              : `Locked until ${new Date(holders.tokenLock.expiresAt ?? "").toLocaleString()}.`}
+            {holders.tokenLock.lockerAddress
+              ? ` Locker ${holders.tokenLock.lockerAddress.slice(0, 6)}…${holders.tokenLock.lockerAddress.slice(-4)}.`
+              : ""}
+          </p>
+        </div>
+      ) : null}
       {holders.devClusterWalletCount !== undefined && holders.devClusterWalletCount > 0 ? (
         <div className="rounded-lg border border-border bg-surface-deep px-3.5 py-2.5 text-sm">
           <div className="flex items-center justify-between gap-3">

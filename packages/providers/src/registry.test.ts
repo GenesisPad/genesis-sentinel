@@ -12,6 +12,9 @@ describe("provider registry", () => {
     expect(providers?.market.supportsChain(robinhoodChainId)).toBe(true);
     expect(providers?.holder.supportsChain(robinhoodChainId)).toBe(true);
     expect(providers?.liquidity.supportsChain(robinhoodChainId)).toBe(true);
+    expect(providers?.locker.lockerAddresses?.map((address) => address.toLowerCase())).toContain(
+      "0xf88535677f27334ee5f977dd055c790524160789"
+    );
   });
 
   it("returns null for a chain with no wired providers", () => {

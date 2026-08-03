@@ -121,6 +121,14 @@ export interface HolderInfo {
   devClusterUnknownHoldingWalletCount?: number;
   /** Deployer's current token balance: exact amount plus percentage of total supply. */
   deployerBalance?: { amountRaw: string; pct: number | null };
+  /** Active token lock verified from the locker contract's own record. */
+  tokenLock?: {
+    amountRaw: string;
+    pct: number | null;
+    lockerAddress: string | null;
+    permanent: boolean;
+    expiresAt: string | null;
+  };
 }
 
 export type WalletClusterEdgeType =

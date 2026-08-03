@@ -398,9 +398,9 @@ async function discoverBlockscoutHolderConcentration(
     ...(top1Pct >= 20 ? ["TOP_1_WALLET_HIGH"] : []),
     ...(top10Pct >= 60 ? ["TOP_10_WALLETS_CRITICAL"] : []),
     ...(top10Pct >= 35 && top10Pct < 60 ? ["TOP_10_WALLETS_HIGH"] : []),
-    ...(deployerPct !== null && deployerPct >= 5 ? ["DEPLOYER_BALANCE_HIGH"] : []),
-    ...(ownerPct !== null && ownerPct >= 5 ? ["OWNER_BALANCE_HIGH"] : []),
-    ...(relatedWalletPct >= 5 ? ["RELATED_WALLET_BALANCE_HIGH"] : [])
+    ...(deployerPct !== null && deployerPct > 5 ? ["DEPLOYER_BALANCE_HIGH"] : []),
+    ...(ownerPct !== null && ownerPct > 5 ? ["OWNER_BALANCE_HIGH"] : []),
+    ...(relatedWalletPct > 5 ? ["RELATED_WALLET_BALANCE_HIGH"] : [])
   ];
 
   const concentration: HolderConcentration = {

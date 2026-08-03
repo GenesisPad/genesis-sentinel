@@ -496,6 +496,17 @@ export interface DeployerBalanceView {
   pctOfSupply: number | null;
 }
 
+export interface TokenLockView {
+  status: "LOCKED";
+  lockerId: string | null;
+  lockerAddress: `0x${string}` | null;
+  lockedAmountRaw: string;
+  lockedPct: number | null;
+  lockExpiry: string | null;
+  permanent: boolean;
+  reason: string;
+}
+
 export interface TaxSummaryView {
   status: "AVAILABLE" | "UNKNOWN";
   buyTaxBps: number | null;
@@ -517,6 +528,8 @@ export interface TokenSecuritySummaryView {
   fullAnalysisUrl?: string;
   devCluster: DevClusterSummaryView;
   deployerBalance: DeployerBalanceView | null;
+  /** Verified from the locker contract's own active lock record; null is never interpreted as unlocked. */
+  tokenLock: TokenLockView | null;
   taxes: TaxSummaryView;
   signals: SecuritySummarySignal[];
 }
@@ -661,6 +674,7 @@ export function buildTokenSecuritySummary(
   );
   const devCluster = buildDevClusterSummary(result);
   const deployerBalance = buildDeployerBalance(result);
+  const tokenLock = buildTokenLock(result);
   const taxes = buildTaxSummary(result);
 
   const summary: TokenSecuritySummaryView = {
@@ -675,6 +689,7 @@ export function buildTokenSecuritySummary(
       .length,
     devCluster,
     deployerBalance,
+    tokenLock,
     taxes,
     signals: [
       detectorSignal(context, {
@@ -1059,12 +1074,26 @@ function devClusterSignal(cluster: DevClusterSummaryView): SecuritySummarySignal
   }
 
   const knownPct = cluster.knownHoldingPct;
+  if (knownPct != null && cluster.unknownHoldingWalletCount === 0 && knownPct <= 5) {
+    return {
+      id: "dev_cluster",
+      label: "Dev cluster",
+      answer: "NO",
+      severity: "GOOD",
+      confidence: "HIGH",
+      source: "DETECTOR",
+      description:
+        "Developer-controlled supply is not treated as material unless verified current holdings are strictly above 5%.",
+      evidenceCodes: ["WALLET_CLUSTERING_EDGES_FOUND"],
+      value: `${formatSupplyPercentage(knownPct)} across ${cluster.walletCount} linked wallet(s)`
+    };
+  }
   const severity: SecuritySignalSeverity =
-    knownPct == null ? "INFO" : knownPct >= 20 ? "HIGH" : knownPct >= 10 ? "WARN" : "INFO";
+    knownPct == null ? "INFO" : knownPct >= 20 ? "HIGH" : "WARN";
   return {
     id: "dev_cluster",
     label: "Dev cluster",
-    answer: knownPct != null && knownPct > 0 ? "YES" : "UNKNOWN",
+    answer: knownPct != null && knownPct > 5 ? "YES" : "UNKNOWN",
     severity,
     confidence: cluster.unknownHoldingWalletCount > 0 ? "MEDIUM" : "HIGH",
     source: "DETECTOR",
@@ -1169,6 +1198,31 @@ function readDeployerPct(result: ScanResultView): number | null {
     precisePctFromRaw(concentration?.deployerBalanceRaw, result.token.totalSupply) ??
     (typeof concentration?.deployerPct === "number" ? concentration.deployerPct : null)
   );
+}
+
+function buildTokenLock(result: ScanResultView): TokenLockView | null {
+  const concentration = result.holders.snapshots[0]?.concentration as
+    | { tokenLockStatus?: unknown }
+    | undefined;
+  if (!concentration?.tokenLockStatus || typeof concentration.tokenLockStatus !== "object") {
+    return null;
+  }
+  const lock = concentration.tokenLockStatus as Record<string, unknown>;
+  if (lock.status !== "LOCKED" || typeof lock.lockedAmountRaw !== "string") return null;
+  const lockerAddress =
+    typeof lock.lockerAddress === "string" && /^0x[0-9a-f]{40}$/iu.test(lock.lockerAddress)
+      ? (lock.lockerAddress as `0x${string}`)
+      : null;
+  return {
+    status: "LOCKED",
+    lockerId: typeof lock.lockerId === "string" ? lock.lockerId : null,
+    lockerAddress,
+    lockedAmountRaw: lock.lockedAmountRaw,
+    lockedPct: typeof lock.lockedPct === "number" ? lock.lockedPct : null,
+    lockExpiry: typeof lock.lockExpiry === "string" ? lock.lockExpiry : null,
+    permanent: lock.lockExpiry === null,
+    reason: typeof lock.reason === "string" ? lock.reason : "Verified active token lock."
+  };
 }
 
 function buildDeployerBalance(result: ScanResultView): DeployerBalanceView | null {

@@ -42,6 +42,10 @@ const stableBlockscoutConfig: BlockscoutChainConfig = {
 const robinhoodGenesisLockerAddress = "0x0372a1AE860CDc9357ac6bc8e9F97856b37B80Ed" as const;
 const robinhoodLegacyGenesisLockerAddress =
   "0x2ca85f6bfe8f22219a6d90910935c405ce6a7239" as const;
+// GenesisUniversalLocker deployment used by the production locker frontend. It supports
+// permissionless ERC20, V2 LP, and V3 position locks; factory-created locks may be fee-exempt.
+const robinhoodUniversalGenesisLockerAddress =
+  "0xF88535677f27334Ee5F977dD055C790524160789" as const;
 
 // Verified against C:\Projects\genesispad\contracts\deployments\robinhood\direct-v3-stack.json,
 // marked "sourceOfTruth": true for GenesisPad's current direct-Uniswap-V3 launch model
@@ -99,6 +103,12 @@ export function createProviderRegistry(): { getProviderSet(chainId: number): Pro
   const robinhoodLocker = createCompositeLockerProvider(robinhoodChainId, [
     createGenesisLockerProvider({
       chainId: robinhoodChainId,
+      lockerAddress: robinhoodUniversalGenesisLockerAddress,
+      lockerId: "genesis-universal-locker",
+      lockerLabel: "Genesis Universal Locker"
+    }),
+    createGenesisLockerProvider({
+      chainId: robinhoodChainId,
       lockerAddress: robinhoodGenesisLockerAddress
     }),
     createLegacyGenesisLockerProvider({
@@ -115,6 +125,7 @@ export function createProviderRegistry(): { getProviderSet(chainId: number): Pro
     }),
     holder: createBlockscoutHolderProvider(robinhoodBlockscoutConfig, {
       knownLockerAddresses: [
+        robinhoodUniversalGenesisLockerAddress,
         robinhoodGenesisLockerAddress,
         robinhoodLegacyGenesisLockerAddress
       ]

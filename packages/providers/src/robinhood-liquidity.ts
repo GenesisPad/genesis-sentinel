@@ -92,8 +92,24 @@ const positionManagerPositionsAbi = parseAbi([
 // this list to services actually confirmed on this chain; an unrecognized contract holder is
 // reported as "unknown custody", not assumed safe.
 const knownV3PositionLockers: Record<string, string> = {
+  "0xf88535677f27334ee5f977dd055c790524160789": "Genesis Universal Locker",
   "0xf28704c691290547924e2129d407da36bda8ce0f": "UNCX_LiquidityLocker_UniV3"
 };
+const genesisUniversalLockerAddress =
+  "0xf88535677f27334ee5f977dd055c790524160789" as const;
+const genesisUniversalPositionLockAbi = parseAbi([
+  "struct PositionLock { uint256 lockId; address positionManager; uint256 tokenId; address token0; address token1; address pool; address originalDepositor; address owner; address beneficiary; uint128 initialLiquidity; uint64 lockedAt; uint64 unlockTime; bool permanent; bool factoryManaged; bool withdrawn; string metadataURI; }",
+  "function getLock(address positionManager, uint256 tokenId) view returns (PositionLock)"
+]);
+
+interface UniversalPositionLock {
+  lockId: bigint;
+  positionManager: `0x${string}`;
+  tokenId: bigint;
+  withdrawn: boolean;
+  permanent: boolean;
+  unlockTime: bigint;
+}
 
 export type QuoteTokenPriceLookup = (address: `0x${string}`) => Promise<number | null>;
 
@@ -963,9 +979,34 @@ async function resolveOneV3NftPosition(
     .getBytecode({ address: currentOwnerAddress, blockNumber })
     .catch((): Hex => "0x");
   const currentOwnerIsContract = currentOwnerCode !== "0x";
-  const currentOwnerLockerLabel = currentOwnerIsContract
+  let currentOwnerLockerLabel = currentOwnerIsContract
     ? (knownV3PositionLockers[currentOwnerAddress.toLowerCase()] ?? null)
     : null;
+  // Universal Locker custody is counted only when its own position registry confirms an active
+  // lock. ownerOf() alone could observe a pending/manual transfer that has not been registered.
+  if (currentOwnerAddress.toLowerCase() === genesisUniversalLockerAddress) {
+    const registered = await adapter
+      .readContract<UniversalPositionLock>({
+        address: genesisUniversalLockerAddress,
+        abi: genesisUniversalPositionLockAbi,
+        functionName: "getLock",
+        args: [mintOwnerAddress, tokenId],
+        blockNumber
+      })
+      .catch(() => null);
+    if (
+      !registered ||
+      registered.lockId === 0n ||
+      registered.withdrawn ||
+      registered.positionManager.toLowerCase() !== mintOwnerAddress.toLowerCase() ||
+      registered.tokenId !== tokenId ||
+      (!registered.permanent &&
+        registered.unlockTime <=
+          (await adapter.getBlock({ blockNumber }).then((block) => block.timestamp).catch(() => 0n)))
+    ) {
+      currentOwnerLockerLabel = null;
+    }
+  }
   const valueUsd = positionState
     ? computePositionQuoteValueUsd(liquidityRaw, positionState[5], positionState[6], valuation)
     : null;
