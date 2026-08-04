@@ -175,6 +175,17 @@ describe("ownership status detector", () => {
       outcome: "DATA_UNAVAILABLE"
     });
   });
+
+  it("uses a verified ABI to distinguish a non-Ownable contract from a failed owner read", async () => {
+    const result = await ownershipStatusDetector.run(
+      { getOwnerAddress: noOwner, ownerFunctionDeclared: false }, context
+    );
+
+    expect(result.findings).toEqual([]);
+    expect(result.checks[0]).toMatchObject({
+      code: "OWNER_FUNCTION_ABSENT", outcome: "PASSED", confidence: "HIGH"
+    });
+  });
 });
 
 describe("eip1967 proxy storage detector", () => {
@@ -1245,6 +1256,17 @@ describe("ownership/roles ABI detector", () => {
 });
 
 describe("role membership detector", () => {
+  it("marks role membership not applicable when a verified ABI has no role surface", async () => {
+    const result = await roleMembershipDetector.run(
+      { supportsEnumeration: false, roleHolderCounts: {}, roleSurfaceDeclared: false }, context
+    );
+
+    expect(result.findings).toEqual([]);
+    expect(result.checks[0]).toMatchObject({
+      code: "ROLE_CONTROL_ABSENT", outcome: "PASSED", confidence: "HIGH"
+    });
+  });
+
   it("reports unverifiable when the contract does not support role enumeration", async () => {
     const result = await roleMembershipDetector.run(
       { supportsEnumeration: false, roleHolderCounts: {} },
@@ -1309,6 +1331,19 @@ describe("role membership detector", () => {
 });
 
 describe("live trading state detector", () => {
+  it("marks live trading controls not applicable when a verified ABI has none", async () => {
+    const result = await liveTradingStateDetector.run({
+      controlsDeclared: false,
+      readPausedState: () => Promise.resolve(null),
+      readTradingOpenState: () => Promise.resolve(null)
+    }, context);
+
+    expect(result.findings).toEqual([]);
+    expect(result.checks[0]).toMatchObject({
+      code: "LIVE_TRADING_CONTROLS_ABSENT", outcome: "PASSED", confidence: "HIGH"
+    });
+  });
+
   it("reports unavailable when neither state function can be read", async () => {
     const result = await liveTradingStateDetector.run(
       {
@@ -1722,6 +1757,36 @@ describe("risk scoring", () => {
     expect(assessment.unableToAssessReasons).toEqual(["sim-foundation/SELL_SIMULATION: UNSUPPORTED"]);
   });
 
+  it("scores completed core and deeper checks while retaining optional evidence gaps", () => {
+    const makeResult = (
+      id: string,
+      code: string,
+      outcome: "PASSED" | "DATA_UNAVAILABLE",
+      confidence: "HIGH" | "LOW"
+    ) => ({
+      detector: { id, version: "0.1.0", name: "n", description: "d" },
+      checks: [{ code, outcome, confidence, evidence: [] }],
+      findings: []
+    });
+    const assessment = scoreFindings([
+      makeResult("contract-code-existence", "CONTRACT_CODE_PRESENT", "PASSED", "HIGH"),
+      makeResult("erc20-metadata", "ERC20_METADATA_READ", "PASSED", "HIGH"),
+      makeResult("holder-concentration", "HOLDER_DISTRIBUTION_REVIEWED", "PASSED", "HIGH"),
+      makeResult("ownership-status", "OWNER_READ_UNAVAILABLE", "DATA_UNAVAILABLE", "LOW")
+    ], "0.1.0-foundation");
+
+    expect(assessment).toMatchObject({
+      score: 0,
+      level: "LOW",
+      confidence: "LOW",
+      scoringVersion: "0.5.0-evidence-coverage-aware-zero-risk"
+    });
+    expect(assessment.unableToAssessReasons).toEqual([
+      "ownership-status/OWNER_READ_UNAVAILABLE: DATA_UNAVAILABLE"
+    ]);
+    expect(assessment.explanation.toLowerCase()).toContain("not a safety guarantee");
+  });
+
   it("scores detected findings without claiming broad safety", async () => {
     const mintDetector = selectorPatternDetectors.find(
       (detector) => detector.metadata.id === "mint-selector-patterns"
@@ -1733,7 +1798,7 @@ describe("risk scoring", () => {
       score: 60,
       level: "HIGH",
       confidence: "MEDIUM",
-      scoringVersion: "0.4.0-context-aware-clone-and-distribution-risk"
+      scoringVersion: "0.5.0-evidence-coverage-aware-zero-risk"
     });
     expect(assessment.categoryScores[0]).toMatchObject({
       category: "CONTRACT_CONTROL",

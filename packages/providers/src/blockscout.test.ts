@@ -165,7 +165,7 @@ describe("createBlockscoutContractSourceProvider", () => {
   });
 
   it("parses a verified single-file source payload", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(() =>
       Promise.resolve(
         jsonResponse({
           result: [
@@ -184,11 +184,30 @@ describe("createBlockscoutContractSourceProvider", () => {
     const provider = createBlockscoutContractSourceProvider(config);
     const address = "0x0000000000000000000000000000000000000001" as const;
     const verification = await provider.getVerification({ chainId: 4663, address });
-    const source = await provider.getSource({ chainId: 4663, address });
+    const [source, abi] = await Promise.all([
+      provider.getSource({ chainId: 4663, address }),
+      provider.getAbi({ chainId: 4663, address })
+    ]);
 
     expect(verification.status).toBe("VERIFIED");
     expect(verification.contractName).toBe("Token");
     expect(source?.sourceFiles).toEqual([{ filename: "Token", sourceCode: "contract Token {}" }]);
+    expect(abi).toEqual([]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries after a transient source request failure", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("temporary explorer failure"))
+      .mockResolvedValueOnce(jsonResponse({
+        result: [{ ContractName: "Token", ABI: "[]", SourceCode: "contract Token {}" }]
+      }));
+    const provider = createBlockscoutContractSourceProvider(config);
+    const address = "0x0000000000000000000000000000000000000001" as const;
+
+    expect((await provider.getVerification({ chainId: 4663, address })).status).toBe("UNAVAILABLE");
+    expect((await provider.getVerification({ chainId: 4663, address })).status).toBe("VERIFIED");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
   it("parses a verified multi-file standard-json-input payload", async () => {

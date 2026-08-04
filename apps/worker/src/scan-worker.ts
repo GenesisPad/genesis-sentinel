@@ -118,11 +118,19 @@ async function readRoleMembership(
   address: `0x${string}`,
   abi: unknown,
   blockNumber: bigint
-): Promise<{ supportsEnumeration: boolean; roleHolderCounts: Record<string, number | null> }> {
+): Promise<{
+  supportsEnumeration: boolean;
+  roleHolderCounts: Record<string, number | null>;
+  roleSurfaceDeclared: boolean | null;
+}> {
   const functionNames = abiFunctionNames(abi);
+  const roleSurfaceDeclared = Array.isArray(abi)
+    ? (functionNames.has("hasRole") && functionNames.has("grantRole")) ||
+      functionNames.has("DEFAULT_ADMIN_ROLE")
+    : null;
   const supportsEnumeration = functionNames.has("getRoleMemberCount");
   if (!supportsEnumeration) {
-    return { supportsEnumeration: false, roleHolderCounts: {} };
+    return { supportsEnumeration: false, roleHolderCounts: {}, roleSurfaceDeclared };
   }
 
   const roleHolderCounts: Record<string, number | null> = {};
@@ -149,7 +157,7 @@ async function readRoleMembership(
     }
   }
 
-  return { supportsEnumeration, roleHolderCounts };
+  return { supportsEnumeration, roleHolderCounts, roleSurfaceDeclared };
 }
 
 function createHolderConcentrationDetectorResult(input: {
@@ -341,6 +349,37 @@ function createHoneypotDetectorResult(input: {
       technicalExplanation:
         "A static eth_call simulating the sell-leg token transfer reverted against live pool state; no fork trade simulator was available to confirm with a real transaction."
     });
+  }
+
+  const forkResult =
+    buyRun && isPlainRecord(buyRun.result) && isPlainRecord(buyRun.result.forkSimulation)
+      ? buyRun.result.forkSimulation
+      : null;
+  if (
+    buyIsForked && buyRun?.outcome === "PASSED" && buyIsHoneypot === false &&
+    forkResult?.canBuy === true && forkResult.canSell === true
+  ) {
+    const evidence = {
+      type: "SIMULATION" as const,
+      summary: "Forked buy and sell transactions both completed against the scan-block state.",
+      address: input.address,
+      blockNumber: input.blockNumber,
+      data: {
+        simulationTool: buyRun.simulationTool,
+        buyTaxBps: forkResult.buyTaxBps ?? null,
+        sellTaxBps: forkResult.sellTaxBps ?? null
+      }
+    };
+    return {
+      detector,
+      checks: [{
+        code: "HONEYPOT_SIMULATION_PASSED",
+        outcome: "PASSED",
+        confidence: "HIGH",
+        evidence: [evidence]
+      }],
+      findings: []
+    };
   }
 
   return null;
@@ -1954,27 +1993,6 @@ export async function processScanJob(
       startedAt: now()
     });
     const detectorStartedAt = now();
-    const detectorResults = await runFoundationDetectors(
-      {
-        bytecode,
-        async getTokenMetadata(address) {
-          return adapter.getTokenMetadata(address);
-        },
-        async getOwnerAddress(address) {
-          return readOwnerAddress(adapter, address);
-        },
-        async getStorageAt(slot) {
-          return adapter.getStorageAt({ address: target.address, slot, blockNumber });
-        }
-      },
-      {
-        scanId: target.scanId,
-        chainId: target.chainId,
-        address: target.address,
-        scannerVersion,
-        blockNumber
-      }
-    );
     // EIP-1167 clones contain only a tiny delegation stub; their actual token logic and ABI live
     // at the immutable implementation address embedded in runtime bytecode. Analyse that verified
     // implementation source while continuing to execute live reads against the clone address.
@@ -2002,6 +2020,25 @@ export async function processScanJob(
       scannerVersion,
       blockNumber
     };
+    const sourceFunctionNames = abiFunctionNames(sourceProfile.abi);
+    const detectorResults = await runFoundationDetectors(
+      {
+        bytecode,
+        ownerFunctionDeclared: Array.isArray(sourceProfile.abi)
+          ? sourceFunctionNames.has("owner")
+          : null,
+        async getTokenMetadata(address) {
+          return adapter.getTokenMetadata(address);
+        },
+        async getOwnerAddress(address) {
+          return readOwnerAddress(adapter, address);
+        },
+        async getStorageAt(slot) {
+          return adapter.getStorageAt({ address: target.address, slot, blockNumber });
+        }
+      },
+      detectorRunContext
+    );
     const sourceDetectorResult = await sourceCodeRiskDetector.run(sourceProfile, detectorRunContext);
     const ownershipRolesResult = await ownershipRolesAbiDetector.run(
       sourceProfile,
@@ -2013,6 +2050,11 @@ export async function processScanJob(
     );
     const liveTradingStateResult = await liveTradingStateDetector.run(
       {
+        controlsDeclared: Array.isArray(sourceProfile.abi)
+          ? ["paused", "tradingOpen", "tradingEnabled", "tradingActive"].some((name) =>
+              sourceFunctionNames.has(name)
+            )
+          : null,
         readPausedState: () => readBoolCandidate(adapter, target.address, ["paused"], blockNumber),
         readTradingOpenState: () =>
           readBoolCandidate(
@@ -2597,13 +2639,20 @@ export async function processScanJob(
             }
     });
 
-    await dependencies.scans.updateScanState({
-      scanId: target.scanId,
-      state: "PARTIALLY_COMPLETED",
-      completedAt: now(),
-      failureSummary:
-        "Liquidity discovery, holder concentration, route quote simulation, and native/WETH fork buy/sell simulation are live for Robinhood Chain. Unsupported quote pools fall back to route checks."
-    });
+    await dependencies.scans.updateScanState(
+      riskAssessment.score === null
+        ? {
+            scanId: target.scanId,
+            state: "PARTIALLY_COMPLETED",
+            completedAt: now(),
+            failureSummary: `Risk scoring could not reach sufficient evidence coverage: ${riskAssessment.unableToAssessReasons.join("; ")}`
+          }
+        : {
+            scanId: target.scanId,
+            state: "COMPLETED",
+            completedAt: now()
+          }
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown scan orchestration error";
     await dependencies.scans.recordStage({

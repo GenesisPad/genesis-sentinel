@@ -36,7 +36,7 @@ Score semantics:
 - `UNABLE_TO_ASSESS` is a risk level, not a numeric score shortcut. It should be used when evidence quality is too low for a reliable category or overall assessment.
 - Category scores must carry confidence independently from the overall score.
 - Scoring changes must use a new `scoringVersion` and retain historical results.
-- A `RiskAssessment` is always persisted, even when no detector findings exist for a scan — as an explicit `level: "UNABLE_TO_ASSESS"`, `score: null` row carrying `unableToAssessReasons`, not the absence of a row. Public interfaces (web/API/Telegram) read this persisted row rather than inferring `UNABLE_TO_ASSESS` from a missing record.
+- A `RiskAssessment` is always persisted, even when no detector findings exist for a scan. A scan with conclusive core token checks plus at least one deeper source, holder, ledger, liquidity, or simulation assessment receives score `0` (minimal detected risk); insufficient coverage remains an explicit `level: "UNABLE_TO_ASSESS"`, `score: null` row carrying `unableToAssessReasons`. Public interfaces (web/API/Telegram) read this persisted row rather than inferring `UNABLE_TO_ASSESS` from a missing record.
 - A low score means low detected risk from implemented detectors only. It is not a safety guarantee and does not cover unimplemented simulations, liquidity checks, holder analysis, or source verification.
 
 Canonical score bands:
@@ -51,7 +51,10 @@ Scoring version history:
 
 - `0.1.0-finding-weighted` — initial per-finding severity/confidence weighting, max-of-category
   overall score.
-- `0.4.0-context-aware-clone-and-distribution-risk` (current) — canonical EIP-1167 clone
+- `0.5.0-evidence-coverage-aware-zero-risk` (current) — permits a numeric zero only when core
+  token checks and at least one deeper risk surface completed conclusively; optional evidence
+  gaps remain visible and lower confidence instead of erasing an otherwise supported result.
+- `0.4.0-context-aware-clone-and-distribution-risk` — canonical EIP-1167 clone
   `DELEGATECALL` and shared bytecode are informational rather than standalone risk evidence;
   measured supply distributions below 20% aggregate with no recipient at or above 5% are `LOW`
   rather than `MEDIUM`.
