@@ -38,40 +38,42 @@ export interface BlockscoutChainConfig {
 }
 
 /**
- * Blockscout-backed ContractSourceProvider. Uses the legacy Etherscan-compatible
- * `getsourcecode` endpoint for verification/source/ABI, and the v2 `/smart-contracts`
- * endpoint for proxy implementation detection. See docs/architecture/provider-strategy.md
- * for where Blockscout sits in the source-provider fallback order.
+ * Blockscout-backed ContractSourceProvider. Uses the v2 `/smart-contracts` endpoint for
+ * verification/source/ABI with the legacy Etherscan-compatible `getsourcecode` endpoint as a
+ * fallback. See docs/architecture/provider-strategy.md for the provider fallback order.
  */
 export function createBlockscoutContractSourceProvider(
   config: BlockscoutChainConfig
 ): ContractSourceProvider {
   // Verification, source, and ABI consume the same payload. Share the request so large verified
   // contracts do not trigger three downloads and intermittent explorer rate-limit failures.
-  const legacyRecordCache = new Map<string, Promise<Record<string, unknown> | null>>();
-  const maxCachedLegacyRecords = 32;
-  const fetchLegacyRecord = (address: `0x${string}`) => {
+  const sourceRecordCache = new Map<string, Promise<Record<string, unknown> | null>>();
+  const maxCachedSourceRecords = 32;
+  const fetchSourceRecord = (address: `0x${string}`) => {
     const key = address.toLowerCase();
-    const cached = legacyRecordCache.get(key);
+    const cached = sourceRecordCache.get(key);
     if (cached) return cached;
 
-    const request = fetchJson(
-      `${config.legacyApiBaseUrl}?module=contract&action=getsourcecode&address=${address}`
-    ).then((response) =>
-      isRecord(response) && Array.isArray(response.result) && isRecord(response.result[0])
-        ? response.result[0]
-        : null
-    ).catch(() => null);
-    legacyRecordCache.set(key, request);
+    const request = fetchJson(`${config.apiBaseUrl}/smart-contracts/${address}`)
+      .catch(() => null)
+      .then(async (response) => {
+        const v2Record = blockscoutSourceRecord(response);
+        if (v2Record) return v2Record;
+        const legacyResponse = await fetchJson(
+          `${config.legacyApiBaseUrl}?module=contract&action=getsourcecode&address=${address}`
+        ).catch(() => null);
+        return blockscoutSourceRecord(legacyResponse);
+      });
+    sourceRecordCache.set(key, request);
     void request.then((record) => {
       if (!record) {
-        if (legacyRecordCache.get(key) === request) legacyRecordCache.delete(key);
+        if (sourceRecordCache.get(key) === request) sourceRecordCache.delete(key);
         return;
       }
-      while (legacyRecordCache.size > maxCachedLegacyRecords) {
-        const oldestKey = legacyRecordCache.keys().next().value;
+      while (sourceRecordCache.size > maxCachedSourceRecords) {
+        const oldestKey = sourceRecordCache.keys().next().value;
         if (!oldestKey) break;
-        legacyRecordCache.delete(oldestKey);
+        sourceRecordCache.delete(oldestKey);
       }
     });
     return request;
@@ -86,7 +88,7 @@ export function createBlockscoutContractSourceProvider(
         return { status: "UNAVAILABLE", provider: "blockscout" };
       }
 
-      const record = await fetchLegacyRecord(address).catch(() => null);
+      const record = await fetchSourceRecord(address).catch(() => null);
       if (!record) {
         return { status: "UNAVAILABLE", provider: "blockscout" };
       }
@@ -95,11 +97,12 @@ export function createBlockscoutContractSourceProvider(
       return {
         status: sourceFiles.length > 0 ? "VERIFIED" : "UNVERIFIED",
         provider: "blockscout",
-        contractName: stringValue(record.ContractName),
-        compilerVersion: stringValue(record.CompilerVersion),
-        optimizationEnabled: booleanValue(record.OptimizationUsed),
-        optimizationRuns: numberValue(record.Runs),
-        language: stringValue(record.Language)
+        contractName: blockscoutString(record, "ContractName", "name"),
+        compilerVersion: blockscoutString(record, "CompilerVersion", "compiler_version"),
+        optimizationEnabled:
+          booleanValue(record.OptimizationUsed) ?? booleanValue(record.optimization_enabled),
+        optimizationRuns: numberValue(record.Runs) ?? numberValue(record.optimization_runs),
+        language: blockscoutString(record, "Language", "language")
       };
     },
 
@@ -108,7 +111,7 @@ export function createBlockscoutContractSourceProvider(
         return null;
       }
 
-      const record = await fetchLegacyRecord(address).catch(() => null);
+      const record = await fetchSourceRecord(address).catch(() => null);
       if (!record) {
         return null;
       }
@@ -119,9 +122,9 @@ export function createBlockscoutContractSourceProvider(
       }
 
       return {
-        contractName: stringValue(record.ContractName),
-        compilerVersion: stringValue(record.CompilerVersion),
-        language: stringValue(record.Language),
+        contractName: blockscoutString(record, "ContractName", "name"),
+        compilerVersion: blockscoutString(record, "CompilerVersion", "compiler_version"),
+        language: blockscoutString(record, "Language", "language"),
         sourceFiles
       };
     },
@@ -131,12 +134,14 @@ export function createBlockscoutContractSourceProvider(
         return null;
       }
 
-      const record = await fetchLegacyRecord(address).catch(() => null);
+      const record = await fetchSourceRecord(address).catch(() => null);
       if (!record) {
         return null;
       }
 
-      const abi = parseMaybeJson(stringValue(record.ABI));
+      const abi = Array.isArray(record.abi)
+        ? record.abi
+        : parseMaybeJson(stringValue(record.ABI));
       return Array.isArray(abi) ? abi : null;
     },
 
@@ -459,32 +464,59 @@ function extractSourceFiles(
   record: Record<string, unknown>
 ): ContractSourceResult["sourceFiles"] {
   const files: ContractSourceResult["sourceFiles"] = [];
-  const primarySource = stringValue(record.SourceCode);
+  const primarySource = blockscoutString(record, "SourceCode", "source_code");
   if (primarySource) {
     const parsedPrimary = parseSourceCodePayload(primarySource);
     if (parsedPrimary.length > 0) {
       files.push(...parsedPrimary);
     } else {
       files.push({
-        filename: stringValue(record.FileName) ?? stringValue(record.ContractName) ?? "Contract.sol",
+        filename:
+          blockscoutString(record, "FileName", "file_path") ??
+          blockscoutString(record, "ContractName", "name") ??
+          "Contract.sol",
         sourceCode: primarySource
       });
     }
   }
 
-  if (Array.isArray(record.AdditionalSources)) {
-    for (const item of record.AdditionalSources) {
+  const additionalSources = Array.isArray(record.AdditionalSources)
+    ? record.AdditionalSources
+    : Array.isArray(record.additional_sources)
+      ? record.additional_sources
+      : [];
+  for (const item of additionalSources) {
       if (!isRecord(item)) continue;
-      const sourceCode = stringValue(item.SourceCode);
+      const sourceCode = blockscoutString(item, "SourceCode", "source_code");
       if (!sourceCode) continue;
       files.push({
-        filename: stringValue(item.Filename) ?? "AdditionalSource.sol",
+        filename: blockscoutString(item, "Filename", "file_path") ?? "AdditionalSource.sol",
         sourceCode
       });
-    }
   }
 
   return dedupeSourceFiles(files).slice(0, 80);
+}
+
+function blockscoutSourceRecord(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  if (
+    "source_code" in value ||
+    "is_verified" in value ||
+    "name" in value ||
+    "abi" in value
+  ) {
+    return value;
+  }
+  return Array.isArray(value.result) && isRecord(value.result[0]) ? value.result[0] : null;
+}
+
+function blockscoutString(
+  record: Record<string, unknown>,
+  legacyKey: string,
+  v2Key: string
+): string | null {
+  return stringValue(record[legacyKey]) ?? stringValue(record[v2Key]);
 }
 
 function parseSourceCodePayload(sourceCode: string): ContractSourceResult["sourceFiles"] {

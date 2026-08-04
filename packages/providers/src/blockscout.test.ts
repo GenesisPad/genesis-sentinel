@@ -199,15 +199,46 @@ describe("createBlockscoutContractSourceProvider", () => {
   it("retries after a transient source request failure", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch")
       .mockRejectedValueOnce(new Error("temporary explorer failure"))
+      .mockRejectedValueOnce(new Error("temporary legacy explorer failure"))
       .mockResolvedValueOnce(jsonResponse({
-        result: [{ ContractName: "Token", ABI: "[]", SourceCode: "contract Token {}" }]
+        name: "Token", abi: [], source_code: "contract Token {}"
       }));
     const provider = createBlockscoutContractSourceProvider(config);
     const address = "0x0000000000000000000000000000000000000001" as const;
 
     expect((await provider.getVerification({ chainId: 4663, address })).status).toBe("UNAVAILABLE");
     expect((await provider.getVerification({ chainId: 4663, address })).status).toBe("VERIFIED");
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it("parses Blockscout v2 source, ABI, and additional sources", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({
+      name: "TokenV2",
+      compiler_version: "v0.8.24",
+      language: "solidity",
+      file_path: "src/TokenV2.sol",
+      source_code: "contract TokenV2 {}",
+      additional_sources: [{ file_path: "src/Lib.sol", source_code: "library Lib {}" }],
+      abi: [{ type: "function", name: "totalSupply", inputs: [], outputs: [] }]
+    }));
+    const provider = createBlockscoutContractSourceProvider(config);
+    const address = "0x0000000000000000000000000000000000000001" as const;
+
+    const verification = await provider.getVerification({ chainId: 4663, address });
+    const [source, abi] = await Promise.all([
+      provider.getSource({ chainId: 4663, address }),
+      provider.getAbi({ chainId: 4663, address })
+    ]);
+
+    expect(verification).toMatchObject({
+      status: "VERIFIED", contractName: "TokenV2", compilerVersion: "v0.8.24"
+    });
+    expect(source?.sourceFiles.map((file) => file.filename)).toEqual([
+      "src/TokenV2.sol", "src/Lib.sol"
+    ]);
+    expect(abi).toHaveLength(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchUrl(fetchSpy.mock.calls[0]![0])).toContain("/api/v2/smart-contracts/");
   });
 
   it("parses a verified multi-file standard-json-input payload", async () => {
