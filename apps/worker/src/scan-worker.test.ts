@@ -298,6 +298,7 @@ describe("scan worker orchestration", () => {
     expect(calls).toContain("simulation:BUY:UNSUPPORTED");
     expect(calls).toContain("risk:HIGH:60");
     expect(calls).toContain("stage:SCORING:SUCCEEDED");
+    expect(calls).toContain("state:COMPLETED");
   });
 
   it("persists holder concentration findings for Robinhood holder snapshots", async () => {

@@ -46,14 +46,36 @@ export interface BlockscoutChainConfig {
 export function createBlockscoutContractSourceProvider(
   config: BlockscoutChainConfig
 ): ContractSourceProvider {
-  const fetchLegacyRecord = (address: `0x${string}`) =>
-    fetchJson(
+  // Verification, source, and ABI consume the same payload. Share the request so large verified
+  // contracts do not trigger three downloads and intermittent explorer rate-limit failures.
+  const legacyRecordCache = new Map<string, Promise<Record<string, unknown> | null>>();
+  const maxCachedLegacyRecords = 32;
+  const fetchLegacyRecord = (address: `0x${string}`) => {
+    const key = address.toLowerCase();
+    const cached = legacyRecordCache.get(key);
+    if (cached) return cached;
+
+    const request = fetchJson(
       `${config.legacyApiBaseUrl}?module=contract&action=getsourcecode&address=${address}`
     ).then((response) =>
       isRecord(response) && Array.isArray(response.result) && isRecord(response.result[0])
         ? response.result[0]
         : null
-    );
+    ).catch(() => null);
+    legacyRecordCache.set(key, request);
+    void request.then((record) => {
+      if (!record) {
+        if (legacyRecordCache.get(key) === request) legacyRecordCache.delete(key);
+        return;
+      }
+      while (legacyRecordCache.size > maxCachedLegacyRecords) {
+        const oldestKey = legacyRecordCache.keys().next().value;
+        if (!oldestKey) break;
+        legacyRecordCache.delete(oldestKey);
+      }
+    });
+    return request;
+  };
 
   return {
     id: "blockscout",

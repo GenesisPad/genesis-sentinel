@@ -136,7 +136,7 @@ interface SelectorRule {
 }
 
 const detectorVersion = "0.1.0";
-export const scoringVersion = "0.4.0-context-aware-clone-and-distribution-risk";
+export const scoringVersion = "0.5.0-evidence-coverage-aware-zero-risk";
 export const simulationFoundationVersion = "0.1.0-unsupported";
 export const liquidityDiscoveryFoundationVersion = "0.1.0-unsupported";
 export const holderAnalysisFoundationVersion = "0.1.0-unsupported";
@@ -470,6 +470,8 @@ const burnAddresses = new Set([
 
 export interface OwnerAddressDetectorInput {
   getOwnerAddress(address: `0x${string}`): Promise<`0x${string}` | null>;
+  /** False when a verified ABI proves owner() is not part of this contract. */
+  ownerFunctionDeclared?: boolean | null;
 }
 
 export interface StorageReaderDetectorInput {
@@ -739,6 +741,18 @@ export const ownershipStatusDetector: SecurityDetector<OwnerAddressDetectorInput
     }
 
     if (owner === null) {
+      if (input.ownerFunctionDeclared === false) {
+        return {
+          detector: this.metadata,
+          checks: [{
+            code: "OWNER_FUNCTION_ABSENT",
+            outcome: "PASSED",
+            confidence: "HIGH",
+            evidence: [evidence]
+          }],
+          findings: []
+        };
+      }
       return {
         detector: this.metadata,
         checks: [
@@ -1508,6 +1522,8 @@ export const ownershipRolesAbiDetector: SecurityDetector<ContractSourceDetectorI
 };
 
 export interface RoleMembershipDetectorInput {
+  /** False when a verified ABI proves no AccessControl role surface exists. */
+  roleSurfaceDeclared?: boolean | null;
   /**
    * True when the contract implements AccessControlEnumerable (`getRoleMemberCount` is present
    * in the ABI). Without it, only `hasRole(role, candidateAddress)` checks against specific
@@ -1557,6 +1573,19 @@ export const roleMembershipDetector: SecurityDetector<RoleMembershipDetectorInpu
     const readableCounts = Object.entries(input.roleHolderCounts).filter(
       (entry): entry is [string, number] => entry[1] !== null
     );
+
+    if (input.roleSurfaceDeclared === false) {
+      return {
+        detector: this.metadata,
+        checks: [{
+          code: "ROLE_CONTROL_ABSENT",
+          outcome: "PASSED",
+          confidence: "HIGH",
+          evidence: [evidence]
+        }],
+        findings: []
+      };
+    }
 
     if (!input.supportsEnumeration || readableCounts.length === 0) {
       return {
@@ -1642,6 +1671,8 @@ export const roleMembershipDetector: SecurityDetector<RoleMembershipDetectorInpu
 export interface LiveTradingStateDetectorInput {
   readPausedState(): Promise<boolean | null>;
   readTradingOpenState(): Promise<boolean | null>;
+  /** False when a verified ABI proves none of the supported pause/trading controls exist. */
+  controlsDeclared?: boolean | null;
 }
 
 /**
@@ -1674,6 +1705,18 @@ export const liveTradingStateDetector: SecurityDetector<LiveTradingStateDetector
     }
 
     const findings: SecurityFinding[] = [];
+    if (input.controlsDeclared === false) {
+      return {
+        detector: this.metadata,
+        checks: [{
+          code: "LIVE_TRADING_CONTROLS_ABSENT",
+          outcome: "PASSED",
+          confidence: "HIGH",
+          evidence: [evidence]
+        }],
+        findings
+      };
+    }
     if (paused === true) {
       findings.push(
         createFinding({
@@ -3087,6 +3130,42 @@ export function scoreFindings(
   const unableToAssessReasons = collectUnableToAssessReasons(detectorResults);
 
   if (findings.length === 0) {
+    const conclusiveChecks = detectorResults.flatMap((result) =>
+      result.checks
+        .filter((check) => check.outcome === "PASSED" || check.outcome === "DETECTED")
+        .map((check) => ({ detectorId: result.detector.id, check }))
+    );
+    const hasCheck = (code: string) =>
+      conclusiveChecks.some(({ check }) => check.code === code);
+    const deeperCoverageDetectorIds = new Set([
+      "source-code-risk-patterns",
+      "holder-concentration",
+      "ledger-integrity",
+      "pool-reserve-integrity",
+      "honeypot-simulation"
+    ]);
+    const hasSufficientCoverage =
+      hasCheck("CONTRACT_CODE_PRESENT") &&
+      hasCheck("ERC20_METADATA_READ") &&
+      conclusiveChecks.some(({ detectorId }) => deeperCoverageDetectorIds.has(detectorId));
+
+    if (hasSufficientCoverage) {
+      return {
+        score: 0,
+        level: "LOW",
+        confidence: unableToAssessReasons.length > 0
+          ? "LOW"
+          : strongestConfidence(conclusiveChecks.map(({ check }) => check.confidence)),
+        categoryScores: [],
+        findingContributions: [],
+        unableToAssessReasons,
+        scannerVersion,
+        scoringVersion,
+        explanation:
+          "No weighted adverse findings were detected within the completed coverage, so the detected-risk score is 0. This is not a safety guarantee; unavailable checks remain listed as evidence gaps and reduce confidence."
+      };
+    }
+
     return {
       score: null,
       level: "UNABLE_TO_ASSESS",
@@ -3100,7 +3179,7 @@ export function scoreFindings(
       scannerVersion,
       scoringVersion,
       explanation:
-        "No detector findings were available to score. This reflects missing or inconclusive evidence, not confirmed safety."
+        "Coverage was insufficient to score detected risk. This reflects missing or inconclusive evidence, not confirmed safety."
     };
   }
 
