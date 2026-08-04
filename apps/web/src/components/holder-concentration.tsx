@@ -1,7 +1,10 @@
 import type { HolderInfo } from "@/lib/types";
-import { formatSupplyPct } from "@/lib/utils";
+import { formatSupplyPct, formatUtcDateTime } from "@/lib/utils";
 
 export function HolderConcentration({ holders, decimals }: { holders: HolderInfo; decimals?: number | null }) {
+  const lockExpiry = holders.tokenLock?.expiresAt
+    ? formatUtcDateTime(holders.tokenLock.expiresAt)
+    : null;
   const rows = [
     { label: "Top 1 holder", pct: holders.top1Pct, grad: "linear-gradient(90deg,#8a5a2b,#c07a2e)" },
     { label: "Top 5 holders", pct: holders.top5Pct, grad: "linear-gradient(90deg,#c07a2e,#f5a623)" },
@@ -41,7 +44,9 @@ export function HolderConcentration({ holders, decimals }: { holders: HolderInfo
           <p className="mt-1 text-xs text-muted">
             {holders.tokenLock.permanent
               ? "Permanently held in Genesis Universal Locker custody."
-              : `Locked until ${new Date(holders.tokenLock.expiresAt ?? "").toLocaleString()}.`}
+              : lockExpiry
+                ? `Locked until ${lockExpiry}.`
+                : "Lock expiry date unavailable."}
             {holders.tokenLock.lockerAddress
               ? ` Locker ${holders.tokenLock.lockerAddress.slice(0, 6)}…${holders.tokenLock.lockerAddress.slice(-4)}.`
               : ""}

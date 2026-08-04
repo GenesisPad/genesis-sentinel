@@ -50,3 +50,18 @@ export function timeAgo(iso: string): string {
   const d = Math.floor(h / 24);
   return `${d}d ago`;
 }
+
+/** Formats immutable on-chain expiry timestamps consistently, independent of browser locale. */
+export function formatUtcDateTime(value: string): string | null {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "UTC",
+    timeZoneName: "short"
+  }).format(date);
+}
