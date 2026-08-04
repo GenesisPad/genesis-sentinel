@@ -34,10 +34,10 @@ For Robinhood Chain (4663), `packages/providers/src/registry.ts` wires, in order
    does not index this appchain). Listed first per Milestone 1's requirement and so that any
    chain Sourcify does index is preferred automatically once added to the allowlist — no rate
    limits, free, and community-maintained.
-2. **Blockscout** (`blockscout.ts`) — the Robinhood Chain Blockscout instance's legacy
-   Etherscan-compatible `getsourcecode` endpoint for verification/source/ABI, plus the v2
-   `/smart-contracts/{address}` endpoint for proxy implementation detection. This is the only
-   provider that currently covers Robinhood Chain in practice.
+2. **Blockscout** (`blockscout.ts`) — the v2 `/smart-contracts/{address}` endpoint for
+   verification/source/ABI and proxy implementation detection, with the legacy
+   Etherscan-compatible `getsourcecode` endpoint as a fallback. This is the only provider that
+   currently covers Robinhood Chain in practice.
 
 `createContractSourceChain` tries providers in this order and returns the first genuinely
 `VERIFIED` result with non-empty source. A provider returning `UNAVAILABLE` (unsupported

@@ -44,9 +44,9 @@ Only Robinhood Chain (4663) has a registered `ProviderSet` today, combining:
 ## Fallback order
 
 **Source verification.** See `docs/architecture/provider-strategy.md` — Sourcify is tried
-first, then Blockscout's legacy Etherscan-compatible `getsourcecode` endpoint, first verified
-result wins. A chain with no provider support gets an explicit `UNAVAILABLE` `SourceProvider`
-result — never fabricated verification.
+first, then Blockscout v2 with its legacy Etherscan-compatible `getsourcecode` endpoint as a
+fallback; the first verified result wins. A chain with no provider support gets an explicit
+`UNAVAILABLE` `SourceProvider` result — never fabricated verification.
 
 **Token/market profile.** `collectTokenProfile` in `apps/worker/src/scan-worker.ts` merges
 three sources in this precedence: on-chain ERC-20 metadata (name/symbol/decimals only) →
