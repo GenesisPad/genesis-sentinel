@@ -1043,7 +1043,17 @@ export function createTelegramBot(options: {
       await sleep(pollDelayMs);
     }
 
-    const result = await getSummaryScanResult(scan.scanId);
+    // Prefer the latest persisted result for this token over the exact scanId just completed:
+    // a default (non-forceFresh) /scan reuses a deterministic, chat-scoped idempotency key, so
+    // repeat scans of the same token in the same chat can resolve to an old, already-persisted
+    // scan row. Falling back to that pinned row would keep showing whatever risk assessment
+    // existed when that row last completed even after scoring/detector fixes ship and other
+    // scans of the same token (web, API, other chats) have since produced a fresher result —
+    // the same staleness this fixes for the web token page (ADR 0030).
+    const result = options.getLatestScanResult
+      ? ((await options.getLatestScanResult(input.chainId, input.address)) ??
+        (await getSummaryScanResult(scan.scanId)))
+      : await getSummaryScanResult(scan.scanId);
     if (stageMessageId !== undefined) {
       await bot.api.deleteMessage(chatId, stageMessageId).catch(() => {});
     }
@@ -1815,12 +1825,24 @@ function tokenLockLine(
       ? null
       : `${formatSupplyPercentage(tokenLock.lockedPct)} of supply`
   ]).join(" · ");
-  const duration = tokenLock.permanent
-    ? "permanent"
-    : tokenLock.lockExpiry
-      ? `until ${new Date(tokenLock.lockExpiry).toISOString()}`
-      : "active";
+  const expiry = tokenLock.lockExpiry ? formatUtcDateTime(tokenLock.lockExpiry) : null;
+  const duration = tokenLock.permanent ? "permanent" : expiry ? `until ${expiry}` : "active";
   return `🔒 ${quantity || "Active token lock"} · ${duration}`;
+}
+
+/** Formats immutable on-chain expiry timestamps consistently, independent of server locale. */
+function formatUtcDateTime(value: string): string | null {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "UTC",
+    timeZoneName: "short"
+  }).format(date);
 }
 
 function devClusterLine(devCluster: {
